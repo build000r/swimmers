@@ -34,6 +34,7 @@ use crate::types::{
 
 const PANE_TAIL_LINES: usize = 300;
 const PANE_TAIL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+const SNAPSHOT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 const INPUT_DELIVERY_ACK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
 
 #[path = "session_mermaid.rs"]
@@ -1343,28 +1344,49 @@ async fn get_snapshot(
         }
     };
 
+    snapshot_request_response(request_terminal_snapshot(&handle).await)
+}
+
+async fn request_terminal_snapshot(
+    handle: &ActorHandle,
+) -> Result<TerminalSnapshot, SnapshotRequestError> {
     let (tx, rx) = oneshot::channel::<TerminalSnapshot>();
     if handle.send(SessionCommand::GetSnapshot(tx)).await.is_err() {
-        return error_response(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "INTERNAL_ERROR",
-            Some("session actor unavailable".to_string()),
-        );
+        return Err(SnapshotRequestError::ActorUnavailable);
     }
 
-    match tokio::time::timeout(std::time::Duration::from_secs(5), rx).await {
-        Ok(Ok(snapshot)) => (StatusCode::OK, Json(snapshot)).into_response(),
-        Ok(Err(_)) => error_response(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "INTERNAL_ERROR",
-            Some("actor dropped snapshot reply".to_string()),
-        ),
-        Err(_) => error_response(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "INTERNAL_ERROR",
-            Some("snapshot request timed out".to_string()),
-        ),
+    match tokio::time::timeout(SNAPSHOT_TIMEOUT, rx).await {
+        Ok(Ok(snapshot)) => Ok(snapshot),
+        Ok(Err(_)) => Err(SnapshotRequestError::ReplyDropped),
+        Err(_) => Err(SnapshotRequestError::Timeout),
     }
+}
+
+fn snapshot_request_response(result: Result<TerminalSnapshot, SnapshotRequestError>) -> Response {
+    match result {
+        Ok(snapshot) => (StatusCode::OK, Json(snapshot)).into_response(),
+        Err(error) => snapshot_error_response(error),
+    }
+}
+
+fn snapshot_error_response(error: SnapshotRequestError) -> Response {
+    let detail = match error {
+        SnapshotRequestError::ActorUnavailable => "session actor unavailable",
+        SnapshotRequestError::ReplyDropped => "actor dropped snapshot reply",
+        SnapshotRequestError::Timeout => "snapshot request timed out",
+    };
+    error_response(
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "INTERNAL_ERROR",
+        Some(detail.to_string()),
+    )
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SnapshotRequestError {
+    ActorUnavailable,
+    ReplyDropped,
+    Timeout,
 }
 
 // ---------------------------------------------------------------------------
@@ -4388,6 +4410,81 @@ esac
         let json = response_json(response).await;
         assert_eq!(json["session_id"], "sess-snap");
         assert_eq!(json["screen_text"], "hello from tmux");
+    }
+
+    #[tokio::test]
+    async fn get_snapshot_returns_not_found_for_missing_session() {
+        let response = get_snapshot(
+            Extension(AuthInfo::new(OPERATOR_SCOPES.to_vec())),
+            State(test_state()),
+            Path("sess-missing".to_string()),
+        )
+        .await
+        .into_response();
+
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        let json = response_json(response).await;
+        assert_eq!(json["code"], "SESSION_NOT_FOUND");
+    }
+
+    #[tokio::test]
+    async fn get_snapshot_returns_actor_unavailable_error() {
+        let state = test_state();
+        let (cmd_tx, cmd_rx) = mpsc::channel(1);
+        drop(cmd_rx);
+        state
+            .supervisor
+            .insert_test_handle(ActorHandle::test_handle("sess-dead", "tmux-dead", cmd_tx))
+            .await;
+
+        let response = get_snapshot(
+            Extension(AuthInfo::new(OPERATOR_SCOPES.to_vec())),
+            State(state),
+            Path("sess-dead".to_string()),
+        )
+        .await
+        .into_response();
+
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        let json = response_json(response).await;
+        assert_eq!(json["code"], "INTERNAL_ERROR");
+        assert_eq!(json["message"], "session actor unavailable");
+    }
+
+    #[tokio::test]
+    async fn request_terminal_snapshot_detects_dropped_reply() {
+        let state = test_state();
+        let (cmd_tx, mut cmd_rx) = mpsc::channel(1);
+        state
+            .supervisor
+            .insert_test_handle(ActorHandle::test_handle("sess-drop", "tmux-drop", cmd_tx))
+            .await;
+        tokio::spawn(async move {
+            if let Some(SessionCommand::GetSnapshot(reply)) = cmd_rx.recv().await {
+                drop(reply);
+            }
+        });
+
+        let handle = state
+            .supervisor
+            .get_session("sess-drop")
+            .await
+            .expect("test handle");
+        let err = request_terminal_snapshot(&handle)
+            .await
+            .expect_err("reply should be dropped");
+
+        assert_eq!(err, SnapshotRequestError::ReplyDropped);
+    }
+
+    #[tokio::test]
+    async fn snapshot_error_response_maps_timeout_detail() {
+        let response = snapshot_error_response(SnapshotRequestError::Timeout);
+
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        let json = response_json(response).await;
+        assert_eq!(json["code"], "INTERNAL_ERROR");
+        assert_eq!(json["message"], "snapshot request timed out");
     }
 
     #[tokio::test]

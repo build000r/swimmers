@@ -537,24 +537,39 @@ pub(crate) fn mermaid_set_background_cell_color(
     y: i32,
     color: Color,
 ) {
-    if x < content_rect.x as i32
-        || x >= content_rect.right() as i32
-        || y < content_rect.y as i32
-        || y >= content_rect.bottom() as i32
-    {
-        return;
+    if let Some(cell) = mermaid_background_cell_mut(cells, content_rect, x, y) {
+        mermaid_recolor_background_cell(cell, color);
     }
-    let grid_x = (x - content_rect.x as i32) as usize;
-    let grid_y = (y - content_rect.y as i32) as usize;
-    let Some(row) = cells.get_mut(grid_y) else {
-        return;
-    };
-    let Some(cell) = row.get_mut(grid_x) else {
-        return;
-    };
-    if cell.ch != ' ' {
+}
+
+fn mermaid_background_cell_mut(
+    cells: &mut [Vec<Cell>],
+    content_rect: Rect,
+    x: i32,
+    y: i32,
+) -> Option<&mut Cell> {
+    let (grid_x, grid_y) = mermaid_background_cell_indices(content_rect, x, y)?;
+    cells.get_mut(grid_y)?.get_mut(grid_x)
+}
+
+fn mermaid_background_cell_indices(content_rect: Rect, x: i32, y: i32) -> Option<(usize, usize)> {
+    let left = content_rect.x as i32;
+    let right = content_rect.right() as i32;
+    let top = content_rect.y as i32;
+    let bottom = content_rect.bottom() as i32;
+
+    (x >= left && x < right && y >= top && y < bottom)
+        .then(|| ((x - left) as usize, (y - top) as usize))
+}
+
+fn mermaid_recolor_background_cell(cell: &mut Cell, color: Color) {
+    if mermaid_background_cell_can_take_color(cell) {
         cell.fg = color;
     }
+}
+
+fn mermaid_background_cell_can_take_color(cell: &Cell) -> bool {
+    cell.ch != ' '
 }
 
 pub(crate) fn mermaid_apply_rect_border_colors(
@@ -2196,22 +2211,12 @@ fn mermaid_best_packed_detail_layout(
     specs: &[MermaidPackedDetailBoxSize],
     viewport: MermaidPackedDetailViewport,
 ) -> Option<MermaidPackedDetailLayout> {
-    let mut best_layout = None::<(MermaidPackedDetailLayout, f32)>;
-
-    for column_count in 1..=specs.len() {
-        let Some(candidate) =
+    (1..=specs.len())
+        .filter_map(|column_count| {
             mermaid_packed_detail_layout_for_columns(specs, viewport, column_count)
-        else {
-            continue;
-        };
-
-        match best_layout {
-            Some((_, best_score)) if best_score >= candidate.1 => {}
-            _ => best_layout = Some(candidate),
-        }
-    }
-
-    best_layout.map(|(layout, _)| layout)
+        })
+        .max_by(|(_, left_score), (_, right_score)| left_score.total_cmp(right_score))
+        .map(|(layout, _)| layout)
 }
 
 fn mermaid_fallback_packed_detail_layout(
@@ -2632,6 +2637,63 @@ mod mermaid_focus_tests {
     }
 
     #[test]
+    fn mermaid_best_packed_detail_layout_prefers_highest_scoring_fit() {
+        let specs = vec![
+            MermaidPackedDetailBoxSize {
+                outer_width: 4,
+                outer_height: 3,
+            },
+            MermaidPackedDetailBoxSize {
+                outer_width: 4,
+                outer_height: 3,
+            },
+            MermaidPackedDetailBoxSize {
+                outer_width: 4,
+                outer_height: 3,
+            },
+            MermaidPackedDetailBoxSize {
+                outer_width: 4,
+                outer_height: 3,
+            },
+        ];
+        let viewport = MermaidPackedDetailViewport {
+            width: 20,
+            height: 10,
+            gap_x: 1,
+            gap_y: 1,
+        };
+
+        let layout = mermaid_best_packed_detail_layout(&specs, viewport).expect("layout");
+
+        assert_eq!(layout.column_count, 3);
+        assert_eq!(layout.row_widths, vec![14, 4]);
+        assert_eq!(layout.row_heights, vec![3, 3]);
+        assert_eq!(layout.cluster_height, 7);
+    }
+
+    #[test]
+    fn mermaid_best_packed_detail_layout_returns_none_when_no_columns_fit() {
+        let specs = vec![
+            MermaidPackedDetailBoxSize {
+                outer_width: 12,
+                outer_height: 3,
+            },
+            MermaidPackedDetailBoxSize {
+                outer_width: 12,
+                outer_height: 3,
+            },
+        ];
+        let viewport = MermaidPackedDetailViewport {
+            width: 10,
+            height: 10,
+            gap_x: 1,
+            gap_y: 1,
+        };
+
+        assert!(mermaid_best_packed_detail_layout(&specs, viewport).is_none());
+    }
+
+    #[test]
     fn mermaid_special_renderer_maps_er_outline_and_detail_states() {
         assert_eq!(
             mermaid_special_renderer_for_view(MermaidViewState::ErEntities),
@@ -2816,6 +2878,80 @@ mod mermaid_focus_tests {
             &target,
             2
         ));
+    }
+
+    #[test]
+    fn mermaid_set_background_cell_color_recolors_in_bounds_non_space_cell() {
+        let mut cells = vec![vec![cell('-', MERMAID_CONNECTOR_COLOR)]];
+
+        mermaid_set_background_cell_color(
+            &mut cells,
+            Rect {
+                x: 10,
+                y: 20,
+                width: 1,
+                height: 1,
+            },
+            10,
+            20,
+            Color::Yellow,
+        );
+
+        assert_eq!(cells[0][0], cell('-', Color::Yellow));
+    }
+
+    #[test]
+    fn mermaid_set_background_cell_color_preserves_space_cell_color() {
+        let mut cells = vec![vec![cell(' ', Color::Reset)]];
+
+        mermaid_set_background_cell_color(
+            &mut cells,
+            Rect {
+                x: 10,
+                y: 20,
+                width: 1,
+                height: 1,
+            },
+            10,
+            20,
+            Color::Yellow,
+        );
+
+        assert_eq!(cells[0][0], cell(' ', Color::Reset));
+    }
+
+    #[test]
+    fn mermaid_set_background_cell_color_ignores_coordinates_outside_content_rect() {
+        let content_rect = Rect {
+            x: 10,
+            y: 20,
+            width: 2,
+            height: 2,
+        };
+
+        for (x, y) in [(9, 20), (12, 20), (10, 19), (10, 22)] {
+            let mut cells = vec![vec![cell('-', MERMAID_CONNECTOR_COLOR)]];
+
+            mermaid_set_background_cell_color(&mut cells, content_rect, x, y, Color::Yellow);
+
+            assert_eq!(cells[0][0], cell('-', MERMAID_CONNECTOR_COLOR), "{x},{y}");
+        }
+    }
+
+    #[test]
+    fn mermaid_set_background_cell_color_ignores_missing_cached_cell() {
+        let content_rect = Rect {
+            x: 10,
+            y: 20,
+            width: 2,
+            height: 2,
+        };
+        let mut cells = vec![vec![cell('-', MERMAID_CONNECTOR_COLOR)]];
+
+        mermaid_set_background_cell_color(&mut cells, content_rect, 11, 20, Color::Yellow);
+        mermaid_set_background_cell_color(&mut cells, content_rect, 10, 21, Color::Yellow);
+
+        assert_eq!(cells[0][0], cell('-', MERMAID_CONNECTOR_COLOR));
     }
 
     #[test]

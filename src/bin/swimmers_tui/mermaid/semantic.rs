@@ -18,27 +18,15 @@ pub(crate) fn mermaid_is_divider_line(line: &str) -> bool {
 
 pub(crate) fn mermaid_is_numeric_prefix(token: &str) -> bool {
     let trimmed = token.trim();
-    if trimmed.is_empty() {
-        return false;
-    }
-    let mut chars = trimmed.chars().peekable();
-    let mut saw_digit = false;
-    while let Some(ch) = chars.peek().copied() {
-        if ch.is_ascii_digit() {
-            saw_digit = true;
-            chars.next();
-            continue;
-        }
-        break;
-    }
-    if !saw_digit {
-        return false;
-    }
-    match chars.next() {
-        None => true,
-        Some('.') | Some(')') | Some(':') => chars.next().is_none(),
-        _ => false,
-    }
+    let digit_bytes = trimmed
+        .bytes()
+        .take_while(|byte| byte.is_ascii_digit())
+        .count();
+    digit_bytes > 0 && mermaid_numeric_prefix_suffix_valid(&trimmed[digit_bytes..])
+}
+
+fn mermaid_numeric_prefix_suffix_valid(suffix: &str) -> bool {
+    matches!(suffix, "" | "." | ")" | ":")
 }
 
 pub(crate) fn mermaid_summary_stopword(token: &str) -> bool {
@@ -1225,35 +1213,54 @@ fn push_edge_label_block(
 /// Compact-row packing: group rows per owner so multi-line compact labels
 /// occupy consecutive rows starting from the owner's first occupied row.
 fn pack_compact_rows(candidates: &mut [MermaidProjectedCandidate], max_row: u16) {
+    let compact_owner_rows = compact_candidate_owner_rows(candidates);
+    candidates
+        .iter_mut()
+        .filter(|candidate| candidate.compact_rows)
+        .for_each(|candidate| {
+            pack_compact_candidate_row(candidate, &compact_owner_rows, max_row);
+        });
+}
+
+fn compact_candidate_owner_rows(
+    candidates: &[MermaidProjectedCandidate],
+) -> HashMap<String, Vec<u16>> {
     let mut compact_owner_rows = HashMap::<String, Vec<u16>>::new();
-    for candidate in candidates.iter() {
-        if !candidate.compact_rows {
-            continue;
-        }
-        compact_owner_rows
-            .entry(candidate.owner_key.clone())
-            .or_default()
-            .push(candidate.y);
-    }
-    for rows in compact_owner_rows.values_mut() {
-        rows.sort_unstable();
-        rows.dedup();
-    }
-    for candidate in candidates.iter_mut() {
-        if !candidate.compact_rows {
-            continue;
-        }
-        let Some(rows) = compact_owner_rows.get(&candidate.owner_key) else {
-            continue;
-        };
-        let Some(base_row) = rows.first().copied() else {
-            continue;
-        };
-        let Some(compact_offset) = rows.iter().position(|row| *row == candidate.y) else {
-            continue;
-        };
-        candidate.y = base_row.saturating_add(compact_offset as u16).min(max_row);
-    }
+    candidates
+        .iter()
+        .filter(|candidate| candidate.compact_rows)
+        .for_each(|candidate| {
+            compact_owner_rows
+                .entry(candidate.owner_key.clone())
+                .or_default()
+                .push(candidate.y);
+        });
+    compact_owner_rows
+        .values_mut()
+        .for_each(|rows| compact_candidate_rows_sort_dedup(rows));
+    compact_owner_rows
+}
+
+fn compact_candidate_rows_sort_dedup(rows: &mut Vec<u16>) {
+    rows.sort_unstable();
+    rows.dedup();
+}
+
+fn pack_compact_candidate_row(
+    candidate: &mut MermaidProjectedCandidate,
+    compact_owner_rows: &HashMap<String, Vec<u16>>,
+    max_row: u16,
+) {
+    let Some(rows) = compact_owner_rows.get(&candidate.owner_key) else {
+        return;
+    };
+    let Some(base_row) = rows.first().copied() else {
+        return;
+    };
+    let Some(compact_offset) = rows.iter().position(|row| *row == candidate.y) else {
+        return;
+    };
+    candidate.y = base_row.saturating_add(compact_offset as u16).min(max_row);
 }
 
 /// In L2/L3 view, suppress owner-summary lines when the same owner has
@@ -1427,32 +1434,49 @@ fn mermaid_first_available_candidate_row(
     collision_padding: u16,
     bounds: MermaidProjectionBounds,
 ) -> Option<(u16, u16, u16)> {
-    let start = candidate.x;
+    let (padded_start, padded_end) = mermaid_candidate_padded_span(candidate, collision_padding);
+
+    mermaid_candidate_row_order(candidate)
+        .into_iter()
+        .filter(|row| mermaid_candidate_row_in_bounds(*row, bounds))
+        .map(|row| row as u16)
+        .find(|row| !mermaid_row_overlaps(*row, padded_start, padded_end, occupied_rows))
+        .map(|row| (row, padded_start, padded_end))
+}
+
+fn mermaid_candidate_padded_span(
+    candidate: &MermaidProjectedCandidate,
+    collision_padding: u16,
+) -> (u16, u16) {
     let end = candidate
         .x
         .saturating_add(display_width(&candidate.text).max(1));
-    let padded_start = start.saturating_sub(collision_padding);
-    let padded_end = end.saturating_add(collision_padding);
+    (
+        candidate.x.saturating_sub(collision_padding),
+        end.saturating_add(collision_padding),
+    )
+}
 
-    for row in mermaid_candidate_row_order(candidate) {
-        if row < bounds.top || row >= bounds.bottom {
-            continue;
-        }
-        let row = row as u16;
-        let overlaps = occupied_rows
-            .get(&row)
-            .map(|ranges| {
-                ranges
-                    .iter()
-                    .any(|(left, right)| padded_start < *right && padded_end > *left)
-            })
-            .unwrap_or(false);
-        if !overlaps {
-            return Some((row, padded_start, padded_end));
-        }
-    }
+fn mermaid_candidate_row_in_bounds(row: i32, bounds: MermaidProjectionBounds) -> bool {
+    row >= bounds.top && row < bounds.bottom
+}
 
-    None
+fn mermaid_row_overlaps(
+    row: u16,
+    padded_start: u16,
+    padded_end: u16,
+    occupied_rows: &HashMap<u16, Vec<(u16, u16)>>,
+) -> bool {
+    occupied_rows
+        .get(&row)
+        .map(|ranges| mermaid_any_range_overlaps(ranges, padded_start, padded_end))
+        .unwrap_or(false)
+}
+
+fn mermaid_any_range_overlaps(ranges: &[(u16, u16)], padded_start: u16, padded_end: u16) -> bool {
+    ranges
+        .iter()
+        .any(|(left, right)| padded_start < *right && padded_end > *left)
 }
 
 pub(crate) fn project_mermaid_semantic_lines(
@@ -1513,6 +1537,186 @@ pub(crate) fn project_mermaid_semantic_lines(
 
     projected.sort_by_key(|line| (line.y, line.x));
     projected
+}
+
+#[cfg(test)]
+mod mermaid_semantic_row_packing_tests {
+    use super::*;
+
+    fn projected_candidate(
+        owner_key: &str,
+        kind: MermaidSemanticKind,
+        x: u16,
+        y: u16,
+        text: &str,
+        compact_rows: bool,
+    ) -> MermaidProjectedCandidate {
+        MermaidProjectedCandidate {
+            priority: kind.priority(),
+            area_rank: 0,
+            kind,
+            owner_key: owner_key.to_string(),
+            compact_rows,
+            source_index: 0,
+            x,
+            y,
+            text: text.to_string(),
+            color: Color::White,
+        }
+    }
+
+    fn projection_bounds(top: i32, bottom: i32) -> MermaidProjectionBounds {
+        MermaidProjectionBounds {
+            left: 0,
+            right: 80,
+            top,
+            bottom,
+        }
+    }
+
+    #[test]
+    fn mermaid_numeric_prefix_accepts_digits_with_single_optional_marker() {
+        for token in ["1", "01", "2.", "3)", "4:", "  42.  "] {
+            assert!(mermaid_is_numeric_prefix(token), "{token:?}");
+        }
+    }
+
+    #[test]
+    fn mermaid_numeric_prefix_rejects_missing_digits_or_extra_suffix() {
+        for token in ["", ".", "a1", "1..", "1) item", "1-", "one:"] {
+            assert!(!mermaid_is_numeric_prefix(token), "{token:?}");
+        }
+    }
+
+    #[test]
+    fn mermaid_first_available_candidate_row_uses_nudged_rows_after_collision() {
+        let candidate = projected_candidate(
+            "node:a",
+            MermaidSemanticKind::ClassMember,
+            10,
+            5,
+            "value",
+            false,
+        );
+        let occupied_rows = HashMap::from([(5, vec![(9, 16)])]);
+
+        assert_eq!(
+            mermaid_first_available_candidate_row(
+                &candidate,
+                &occupied_rows,
+                1,
+                projection_bounds(0, 10)
+            ),
+            Some((6, 9, 16))
+        );
+    }
+
+    #[test]
+    fn mermaid_first_available_candidate_row_allows_touching_ranges() {
+        let candidate = projected_candidate(
+            "node:a",
+            MermaidSemanticKind::ClassMember,
+            10,
+            5,
+            "value",
+            false,
+        );
+        let occupied_rows = HashMap::from([(5, vec![(0, 9), (16, 20)])]);
+
+        assert_eq!(
+            mermaid_first_available_candidate_row(
+                &candidate,
+                &occupied_rows,
+                1,
+                projection_bounds(0, 10)
+            ),
+            Some((5, 9, 16))
+        );
+    }
+
+    #[test]
+    fn mermaid_first_available_candidate_row_skips_out_of_bounds_rows() {
+        let candidate = projected_candidate(
+            "node:a",
+            MermaidSemanticKind::ClassMember,
+            10,
+            1,
+            "value",
+            false,
+        );
+
+        assert_eq!(
+            mermaid_first_available_candidate_row(
+                &candidate,
+                &HashMap::new(),
+                0,
+                projection_bounds(2, 4)
+            ),
+            Some((2, 10, 15))
+        );
+    }
+
+    #[test]
+    fn pack_compact_rows_remaps_unique_owner_rows_to_consecutive_rows() {
+        let mut candidates = vec![
+            projected_candidate(
+                "node:a",
+                MermaidSemanticKind::NodeTitle,
+                1,
+                10,
+                "title",
+                true,
+            ),
+            projected_candidate(
+                "node:a",
+                MermaidSemanticKind::ClassMember,
+                1,
+                12,
+                "first",
+                true,
+            ),
+            projected_candidate(
+                "node:a",
+                MermaidSemanticKind::ClassMember,
+                1,
+                12,
+                "second",
+                true,
+            ),
+            projected_candidate(
+                "node:a",
+                MermaidSemanticKind::ClassMember,
+                1,
+                30,
+                "third",
+                true,
+            ),
+            projected_candidate(
+                "node:b",
+                MermaidSemanticKind::NodeTitle,
+                1,
+                7,
+                "other",
+                true,
+            ),
+            projected_candidate(
+                "edge:a",
+                MermaidSemanticKind::EdgeLabel,
+                1,
+                20,
+                "edge",
+                false,
+            ),
+        ];
+
+        pack_compact_rows(&mut candidates, 12);
+
+        let rows = candidates
+            .iter()
+            .map(|candidate| candidate.y)
+            .collect::<Vec<_>>();
+        assert_eq!(rows, vec![10, 11, 11, 12, 7, 20]);
+    }
 }
 
 #[cfg(test)]

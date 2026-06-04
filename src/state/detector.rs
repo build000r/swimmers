@@ -496,30 +496,64 @@ impl StateDetector {
         visible: &mut Vec<u8>,
         markers: &mut Vec<PositionedOsc133Marker>,
     ) {
+        if matches!(self.escape_state, EscapeState::Normal) {
+            self.consume_normal_byte(b, visible);
+        } else if self.consume_control_escape_state_byte(b) {
+            // Handled by ESC/CSI dispatch.
+        } else if self.consume_osc_state_byte(b, visible.len(), markers) {
+            // Handled by OSC dispatch.
+        } else {
+            self.consume_private_string_state_byte(b);
+        }
+    }
+
+    fn consume_control_escape_state_byte(&mut self, b: u8) -> bool {
         match &mut self.escape_state {
-            EscapeState::Normal => self.consume_normal_byte(b, visible),
-            EscapeState::Esc => self.consume_escape_byte(b),
+            EscapeState::Esc => {
+                self.consume_escape_byte(b);
+                true
+            }
             EscapeState::EscIntermediate { consumed } => {
                 if let Some(next_state) = Self::consume_escape_intermediate_byte(b, consumed) {
                     self.escape_state = next_state;
                 }
+                true
             }
             EscapeState::Csi { consumed } => {
                 if let Some(next_state) = Self::consume_csi_byte(b, consumed) {
                     self.escape_state = next_state;
                 }
+                true
             }
-            EscapeState::Osc {
-                buf,
-                esc_pending,
-                consumed,
-            } => {
-                if let Some(next_state) =
-                    Self::consume_osc_byte(b, visible.len(), buf, esc_pending, consumed, markers)
-                {
-                    self.escape_state = next_state;
-                }
-            }
+            _ => false,
+        }
+    }
+
+    fn consume_osc_state_byte(
+        &mut self,
+        b: u8,
+        visible_offset: usize,
+        markers: &mut Vec<PositionedOsc133Marker>,
+    ) -> bool {
+        let EscapeState::Osc {
+            buf,
+            esc_pending,
+            consumed,
+        } = &mut self.escape_state
+        else {
+            return false;
+        };
+
+        if let Some(next_state) =
+            Self::consume_osc_byte(b, visible_offset, buf, esc_pending, consumed, markers)
+        {
+            self.escape_state = next_state;
+        }
+        true
+    }
+
+    fn consume_private_string_state_byte(&mut self, b: u8) -> bool {
+        match &mut self.escape_state {
             EscapeState::Dcs {
                 esc_pending,
                 consumed,
@@ -537,7 +571,9 @@ impl StateDetector {
                 {
                     self.escape_state = next_state;
                 }
+                true
             }
+            _ => false,
         }
     }
 
@@ -1179,6 +1215,29 @@ mod tests {
                 .is_none()
         );
         assert!(!esc_pending);
+    }
+
+    #[test]
+    fn consume_chunk_byte_dispatches_visible_csi_and_private_strings() {
+        let mut d = StateDetector::new();
+        let parsed = d.parse_chunk(b"before\x1b[31mred\x1b[0m\x1bPignored\x1b\\after");
+
+        assert_eq!(parsed.visible, "beforeredafter");
+        assert!(parsed.markers.is_empty());
+    }
+
+    #[test]
+    fn consume_chunk_byte_records_osc_marker_at_visible_offset() {
+        let mut d = StateDetector::new();
+        let parsed = d.parse_chunk(b"pre\x1b]133;C;cmd=ls\x07post");
+
+        assert_eq!(parsed.visible, "prepost");
+        assert_eq!(parsed.markers.len(), 1);
+        assert_eq!(parsed.markers[0].visible_offset, 3);
+        assert!(matches!(
+            parsed.markers[0].marker,
+            Osc133Marker::Command(ref command) if command == "ls"
+        ));
     }
 
     #[test]

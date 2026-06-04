@@ -40,6 +40,13 @@ pub(crate) struct MermaidErPackPlan {
     pub(crate) cluster_height: u16,
 }
 
+struct MermaidErPackedRender {
+    label_rects: HashMap<String, MermaidOutlineLabelRect>,
+    outline_edges: Vec<MermaidOutlineEdge>,
+    owner_colors: HashMap<String, Color>,
+    projected: Vec<MermaidProjectedLine>,
+}
+
 #[derive(Default)]
 struct MermaidErAttrParts {
     name_source_index: Option<usize>,
@@ -128,30 +135,41 @@ pub(crate) fn mermaid_build_er_packed_boxes(
     let source_indices_by_owner = mermaid_er_source_indices_by_owner(&prepared.semantic_lines);
     let ordered_nodes = mermaid_er_ordered_layout_nodes(&prepared.layout);
 
-    let mut out = Vec::new();
-    for node in ordered_nodes {
-        let owner_key = mermaid_outline_node_key(&node.id);
-        let Some(source_indices) = source_indices_by_owner.get(&owner_key) else {
-            continue;
-        };
+    ordered_nodes
+        .into_iter()
+        .filter_map(|node| {
+            mermaid_build_er_packed_box(
+                node,
+                &prepared.semantic_lines,
+                &source_indices_by_owner,
+                view_state,
+            )
+        })
+        .collect()
+}
 
-        let (title_lines, attr_rows) =
-            mermaid_build_er_box_content(&prepared.semantic_lines, source_indices, view_state);
+fn mermaid_build_er_packed_box(
+    node: &mermaid_rs_renderer::NodeLayout,
+    semantic_lines: &[MermaidSemanticLine],
+    source_indices_by_owner: &HashMap<String, Vec<usize>>,
+    view_state: MermaidViewState,
+) -> Option<MermaidErPackedBox> {
+    let owner_key = mermaid_outline_node_key(&node.id);
+    let source_indices = source_indices_by_owner.get(&owner_key)?;
+    let (title_lines, attr_rows) =
+        mermaid_build_er_box_content(semantic_lines, source_indices, view_state);
 
-        if title_lines.is_empty() && attr_rows.is_empty() {
-            continue;
-        }
-
-        out.push(MermaidErPackedBox {
-            owner_key,
-            sort_x: node.x,
-            sort_y: node.y,
-            title_lines,
-            attr_rows,
-        });
+    if title_lines.is_empty() && attr_rows.is_empty() {
+        return None;
     }
 
-    out
+    Some(MermaidErPackedBox {
+        owner_key,
+        sort_x: node.x,
+        sort_y: node.y,
+        title_lines,
+        attr_rows,
+    })
 }
 
 pub(crate) fn mermaid_er_source_indices_by_owner(
@@ -1108,29 +1126,38 @@ pub(crate) fn render_mermaid_er_packed_lines(
         return Ok(false);
     }
 
+    let Some(render) = mermaid_prepare_er_packed_render(prepared, content_rect, view_state) else {
+        return Ok(false);
+    };
+    mermaid_cache_er_packed_render(viewer, content_rect, render);
+    Ok(true)
+}
+
+fn mermaid_prepare_er_packed_render(
+    prepared: &MermaidPreparedRender,
+    content_rect: Rect,
+    view_state: MermaidViewState,
+) -> Option<MermaidErPackedRender> {
     let mut boxes = mermaid_build_er_packed_boxes(prepared, view_state);
     mermaid_sort_er_packed_boxes(&prepared.layout, &mut boxes);
     if boxes.is_empty() {
-        return Ok(false);
+        return None;
     }
 
     let owner_colors = mermaid_owner_accent_map(&prepared.semantic_lines);
     let (projected, label_rects) =
         mermaid_project_er_packed_lines(content_rect, &boxes, view_state, &owner_colors);
     if projected.is_empty() || label_rects.is_empty() {
-        return Ok(false);
+        return None;
     }
 
     let outline_edges = mermaid_visible_er_outline_edges(&prepared.layout, &label_rects);
-    mermaid_cache_er_packed_render(
-        viewer,
-        content_rect,
-        &label_rects,
+    Some(MermaidErPackedRender {
+        label_rects,
         outline_edges,
-        &owner_colors,
+        owner_colors,
         projected,
-    );
-    Ok(true)
+    })
 }
 
 fn mermaid_sort_er_packed_boxes(layout: &MermaidLayout, boxes: &mut [MermaidErPackedBox]) {
@@ -1178,20 +1205,20 @@ fn mermaid_visible_er_outline_edges(
 fn mermaid_cache_er_packed_render(
     viewer: &mut MermaidViewerState,
     content_rect: Rect,
-    label_rects: &HashMap<String, MermaidOutlineLabelRect>,
-    outline_edges: Vec<MermaidOutlineEdge>,
-    owner_colors: &HashMap<String, Color>,
-    projected: Vec<MermaidProjectedLine>,
+    render: MermaidErPackedRender,
 ) {
-    viewer.cached_lines =
-        mermaid_render_compact_detail_background(content_rect, label_rects, outline_edges);
+    viewer.cached_lines = mermaid_render_compact_detail_background(
+        content_rect,
+        &render.label_rects,
+        render.outline_edges,
+    );
     viewer.cached_background_cells =
         mermaid_background_cells_from_lines(&viewer.cached_lines, MERMAID_CONNECTOR_COLOR);
     mermaid_apply_rect_border_colors(
         &mut viewer.cached_background_cells,
         content_rect,
-        label_rects,
-        owner_colors,
+        &render.label_rects,
+        &render.owner_colors,
     );
-    viewer.cached_semantic_lines = projected;
+    viewer.cached_semantic_lines = render.projected;
 }

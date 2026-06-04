@@ -361,38 +361,61 @@ fn collect_plans_from_root(
         return;
     };
     for entry in entries.flatten() {
-        let Ok(file_type) = entry.file_type() else {
-            continue;
-        };
-        if !file_type.is_dir() {
-            continue;
+        if let Some(plan) = overlay_plan_entry_from_dir_entry(entry, client_label, kind) {
+            out.push(plan);
         }
-        let plan_dir = entry.path();
-        let slug = match plan_dir.file_name().and_then(|n| n.to_str()) {
-            Some(name) => name.to_string(),
-            None => continue,
-        };
-        // Skip any plan dir whose path mentions "archived" anywhere — the user
-        // wants live plans only.
-        if plan_dir
-            .components()
-            .any(|c| c.as_os_str().to_string_lossy().contains("archived"))
-        {
-            continue;
-        }
-        let schema_path = plan_dir.join("schema.mmd");
-        if !schema_path.is_file() {
-            continue;
-        }
-        let updated_at = plan_dir_latest_mtime(&plan_dir);
-        out.push(OverlayPlanEntry {
-            slug,
-            client_label: client_label.to_string(),
-            kind,
-            schema_path,
-            updated_at,
-        });
     }
+}
+
+fn overlay_plan_entry_from_dir_entry(
+    entry: std::fs::DirEntry,
+    client_label: &str,
+    kind: &'static str,
+) -> Option<OverlayPlanEntry> {
+    if !entry.file_type().ok()?.is_dir() {
+        return None;
+    }
+    overlay_plan_entry_from_dir(entry.path(), client_label, kind)
+}
+
+fn overlay_plan_entry_from_dir(
+    plan_dir: PathBuf,
+    client_label: &str,
+    kind: &'static str,
+) -> Option<OverlayPlanEntry> {
+    let slug = overlay_plan_slug(&plan_dir)?;
+    if is_archived_overlay_plan_path(&plan_dir) {
+        return None;
+    }
+    let schema_path = overlay_plan_schema_path(&plan_dir)?;
+    let updated_at = plan_dir_latest_mtime(&plan_dir);
+    Some(OverlayPlanEntry {
+        slug,
+        client_label: client_label.to_string(),
+        kind,
+        schema_path,
+        updated_at,
+    })
+}
+
+fn overlay_plan_slug(plan_dir: &Path) -> Option<String> {
+    plan_dir
+        .file_name()
+        .and_then(|name| name.to_str())
+        .map(str::to_string)
+}
+
+fn is_archived_overlay_plan_path(plan_dir: &Path) -> bool {
+    // Skip any plan dir whose path mentions "archived" anywhere; callers only
+    // want live plans.
+    plan_dir
+        .components()
+        .any(|component| component.as_os_str().to_string_lossy().contains("archived"))
+}
+
+fn overlay_plan_schema_path(plan_dir: &Path) -> Option<PathBuf> {
+    let schema_path = plan_dir.join("schema.mmd");
+    schema_path.is_file().then_some(schema_path)
 }
 
 fn plan_dir_latest_mtime(dir: &Path) -> Option<SystemTime> {
