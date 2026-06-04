@@ -145,45 +145,71 @@ fn parse_jsonl_lines(buf: &[u8]) -> Vec<Value> {
         .collect()
 }
 
+enum JsonlSegmentParse {
+    Entry(JsonlEntry),
+    Skip { consumed_offset: Option<u64> },
+    Stop,
+}
+
+fn parse_jsonl_segment(
+    segment: &[u8],
+    base_offset: u64,
+    segment_start: usize,
+    segment_end: usize,
+) -> JsonlSegmentParse {
+    let complete_line = segment.ends_with(b"\n");
+    let mut line = segment;
+    if complete_line {
+        line = &line[..line.len().saturating_sub(1)];
+    }
+    if line.ends_with(b"\r") {
+        line = &line[..line.len().saturating_sub(1)];
+    }
+
+    let line_end_offset = base_offset + segment_end as u64;
+    if line.is_empty() {
+        return JsonlSegmentParse::Skip {
+            consumed_offset: complete_line.then_some(line_end_offset),
+        };
+    }
+
+    let raw = String::from_utf8_lossy(line).to_string();
+    match serde_json::from_str::<Value>(&raw) {
+        Ok(value) => JsonlSegmentParse::Entry(JsonlEntry {
+            value,
+            raw,
+            byte_start: base_offset + segment_start as u64,
+            byte_end: line_end_offset,
+        }),
+        Err(_) if complete_line => JsonlSegmentParse::Skip {
+            consumed_offset: Some(line_end_offset),
+        },
+        Err(_) => JsonlSegmentParse::Stop,
+    }
+}
+
 fn parse_jsonl_entries_and_offset(buf: &[u8], base_offset: u64) -> (Vec<JsonlEntry>, u64) {
     let mut entries = Vec::new();
     let mut cursor = 0usize;
     let mut consumed_offset = base_offset;
 
     for segment in buf.split_inclusive(|byte| *byte == b'\n') {
-        let complete_line = segment.ends_with(b"\n");
         let segment_start = cursor;
         cursor += segment.len();
 
-        let mut line = segment;
-        if complete_line {
-            line = &line[..line.len().saturating_sub(1)];
-        }
-        if line.ends_with(b"\r") {
-            line = &line[..line.len().saturating_sub(1)];
-        }
-        if line.is_empty() {
-            if complete_line {
-                consumed_offset = base_offset + cursor as u64;
+        match parse_jsonl_segment(segment, base_offset, segment_start, cursor) {
+            JsonlSegmentParse::Entry(entry) => {
+                consumed_offset = entry.byte_end;
+                entries.push(entry);
             }
-            continue;
+            JsonlSegmentParse::Skip {
+                consumed_offset: Some(offset),
+            } => consumed_offset = offset,
+            JsonlSegmentParse::Skip {
+                consumed_offset: None,
+            } => {}
+            JsonlSegmentParse::Stop => break,
         }
-
-        let raw = String::from_utf8_lossy(line).to_string();
-        let Ok(value) = serde_json::from_str::<Value>(&raw) else {
-            if complete_line {
-                consumed_offset = base_offset + cursor as u64;
-                continue;
-            }
-            break;
-        };
-        entries.push(JsonlEntry {
-            value,
-            raw,
-            byte_start: base_offset + segment_start as u64,
-            byte_end: base_offset + cursor as u64,
-        });
-        consumed_offset = base_offset + cursor as u64;
     }
 
     (entries, consumed_offset)
@@ -229,43 +255,35 @@ fn entry_timestamp(entry: &Value) -> Option<String> {
         .map(ToOwned::to_owned)
 }
 
+fn value_field_str<'a>(value: Option<&'a Value>, field: &str) -> Option<&'a str> {
+    value
+        .and_then(|value| value.get(field))
+        .and_then(Value::as_str)
+}
+
+fn role_message_kind(value: &Value) -> Option<String> {
+    value_field_str(Some(value), "role").map(|role| format!("{role}_message"))
+}
+
+fn payload_record_kind(entry_type: &str, payload: Option<&Value>) -> Option<String> {
+    let payload = payload?;
+    match entry_type {
+        "response_item" => value_field_str(Some(payload), "type")
+            .map(ToOwned::to_owned)
+            .or_else(|| role_message_kind(payload)),
+        "event_msg" => value_field_str(Some(payload), "type").map(ToOwned::to_owned),
+        _ => None,
+    }
+}
+
 fn transcript_record_kind(
     entry_type: &str,
     payload: Option<&Value>,
     message: Option<&Value>,
 ) -> String {
-    if entry_type == "response_item" {
-        if let Some(payload_type) = payload
-            .and_then(|payload| payload.get("type"))
-            .and_then(Value::as_str)
-        {
-            return payload_type.to_string();
-        }
-        if let Some(role) = payload
-            .and_then(|payload| payload.get("role"))
-            .and_then(Value::as_str)
-        {
-            return format!("{role}_message");
-        }
-    }
-
-    if entry_type == "event_msg" {
-        if let Some(payload_type) = payload
-            .and_then(|payload| payload.get("type"))
-            .and_then(Value::as_str)
-        {
-            return payload_type.to_string();
-        }
-    }
-
-    if let Some(role) = message
-        .and_then(|message| message.get("role"))
-        .and_then(Value::as_str)
-    {
-        return format!("{role}_message");
-    }
-
-    entry_type.to_string()
+    payload_record_kind(entry_type, payload)
+        .or_else(|| message.and_then(role_message_kind))
+        .unwrap_or_else(|| entry_type.to_string())
 }
 
 fn transcript_record_role(payload: Option<&Value>, message: Option<&Value>) -> Option<String> {
@@ -843,24 +861,12 @@ impl CodexReader {
         payload: &Value,
         entry: &JsonlEntry,
     ) {
-        if entry_type != "response_item"
-            || payload.get("role").and_then(Value::as_str) != Some("user")
-        {
+        if !is_codex_response_item_user(entry_type, payload) {
             return;
         }
 
-        for block in payload
-            .get("content")
-            .and_then(Value::as_array)
-            .into_iter()
-            .flatten()
-        {
-            if block.get("type").and_then(Value::as_str) != Some("input_text") {
-                continue;
-            }
-            if let Some(text) = block.get("text").and_then(Value::as_str) {
-                self.set_codex_user_task(text, true, entry);
-            }
+        for text in codex_response_item_user_input_texts(payload) {
+            self.set_codex_user_task(text, true, entry);
         }
     }
 
@@ -1389,6 +1395,20 @@ fn codex_reasoning_summary_text(summary: &Value) -> Option<&str> {
         .flatten()
 }
 
+fn is_codex_response_item_user(entry_type: &str, payload: &Value) -> bool {
+    entry_type == "response_item" && payload.get("role").and_then(Value::as_str) == Some("user")
+}
+
+fn codex_response_item_user_input_texts(payload: &Value) -> impl Iterator<Item = &str> {
+    payload
+        .get("content")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter(|block| block.get("type").and_then(Value::as_str) == Some("input_text"))
+        .filter_map(|block| block.get("text").and_then(Value::as_str))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1441,6 +1461,48 @@ mod tests {
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].byte_start, 3 + b"not json\n".len() as u64);
         assert_eq!(consumed_offset, 3 + buf.len() as u64);
+    }
+
+    #[test]
+    fn parse_jsonl_entries_consumes_blank_and_crlf_lines() {
+        let first_blank = b"\n";
+        let second_blank = b"\r\n";
+        let json_line = b"{\"type\":\"event_msg\"}\r\n";
+        let trailing_blank = b"\n";
+        let mut buf = Vec::new();
+        buf.extend_from_slice(first_blank);
+        buf.extend_from_slice(second_blank);
+        buf.extend_from_slice(json_line);
+        buf.extend_from_slice(trailing_blank);
+
+        let (entries, consumed_offset) = parse_jsonl_entries_and_offset(&buf, 5);
+
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].raw, "{\"type\":\"event_msg\"}");
+        assert_eq!(
+            entries[0].byte_start,
+            5 + first_blank.len() as u64 + second_blank.len() as u64
+        );
+        assert_eq!(
+            entries[0].byte_end,
+            entries[0].byte_start + json_line.len() as u64
+        );
+        assert_eq!(consumed_offset, 5 + buf.len() as u64);
+    }
+
+    #[test]
+    fn parse_jsonl_entries_leaves_incomplete_malformed_tail_unconsumed_after_blank() {
+        let complete = b"\n{\"type\":\"event_msg\"}\n";
+        let tail = b"not json";
+        let mut buf = Vec::new();
+        buf.extend_from_slice(complete);
+        buf.extend_from_slice(tail);
+
+        let (entries, consumed_offset) = parse_jsonl_entries_and_offset(&buf, 7);
+
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].byte_start, 7 + b"\n".len() as u64);
+        assert_eq!(consumed_offset, 7 + complete.len() as u64);
     }
 
     #[test]

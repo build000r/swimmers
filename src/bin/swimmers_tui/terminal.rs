@@ -30,6 +30,14 @@ pub(crate) struct TerminalState {
     pub(crate) terminal_ui_active: bool,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum FlushOp {
+    MoveTo(u16, u16),
+    SetForegroundColor(Color),
+    Print(char),
+    ResetColor,
+}
+
 pub(crate) fn enter_terminal_ui(writer: &mut impl Write) -> io::Result<()> {
     execute!(
         writer,
@@ -50,6 +58,19 @@ pub(crate) fn leave_terminal_ui(writer: &mut impl Write) -> io::Result<()> {
         cursor::Show,
         ResetColor
     )
+}
+
+fn run_teardown_step<Teardown>(is_active: &mut bool, teardown: Teardown) -> Option<io::Error>
+where
+    Teardown: FnOnce() -> io::Result<()>,
+{
+    if !*is_active {
+        return None;
+    }
+
+    let error = teardown().err();
+    *is_active = false;
+    error
 }
 
 impl TerminalState {
@@ -83,29 +104,81 @@ impl TerminalState {
         LeaveUi: FnOnce(&mut W) -> io::Result<()>,
         DisableRawMode: FnOnce() -> io::Result<()>,
     {
-        let mut first_error = None;
+        let leave_error = run_teardown_step(&mut self.terminal_ui_active, || leave_ui(writer));
+        let raw_mode_error = run_teardown_step(&mut self.raw_mode_enabled, disable_raw_mode);
 
-        if self.terminal_ui_active {
-            if let Err(err) = leave_ui(writer) {
-                first_error = Some(err);
-            }
-            self.terminal_ui_active = false;
-        }
+        leave_error.or(raw_mode_error).map_or(Ok(()), Err)
+    }
+}
 
-        if self.raw_mode_enabled {
-            if let Err(err) = disable_raw_mode() {
-                if first_error.is_none() {
-                    first_error = Some(err);
-                }
-            }
-            self.raw_mode_enabled = false;
-        }
+fn changed_cell_indices<'a>(
+    buffer: &'a [Cell],
+    last_buffer: &'a [Cell],
+) -> impl Iterator<Item = usize> + 'a {
+    buffer
+        .iter()
+        .zip(last_buffer)
+        .enumerate()
+        .filter_map(|(idx, (cell, prev))| (*cell != *prev).then_some(idx))
+}
 
-        if let Some(err) = first_error {
-            return Err(err);
-        }
+fn cell_position(width: u16, idx: usize) -> (u16, u16) {
+    let width = width as usize;
+    ((idx % width) as u16, (idx / width) as u16)
+}
 
-        Ok(())
+fn append_cell_flush_ops(
+    ops: &mut Vec<FlushOp>,
+    current_color: &mut Color,
+    last_pos: &mut Option<(u16, u16)>,
+    x: u16,
+    y: u16,
+    cell: Cell,
+) {
+    if *last_pos != Some((x, y)) {
+        ops.push(FlushOp::MoveTo(x, y));
+    }
+
+    if cell.fg != *current_color {
+        ops.push(FlushOp::SetForegroundColor(cell.fg));
+        *current_color = cell.fg;
+    }
+
+    ops.push(FlushOp::Print(cell.ch));
+    *last_pos = Some((x.saturating_add(1), y));
+}
+
+fn plan_flush_ops(width: u16, height: u16, buffer: &[Cell], last_buffer: &[Cell]) -> Vec<FlushOp> {
+    let visible_len = (width as usize) * (height as usize);
+    let mut ops = Vec::new();
+    let mut current_color = Color::Reset;
+    let mut last_pos = None;
+
+    for idx in changed_cell_indices(&buffer[..visible_len], &last_buffer[..visible_len]) {
+        let (x, y) = cell_position(width, idx);
+        append_cell_flush_ops(
+            &mut ops,
+            &mut current_color,
+            &mut last_pos,
+            x,
+            y,
+            buffer[idx],
+        );
+    }
+
+    if current_color != Color::Reset {
+        ops.push(FlushOp::ResetColor);
+    }
+
+    ops
+}
+
+fn queue_flush_op(writer: &mut impl Write, op: FlushOp) -> io::Result<()> {
+    match op {
+        FlushOp::MoveTo(x, y) => queue!(writer, cursor::MoveTo(x, y)),
+        FlushOp::SetForegroundColor(color) => queue!(writer, SetForegroundColor(color)),
+        FlushOp::Print(ch) => queue!(writer, Print(ch)),
+        FlushOp::ResetColor => queue!(writer, ResetColor),
     }
 }
 
@@ -227,34 +300,8 @@ impl Renderer {
     }
 
     pub(crate) fn flush(&mut self) -> io::Result<()> {
-        let mut current_color = Color::Reset;
-        let mut last_pos: Option<(u16, u16)> = None;
-
-        for y in 0..self.height {
-            for x in 0..self.width {
-                let idx = (y as usize) * (self.width as usize) + (x as usize);
-                let cell = self.buffer[idx];
-                let prev = self.last_buffer[idx];
-                if cell == prev {
-                    continue;
-                }
-
-                if last_pos != Some((x, y)) {
-                    queue!(self.stdout, cursor::MoveTo(x, y))?;
-                }
-
-                if cell.fg != current_color {
-                    queue!(self.stdout, SetForegroundColor(cell.fg))?;
-                    current_color = cell.fg;
-                }
-
-                queue!(self.stdout, Print(cell.ch))?;
-                last_pos = Some((x.saturating_add(1), y));
-            }
-        }
-
-        if current_color != Color::Reset {
-            queue!(self.stdout, ResetColor)?;
+        for op in plan_flush_ops(self.width, self.height, &self.buffer, &self.last_buffer) {
+            queue_flush_op(&mut self.stdout, op)?;
         }
         self.stdout.flush()?;
         self.last_buffer.copy_from_slice(&self.buffer);
@@ -265,5 +312,172 @@ impl Renderer {
 impl Drop for Renderer {
     fn drop(&mut self) {
         let _ = self.cleanup();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::cell::Cell as TestCell;
+    use std::sync::{Arc, Mutex};
+
+    #[test]
+    fn cleanup_clears_flags_and_returns_first_error_when_both_steps_fail() {
+        let mut terminal_state = TerminalState {
+            raw_mode_enabled: true,
+            terminal_ui_active: true,
+        };
+        let mut output = Vec::new();
+        let events = Arc::new(Mutex::new(Vec::new()));
+
+        let error = terminal_state
+            .cleanup_with(
+                &mut output,
+                {
+                    let events = Arc::clone(&events);
+                    move |_writer| {
+                        events.lock().unwrap().push("leave_terminal_ui");
+                        Err(io::Error::other("leave failed"))
+                    }
+                },
+                {
+                    let events = Arc::clone(&events);
+                    move || {
+                        events.lock().unwrap().push("disable_raw_mode");
+                        Err(io::Error::other("disable failed"))
+                    }
+                },
+            )
+            .expect_err("cleanup should return the first teardown error");
+
+        assert_eq!(error.to_string(), "leave failed");
+        assert_eq!(
+            events.lock().unwrap().as_slice(),
+            ["leave_terminal_ui", "disable_raw_mode"]
+        );
+        assert!(!terminal_state.terminal_ui_active);
+        assert!(!terminal_state.raw_mode_enabled);
+    }
+
+    #[test]
+    fn cleanup_clears_ui_flag_when_leave_fails_without_raw_mode() {
+        let mut terminal_state = TerminalState {
+            raw_mode_enabled: false,
+            terminal_ui_active: true,
+        };
+        let mut output = Vec::new();
+        let disable_calls = TestCell::new(0usize);
+
+        let error = terminal_state
+            .cleanup_with(
+                &mut output,
+                |_writer| Err(io::Error::other("leave failed")),
+                || {
+                    disable_calls.set(disable_calls.get() + 1);
+                    Ok(())
+                },
+            )
+            .expect_err("cleanup should return the leave error");
+
+        assert_eq!(error.to_string(), "leave failed");
+        assert_eq!(disable_calls.get(), 0);
+        assert!(!terminal_state.terminal_ui_active);
+        assert!(!terminal_state.raw_mode_enabled);
+    }
+
+    #[test]
+    fn cleanup_clears_raw_flag_when_disable_fails_without_active_ui() {
+        let mut terminal_state = TerminalState {
+            raw_mode_enabled: true,
+            terminal_ui_active: false,
+        };
+        let mut output = Vec::new();
+        let leave_calls = TestCell::new(0usize);
+
+        let error = terminal_state
+            .cleanup_with(
+                &mut output,
+                |_writer| {
+                    leave_calls.set(leave_calls.get() + 1);
+                    Ok(())
+                },
+                || Err(io::Error::other("disable failed")),
+            )
+            .expect_err("cleanup should return the raw mode teardown error");
+
+        assert_eq!(error.to_string(), "disable failed");
+        assert_eq!(leave_calls.get(), 0);
+        assert!(!terminal_state.terminal_ui_active);
+        assert!(!terminal_state.raw_mode_enabled);
+    }
+
+    #[test]
+    fn flush_plan_emits_only_changed_cells_and_minimizes_color_changes() {
+        let last_buffer = vec![Cell::default(); 4];
+        let buffer = vec![
+            Cell {
+                ch: 'a',
+                fg: Color::Red,
+            },
+            Cell {
+                ch: 'b',
+                fg: Color::Red,
+            },
+            Cell::default(),
+            Cell {
+                ch: 'c',
+                fg: Color::Blue,
+            },
+        ];
+
+        assert_eq!(
+            plan_flush_ops(4, 1, &buffer, &last_buffer),
+            vec![
+                FlushOp::MoveTo(0, 0),
+                FlushOp::SetForegroundColor(Color::Red),
+                FlushOp::Print('a'),
+                FlushOp::Print('b'),
+                FlushOp::MoveTo(3, 0),
+                FlushOp::SetForegroundColor(Color::Blue),
+                FlushOp::Print('c'),
+                FlushOp::ResetColor,
+            ]
+        );
+    }
+
+    #[test]
+    fn flush_plan_omits_reset_when_changed_cells_end_in_reset_color() {
+        let last_buffer = vec![
+            Cell::default(),
+            Cell {
+                ch: 'x',
+                fg: Color::Green,
+            },
+        ];
+        let buffer = vec![
+            Cell {
+                ch: 'x',
+                fg: Color::Green,
+            },
+            Cell::default(),
+        ];
+
+        assert_eq!(
+            plan_flush_ops(2, 1, &buffer, &last_buffer),
+            vec![
+                FlushOp::MoveTo(0, 0),
+                FlushOp::SetForegroundColor(Color::Green),
+                FlushOp::Print('x'),
+                FlushOp::SetForegroundColor(Color::Reset),
+                FlushOp::Print(' '),
+            ]
+        );
+    }
+
+    #[test]
+    fn flush_plan_is_empty_when_no_cells_changed() {
+        let buffer = vec![Cell::default(); 6];
+
+        assert!(plan_flush_ops(3, 2, &buffer, &buffer).is_empty());
     }
 }

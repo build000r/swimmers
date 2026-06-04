@@ -111,7 +111,6 @@ import {
   trogdorSessionAwaitingUser,
   trogdorSurfaceClickPlan, trogdorSurfaceFocusInPlan, trogdorSurfaceFocusOutPlan, trogdorSurfaceMouseleavePlan,
   trogdorSurfaceMouseoverPlan, trogdorSurfacePassthroughBindings, trogdorSurfacePointerDownPlan,
-  trogdorSurfaceSessionTrogdorState,
   trogdorSwordsmanVisibleForState,
   trogdorTerminalFocusStatus,
 } from "./trogdor_logic.js";
@@ -125,6 +124,12 @@ import {
   emptyWorkbenchWidgets,
   renderTranscriptBlocks,
 } from "./workbench_render.js";
+import {
+  buildSurfaceModel as buildSurfaceModelFromState,
+  formatTime,
+  summarizeThought,
+  surfaceSession as buildSurfaceSession,
+} from "./surface_model.js";
 
 const boot = window.__SWIMMERS_BOOT__ ?? {
   franken_term_available: false,
@@ -1234,14 +1239,6 @@ function sessionExists(sessionId) {
   return state.sessions.some((session) => session.session_id === sessionId);
 }
 
-function summarizeThought(session) {
-  const thought = (session?.thought || "").trim();
-  if (!thought) {
-    return "No thought snapshot yet.";
-  }
-  return thought.length > 110 ? `${thought.slice(0, 107)}...` : thought;
-}
-
 function rawSessionAwaitingUser(session) {
   return rawTrogdorSessionAwaitingUser(session, operatorPressureSnapshot(session?.session_id));
 }
@@ -1421,96 +1418,19 @@ function keyBeginsTrogdorResponse(event) {
   return event.key.length === 1 || event.key === "Enter" || event.key === "Backspace";
 }
 
-function relativeCwd(cwd) {
-  if (!cwd) return "unknown cwd";
-  const parts = cwd.split("/").filter(Boolean);
-  if (!parts.length) return cwd;
-  return parts.slice(-2).join("/");
-}
-
-function formatTime(raw) {
-  if (!raw) return "unknown";
-  const date = new Date(raw);
-  if (Number.isNaN(date.getTime())) {
-    return raw;
-  }
-  return date.toLocaleString([], {
-    month: "short",
-    day: "numeric",
-    hour: "numeric",
-    minute: "2-digit",
-  });
-}
-
 function shortenUrl(raw) {
   if (!raw) return "";
   return raw.length > 72 ? `${raw.slice(0, 69)}...` : raw;
 }
 
-function sessionStateConfidence(session) {
-  return String(session?.state_evidence?.confidence || "low").toLowerCase();
-}
-
-function sessionStateObserved(session) {
-  return Boolean(session?.state_evidence?.observed_at);
-}
-
-function sessionStateDisplay(session) {
-  const label = String(session?.state || "unknown");
-  if (sessionStateConfidence(session) !== "high" || !sessionStateObserved(session)) {
-    return `${label}?`;
-  }
-  return label;
-}
-
-function sessionStateTrustLabel(session) {
-  const evidence = session?.state_evidence || {};
-  const confidence = sessionStateConfidence(session);
-  const freshness = sessionStateObserved(session) ? "observed" : "unobserved";
-  const cause = String(evidence.cause || "unknown");
-  return `${confidence} ${freshness} ${cause}`;
-}
-
 function surfaceSession(session, options = {}) {
-  const operatorPressure = operatorPressureSnapshot(session.session_id);
-  const surface = {
-    sessionId: session.session_id,
-    name: session.tmux_name || session.session_id,
-    state: String(session.state || "unknown"),
-    displayState: sessionStateDisplay(session),
-    stateTrustLabel: sessionStateTrustLabel(session),
-    stateConfidence: sessionStateConfidence(session),
-    stateObserved: sessionStateObserved(session),
-    restLabel: String(session.rest_state || "unknown"),
-    transportLabel: String(session.transport_health || "unknown"),
-    toolLabel: session.tool || "shell",
-    cwdLabel: relativeCwd(session.cwd),
-    fullCwd: session.cwd || "",
-    thoughtLabel: options.detail ? session.thought || "No thought snapshot yet." : summarizeThought(session),
-    clawgText: session.thought || "",
-    thoughtUpdatedAt: session.thought_updated_at || "",
-    objectiveChangedAt: session.objective_changed_at || "",
-    contextLabel: `${session.token_count ?? 0} / ${session.context_limit ?? 0}`,
-    skillLabel: session.last_skill || "none",
-    activityLabel: formatTime(session.last_activity_at),
-    commandLabel: session.current_command || "idle",
-    attachedLabel: String(session.attached_clients ?? 0),
-    commitCandidate: Boolean(session.commit_candidate),
-    actionCues: Array.isArray(session.action_cues) ? session.action_cues : [],
-    operatorPressure: operatorPressure?.pressure || null,
-    batchSendSessionIds: Array.isArray(operatorPressure?.batch_send_session_ids)
-      ? operatorPressure.batch_send_session_ids
-      : [],
-    repoKey: operatorPressure?.repo_key || session.cwd || "",
-    repoLabel: operatorPressure?.repo_label || relativeCwd(session.cwd),
-    isStale: Boolean(session.is_stale),
-  };
-  Object.assign(surface, trogdorSurfaceSessionTrogdorState(surface, {
-    burnt: trogdorSessionBurnt(surface),
+  return buildSurfaceSession(session, {
+    ...options,
+    operatorPressure: operatorPressureSnapshot(session.session_id),
+    sessionBurnt: trogdorSessionBurnt,
     dismissedClawgs: state.trogdorDismissedClawgs,
     readProgress: state.trogdorReadProgress,
-  }));
-  return surface;
+  });
 }
 
 function operatorPressureSnapshot(sessionId) {
@@ -2019,44 +1939,16 @@ function captureTerminalRendererDiagnostic(reason = "frame") {
 }
 
 function buildSurfaceModel() {
-  const selectedSession = currentSession();
-  const surfaceSessions = state.sessions.map((session) => surfaceSession(session));
-  const terminalReady = Boolean(state.terminal && state.ws && state.ws.readyState === WebSocket.OPEN);
-  return {
-    cols: state.currentCols,
-    rows: state.currentRows,
-    focusLayout: Boolean(boot.focus_layout && state.followPublishedSelection),
-    followPublishedSelection: state.followPublishedSelection,
-    connectionLabel: state.connectionLabel,
-    connectionMuted: state.connectionMuted,
-    modeLabel: state.modeLabel,
-    modeMuted: state.modeMuted,
-    searchLabel: state.searchLabel,
-    searchMuted: state.searchMuted,
-    utilityLabel: state.utilityLabel,
-    utilityMuted: state.utilityMuted,
-    searchQuery: state.searchQuery,
-    selectMode: state.selectMode,
-    readOnly: state.readOnly,
-    frankenTermAvailable: boot.franken_term_available,
-    terminalReady,
-    snapshotFallback: !boot.franken_term_available,
-    activeSheet: state.activeSheet,
-    hoveredLinkUrl: state.hoveredLinkUrl,
-    hoveredTrogdorSessionId: state.hoveredTrogdorSessionId,
-    trogdorAtlasOpen: state.trogdorAtlasOpen,
-    trogdorWpm: state.trogdorWpm,
-    trogdorReading: state.trogdorReading,
-    trogdorReaderStartIndex: state.trogdorReaderStartIndex,
-    trogdorReaderElapsedMs: state.hoveredTrogdorSessionId
-      ? Math.max(0, performance.now() - state.trogdorReaderStartedAt)
-      : 0,
-    sessions: surfaceSessions,
-    selectedSessionId: state.selectedSessionId,
-    publishedSessionId: normalizeSessionId(state.publishedSelection?.session_id),
-    publishedAtLabel: formatTime(state.publishedSelection?.published_at),
-    currentSession: selectedSession ? surfaceSession(selectedSession, { detail: true }) : null,
-  };
+  return buildSurfaceModelFromState({
+    state,
+    boot,
+    currentSession,
+    operatorPressureSnapshot,
+    sessionBurnt: trogdorSessionBurnt,
+    normalizeSessionId,
+    now: () => performance.now(),
+    websocketOpen: WebSocket.OPEN,
+  });
 }
 
 function renderHudSurface() {

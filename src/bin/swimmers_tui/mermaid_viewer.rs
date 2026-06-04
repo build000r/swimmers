@@ -168,6 +168,67 @@ fn mermaid_scroll_zoom_delta(direction: MermaidZoomDirection) -> i16 {
     DELTAS_BY_OUT_DIRECTION[matches!(direction, MermaidZoomDirection::Out) as usize]
 }
 
+fn plan_tabs_from_filenames<'a>(
+    filenames: impl IntoIterator<Item = &'a String>,
+) -> Option<Vec<DomainPlanTab>> {
+    let mut tabs = vec![DomainPlanTab::Schema];
+    for name in filenames {
+        if let Some(tab) = DomainPlanTab::from_filename(name) {
+            if tab != DomainPlanTab::Schema {
+                tabs.push(tab);
+            }
+        }
+    }
+    if tabs.len() > 1 {
+        Some(tabs)
+    } else {
+        None
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum MermaidMouseDownHit {
+    Back,
+    Tab(DomainPlanTab),
+    Content(Rect),
+    Outside,
+}
+
+fn mermaid_mouse_down_hit(
+    viewer: &MermaidViewerState,
+    field: Rect,
+    column: u16,
+    row: u16,
+) -> MermaidMouseDownHit {
+    let back_rect = viewer.back_rect.unwrap_or(Rect {
+        x: field.x,
+        y: field.y,
+        width: display_width(MERMAID_BACK_LABEL),
+        height: 1,
+    });
+    if back_rect.contains(column, row) {
+        return MermaidMouseDownHit::Back;
+    }
+
+    if let Some(tab) = viewer
+        .tab_rects
+        .iter()
+        .find(|(_, rect)| rect.contains(column, row))
+        .map(|(tab, _)| *tab)
+    {
+        return MermaidMouseDownHit::Tab(tab);
+    }
+
+    let content_rect = viewer
+        .content_rect
+        .unwrap_or_else(|| mermaid_content_rect(field));
+    if content_rect.contains(column, row) {
+        MermaidMouseDownHit::Content(content_rect)
+    } else {
+        MermaidMouseDownHit::Outside
+    }
+}
+
 impl<C: TuiApi> App<C> {
     fn refresh_mermaid_viewer_from_cache(&mut self) {
         if let FishBowlMode::Mermaid(viewer) = &mut self.fish_bowl_mode {
@@ -403,21 +464,9 @@ impl<C: TuiApi> App<C> {
             return;
         };
 
-        let plan_tabs = artifact.plan_files.and_then(|files| {
-            let mut tabs = vec![DomainPlanTab::Schema];
-            for name in &files {
-                if let Some(tab) = DomainPlanTab::from_filename(name) {
-                    if tab != DomainPlanTab::Schema {
-                        tabs.push(tab);
-                    }
-                }
-            }
-            if tabs.len() > 1 {
-                Some(tabs)
-            } else {
-                None
-            }
-        });
+        let plan_tabs = artifact
+            .plan_files
+            .and_then(|files| plan_tabs_from_filenames(&files));
         self.fish_bowl_mode = FishBowlMode::Mermaid(Self::mermaid_viewer_state(
             session.session_id.clone(),
             session.tmux_name.clone(),
@@ -450,21 +499,7 @@ impl<C: TuiApi> App<C> {
             Err(err) => (None, Some(format!("read {}: {err}", path.display()))),
         };
 
-        let plan_tabs = {
-            let mut tabs = vec![DomainPlanTab::Schema];
-            for name in &siblings {
-                if let Some(tab) = DomainPlanTab::from_filename(name) {
-                    if tab != DomainPlanTab::Schema {
-                        tabs.push(tab);
-                    }
-                }
-            }
-            if tabs.len() > 1 {
-                Some(tabs)
-            } else {
-                None
-            }
-        };
+        let plan_tabs = plan_tabs_from_filenames(&siblings);
 
         self.fish_bowl_mode = FishBowlMode::Mermaid(Self::mermaid_viewer_state(
             session_id,
@@ -770,58 +805,54 @@ impl<C: TuiApi> App<C> {
         let Some(viewer) = self.mermaid_viewer_mut() else {
             return false;
         };
-        let back_rect = viewer.back_rect.unwrap_or(Rect {
-            x: field.x,
-            y: field.y,
-            width: display_width(MERMAID_BACK_LABEL),
-            height: 1,
-        });
-        if back_rect.contains(mouse.column, mouse.row) {
-            self.close_mermaid_viewer();
-            return true;
+        match mermaid_mouse_down_hit(viewer, field, mouse.column, mouse.row) {
+            MermaidMouseDownHit::Back => {
+                self.close_mermaid_viewer();
+                true
+            }
+            MermaidMouseDownHit::Tab(tab) => {
+                self.switch_plan_tab(tab);
+                true
+            }
+            MermaidMouseDownHit::Content(content_rect) => {
+                self.handle_mermaid_content_mouse_down(content_rect, mouse.column, mouse.row)
+            }
+            MermaidMouseDownHit::Outside => false,
         }
+    }
 
-        let clicked_tab = viewer
-            .tab_rects
-            .iter()
-            .find(|(_, rect)| rect.contains(mouse.column, mouse.row))
-            .map(|(tab, _)| *tab);
-        if let Some(tab) = clicked_tab {
-            self.switch_plan_tab(tab);
-            return true;
-        }
-
-        let viewer = self.mermaid_viewer_mut().unwrap();
-        let content_rect = viewer
-            .content_rect
-            .unwrap_or_else(|| mermaid_content_rect(field));
-        if content_rect.contains(mouse.column, mouse.row) {
-            match mermaid_visible_focus_targets(viewer, content_rect) {
-                Ok(targets) => {
-                    if let Some(target) = targets
-                        .iter()
-                        .find(|target| target.hitbox.contains(mouse.column, mouse.row))
-                    {
-                        Self::apply_mermaid_focus_target(viewer, target);
-                        self.mermaid_drag = None;
-                        return true;
-                    }
-                }
-                Err(err) => {
-                    viewer.render_error = Some(err);
+    fn handle_mermaid_content_mouse_down(
+        &mut self,
+        content_rect: Rect,
+        column: u16,
+        row: u16,
+    ) -> bool {
+        let Some(viewer) = self.mermaid_viewer_mut() else {
+            return false;
+        };
+        match mermaid_visible_focus_targets(viewer, content_rect) {
+            Ok(targets) => {
+                if let Some(target) = targets
+                    .iter()
+                    .find(|target| target.hitbox.contains(column, row))
+                {
+                    Self::apply_mermaid_focus_target(viewer, target);
+                    self.mermaid_drag = None;
                     return true;
                 }
             }
-            self.mermaid_drag = Some(MermaidDragState {
-                start_column: mouse.column,
-                start_row: mouse.row,
-                start_center_x: viewer.center_x,
-                start_center_y: viewer.center_y,
-            });
-            return true;
+            Err(err) => {
+                viewer.render_error = Some(err);
+                return true;
+            }
         }
-
-        false
+        self.mermaid_drag = Some(MermaidDragState {
+            start_column: column,
+            start_row: row,
+            start_center_x: viewer.center_x,
+            start_center_y: viewer.center_y,
+        });
+        true
     }
 
     pub(crate) fn handle_mermaid_mouse_drag(
@@ -939,5 +970,167 @@ pub(crate) fn read_plan_file_from_disk(
             error: Some(format!("read {}: {err}", target.display())),
             ..response
         }),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn strings(values: &[&str]) -> Vec<String> {
+        values.iter().map(|value| value.to_string()).collect()
+    }
+
+    fn test_viewer() -> MermaidViewerState {
+        MermaidViewerState {
+            session_id: "sess-1".to_string(),
+            tmux_name: "tmux-1".to_string(),
+            cwd: "/repo".to_string(),
+            path: Some("/repo/schema.mmd".to_string()),
+            source: Some("flowchart TD\nA-->B".to_string()),
+            artifact_error: None,
+            render_error: None,
+            unsupported_reason: None,
+            zoom: 1.0,
+            center_x: 0.0,
+            center_y: 0.0,
+            diagram_width: 100.0,
+            diagram_height: 100.0,
+            back_rect: None,
+            content_rect: None,
+            cached_rect: None,
+            cached_zoom: 1.0,
+            cached_center_x: 0.0,
+            cached_center_y: 0.0,
+            cached_lines: Vec::new(),
+            cached_background_cells: Vec::new(),
+            cached_semantic_lines: Vec::new(),
+            focused_source_index: None,
+            focus_status: None,
+            prepared_render: None,
+            source_prepare_count: 0,
+            viewport_render_count: 0,
+            plan_tabs: None,
+            active_tab: DomainPlanTab::Schema,
+            inline_plan_files: BTreeMap::new(),
+            plan_text_content: None,
+            plan_text_lines: Vec::new(),
+            plan_text_scroll: 0,
+            plan_text_cached_width: 0,
+            tab_rects: Vec::new(),
+            disk_only: false,
+        }
+    }
+
+    #[test]
+    fn plan_tabs_from_filenames_returns_none_without_text_tabs() {
+        let filenames = strings(&["schema.mmd", "notes.txt"]);
+
+        assert_eq!(plan_tabs_from_filenames(&filenames), None);
+    }
+
+    #[test]
+    fn plan_tabs_from_filenames_keeps_schema_first_and_advertised_order() {
+        let filenames = strings(&["README.md", "schema.mmd", "plan.md", "frontend.md"]);
+
+        assert_eq!(
+            plan_tabs_from_filenames(&filenames),
+            Some(vec![
+                DomainPlanTab::Schema,
+                DomainPlanTab::Readme,
+                DomainPlanTab::Plan,
+                DomainPlanTab::Frontend,
+            ])
+        );
+    }
+
+    #[test]
+    fn mermaid_mouse_down_hit_uses_fallback_back_rect_before_content() {
+        let viewer = test_viewer();
+        let field = Rect {
+            x: 5,
+            y: 7,
+            width: 80,
+            height: 20,
+        };
+
+        assert_eq!(
+            mermaid_mouse_down_hit(&viewer, field, 5, 7),
+            MermaidMouseDownHit::Back
+        );
+    }
+
+    #[test]
+    fn mermaid_mouse_down_hit_detects_plan_tab_before_content() {
+        let mut viewer = test_viewer();
+        viewer.tab_rects.push((
+            DomainPlanTab::Plan,
+            Rect {
+                x: 10,
+                y: 8,
+                width: 8,
+                height: 1,
+            },
+        ));
+        let field = Rect {
+            x: 5,
+            y: 7,
+            width: 80,
+            height: 20,
+        };
+
+        assert_eq!(
+            mermaid_mouse_down_hit(&viewer, field, 12, 8),
+            MermaidMouseDownHit::Tab(DomainPlanTab::Plan)
+        );
+    }
+
+    #[test]
+    fn mermaid_mouse_down_hit_returns_content_rect_for_body_click() {
+        let mut viewer = test_viewer();
+        viewer.content_rect = Some(Rect {
+            x: 11,
+            y: 13,
+            width: 30,
+            height: 10,
+        });
+        let field = Rect {
+            x: 5,
+            y: 7,
+            width: 80,
+            height: 20,
+        };
+
+        assert_eq!(
+            mermaid_mouse_down_hit(&viewer, field, 20, 16),
+            MermaidMouseDownHit::Content(Rect {
+                x: 11,
+                y: 13,
+                width: 30,
+                height: 10,
+            })
+        );
+    }
+
+    #[test]
+    fn mermaid_mouse_down_hit_returns_outside_for_non_viewer_chrome() {
+        let mut viewer = test_viewer();
+        viewer.content_rect = Some(Rect {
+            x: 11,
+            y: 13,
+            width: 30,
+            height: 10,
+        });
+        let field = Rect {
+            x: 5,
+            y: 7,
+            width: 80,
+            height: 20,
+        };
+
+        assert_eq!(
+            mermaid_mouse_down_hit(&viewer, field, 3, 16),
+            MermaidMouseDownHit::Outside
+        );
     }
 }
