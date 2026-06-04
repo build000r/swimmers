@@ -380,26 +380,39 @@ fn parse_version_triplet(version: &str) -> Option<[u64; 3]> {
 }
 
 pub(super) fn resolve_tmux_binary() -> Result<PathBuf> {
-    if let Some(configured) = std::env::var_os(TMUX_BIN_ENV) {
-        return validate_tmux_binary(PathBuf::from(configured))
-            .with_context(|| format!("{} must point to an absolute tmux binary", TMUX_BIN_ENV));
-    }
+    configured_tmux_binary()
+        .map(PathBuf::from)
+        .map(validate_configured_tmux_binary)
+        .unwrap_or_else(resolve_unconfigured_tmux_binary)
+}
 
-    if let Some(path_from_env) = find_binary_in_path("tmux") {
-        return Ok(path_from_env);
-    }
+fn validate_configured_tmux_binary(path: PathBuf) -> Result<PathBuf> {
+    validate_tmux_binary(path)
+        .with_context(|| format!("{} must point to an absolute tmux binary", TMUX_BIN_ENV))
+}
 
-    for fallback in TMUX_BIN_FALLBACKS {
-        let candidate = PathBuf::from(fallback);
-        if candidate.is_file() {
-            return Ok(candidate);
-        }
-    }
+fn resolve_unconfigured_tmux_binary() -> Result<PathBuf> {
+    find_tmux_binary_without_override().ok_or_else(|| {
+        anyhow!(
+            "unable to locate tmux; set {} to an absolute tmux binary path",
+            TMUX_BIN_ENV
+        )
+    })
+}
 
-    Err(anyhow!(
-        "unable to locate tmux; set {} to an absolute tmux binary path",
-        TMUX_BIN_ENV
-    ))
+fn configured_tmux_binary() -> Option<OsString> {
+    std::env::var_os(TMUX_BIN_ENV)
+}
+
+fn find_tmux_binary_without_override() -> Option<PathBuf> {
+    find_binary_in_path("tmux").or_else(find_tmux_binary_fallback)
+}
+
+fn find_tmux_binary_fallback() -> Option<PathBuf> {
+    TMUX_BIN_FALLBACKS
+        .iter()
+        .map(PathBuf::from)
+        .find(|candidate| candidate.is_file())
 }
 
 fn validate_tmux_binary(path: PathBuf) -> Result<PathBuf> {
@@ -746,41 +759,57 @@ fn sanitize_osascript_text_arg(s: &str) -> String {
 }
 
 fn validate_osascript_script_arg(field: &'static str, value: &str) -> Result<()> {
-    let allow_shell_quotes = field == "attach_command";
-    if value.len() > OSASCRIPT_ARG_MAX_LEN {
+    if let Some(reason) = invalid_osascript_script_arg_reason(field, value) {
         return Err(anyhow::Error::new(NativeScriptError::InvalidOsaScriptArg {
             field,
-            reason: format!(
-                "value length {} exceeds maximum {}",
-                value.len(),
-                OSASCRIPT_ARG_MAX_LEN
-            ),
-        }));
-    }
-    if value.contains('\n') || value.contains('\r') {
-        return Err(anyhow::Error::new(NativeScriptError::InvalidOsaScriptArg {
-            field,
-            reason: "newlines are not allowed".to_string(),
-        }));
-    }
-    if value.contains('"') || (!allow_shell_quotes && value.contains('\'')) {
-        return Err(anyhow::Error::new(NativeScriptError::InvalidOsaScriptArg {
-            field,
-            reason: "quotes are not allowed".to_string(),
-        }));
-    }
-
-    if let Some(invalid) = value.chars().find(|ch| {
-        !(ch.is_ascii_alphanumeric()
-            || matches!(ch, '_' | '-' | '.' | '/' | ':' | ' ')
-            || (allow_shell_quotes && matches!(ch, '\'' | '=')))
-    }) {
-        return Err(anyhow::Error::new(NativeScriptError::InvalidOsaScriptArg {
-            field,
-            reason: format!("contains disallowed character `{invalid}`"),
+            reason,
         }));
     }
     Ok(())
+}
+
+fn invalid_osascript_script_arg_reason(field: &'static str, value: &str) -> Option<String> {
+    osascript_arg_length_error(value)
+        .or_else(|| osascript_arg_newline_error(value))
+        .or_else(|| osascript_arg_quote_error(field, value))
+        .or_else(|| osascript_arg_character_error(field, value))
+}
+
+fn osascript_arg_length_error(value: &str) -> Option<String> {
+    (value.len() > OSASCRIPT_ARG_MAX_LEN).then(|| {
+        format!(
+            "value length {} exceeds maximum {}",
+            value.len(),
+            OSASCRIPT_ARG_MAX_LEN
+        )
+    })
+}
+
+fn osascript_arg_newline_error(value: &str) -> Option<String> {
+    (value.contains('\n') || value.contains('\r')).then(|| "newlines are not allowed".to_string())
+}
+
+fn osascript_arg_quote_error(field: &'static str, value: &str) -> Option<String> {
+    let contains_disallowed_quote =
+        value.contains('"') || (!osascript_arg_allows_shell_quotes(field) && value.contains('\''));
+    contains_disallowed_quote.then(|| "quotes are not allowed".to_string())
+}
+
+fn osascript_arg_character_error(field: &'static str, value: &str) -> Option<String> {
+    value
+        .chars()
+        .find(|ch| !is_allowed_osascript_script_arg_char(field, *ch))
+        .map(|invalid| format!("contains disallowed character `{invalid}`"))
+}
+
+fn osascript_arg_allows_shell_quotes(field: &'static str) -> bool {
+    field == "attach_command"
+}
+
+fn is_allowed_osascript_script_arg_char(field: &'static str, ch: char) -> bool {
+    ch.is_ascii_alphanumeric()
+        || matches!(ch, '_' | '-' | '.' | '/' | ':' | ' ')
+        || (osascript_arg_allows_shell_quotes(field) && matches!(ch, '\'' | '='))
 }
 
 fn is_transient_iterm_open_error(err: &anyhow::Error) -> bool {
