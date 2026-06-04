@@ -1235,10 +1235,10 @@ fn mermaid_focus_line_has_better_label(
     target: &MermaidFocusAccumulator,
     priority: u8,
 ) -> bool {
-    priority < target.priority
-        || (priority == target.priority
-            && (line.y, line.x, line.source_index)
-                < (target.sort_y, target.sort_x, target.source_index))
+    let candidate = mermaid_focus_line_label_key(line, priority);
+    let current = mermaid_focus_target_label_key(target);
+
+    candidate < current
 }
 
 fn mermaid_replace_focus_label(
@@ -1939,4 +1939,122 @@ fn mermaid_place_packed_detail_box_rects(
     }
 
     rects
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+struct MermaidFocusLabelKey {
+    priority: u8,
+    y: u16,
+    x: u16,
+    source_index: usize,
+}
+
+fn mermaid_focus_line_label_key(line: &MermaidProjectedLine, priority: u8) -> MermaidFocusLabelKey {
+    MermaidFocusLabelKey {
+        priority,
+        y: line.y,
+        x: line.x,
+        source_index: line.source_index,
+    }
+}
+
+fn mermaid_focus_target_label_key(target: &MermaidFocusAccumulator) -> MermaidFocusLabelKey {
+    MermaidFocusLabelKey {
+        priority: target.priority,
+        y: target.sort_y,
+        x: target.sort_x,
+        source_index: target.source_index,
+    }
+}
+
+#[cfg(test)]
+mod mermaid_focus_tests {
+    use super::*;
+
+    fn focus_line(y: u16, x: u16, source_index: usize) -> MermaidProjectedLine {
+        MermaidProjectedLine {
+            source_index,
+            x,
+            y,
+            text: "candidate".to_string(),
+            color: Color::Reset,
+        }
+    }
+
+    fn focus_target(
+        sort_y: u16,
+        sort_x: u16,
+        source_index: usize,
+        priority: u8,
+    ) -> MermaidFocusAccumulator {
+        MermaidFocusAccumulator {
+            source_index,
+            text: "target".to_string(),
+            diagram_x: 0.0,
+            diagram_y: 0.0,
+            priority,
+            sort_y,
+            sort_x,
+            left: sort_x,
+            right: sort_x,
+            top: sort_y,
+            bottom: sort_y,
+        }
+    }
+
+    #[test]
+    fn mermaid_focus_lower_priority_label_wins() {
+        let line = focus_line(20, 20, 20);
+        let target = focus_target(1, 1, 1, 3);
+
+        assert!(mermaid_focus_line_has_better_label(&line, &target, 2));
+        assert!(!mermaid_focus_line_has_better_label(&line, &target, 4));
+    }
+
+    #[test]
+    fn mermaid_focus_tied_priority_uses_position_then_source_index() {
+        let target = focus_target(5, 5, 5, 2);
+
+        assert!(mermaid_focus_line_has_better_label(
+            &focus_line(4, 99, 99),
+            &target,
+            2
+        ));
+        assert!(mermaid_focus_line_has_better_label(
+            &focus_line(5, 4, 99),
+            &target,
+            2
+        ));
+        assert!(mermaid_focus_line_has_better_label(
+            &focus_line(5, 5, 4),
+            &target,
+            2
+        ));
+    }
+
+    #[test]
+    fn mermaid_focus_tied_priority_rejects_same_or_later_label() {
+        let target = focus_target(5, 5, 5, 2);
+
+        assert!(!mermaid_focus_line_has_better_label(
+            &focus_line(5, 5, 5),
+            &target,
+            2
+        ));
+        assert!(!mermaid_focus_line_has_better_label(
+            &focus_line(5, 5, 6),
+            &target,
+            2
+        ));
+        assert!(!mermaid_focus_line_has_better_label(
+            &focus_line(5, 6, 1),
+            &target,
+            2
+        ));
+        assert!(!mermaid_focus_line_has_better_label(
+            &focus_line(6, 1, 1),
+            &target,
+            2
+        ));
+    }
 }
