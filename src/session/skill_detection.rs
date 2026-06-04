@@ -1,6 +1,6 @@
 use std::collections::HashSet;
 use std::fs;
-use std::path::PathBuf;
+use std::path::Path;
 use std::sync::OnceLock;
 
 use regex::Regex;
@@ -46,6 +46,139 @@ pub(crate) fn drain_completed_input_lines(buffer: &mut String, data: &[u8]) -> V
     }
 
     completed
+}
+
+fn normalize_skill_name(raw: &str) -> Option<String> {
+    let trimmed = raw.trim();
+    if is_valid_skill_name_token(trimmed) {
+        Some(trimmed.to_ascii_lowercase())
+    } else {
+        None
+    }
+}
+
+fn is_valid_skill_name_token(value: &str) -> bool {
+    !value.is_empty() && value.bytes().all(is_skill_name_byte)
+}
+
+fn is_skill_name_byte(byte: u8) -> bool {
+    matches!(byte, 65..=90 | 97..=122 | 48..=57 | 45 | 95 | 46 | 47)
+}
+
+fn is_probable_skill_name(raw: &str) -> bool {
+    let Some(normalized) = normalize_skill_name(raw) else {
+        return false;
+    };
+
+    if is_builtin_skill_name(&normalized) {
+        return true;
+    }
+
+    installed_skill_decision(&normalized).accepts()
+}
+
+fn is_builtin_skill_name(normalized: &str) -> bool {
+    matches!(normalized, "commit" | "describe" | "domain-planner" | "gog")
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum InstalledSkillDecision {
+    CompleteRegistry { contains: bool },
+    PartialRegistry { contains: bool },
+    Unavailable,
+}
+
+impl InstalledSkillDecision {
+    fn accepts(self) -> bool {
+        match self {
+            Self::CompleteRegistry { contains } => contains,
+            Self::PartialRegistry { contains } => contains,
+            Self::Unavailable => false,
+        }
+    }
+}
+
+fn installed_skill_decision(normalized: &str) -> InstalledSkillDecision {
+    static INSTALLED_SKILLS: OnceLock<Option<HashSet<String>>> = OnceLock::new();
+
+    match INSTALLED_SKILLS.get_or_init(load_installed_skill_names) {
+        Some(installed) if installed.len() >= 5 => InstalledSkillDecision::CompleteRegistry {
+            contains: installed.contains(normalized),
+        },
+        Some(installed) => InstalledSkillDecision::PartialRegistry {
+            contains: installed.contains(normalized),
+        },
+        None => InstalledSkillDecision::Unavailable,
+    }
+}
+
+fn load_installed_skill_names() -> Option<HashSet<String>> {
+    let home = std::env::var("HOME").ok()?;
+    non_empty_skill_names(load_installed_skill_names_from_home(Path::new(&home)))
+}
+
+fn load_installed_skill_names_from_home(home: &Path) -> HashSet<String> {
+    let mut names = HashSet::new();
+
+    for rel_root in [".codex/skills", ".claude/skills"] {
+        collect_installed_skill_names(&home.join(rel_root), &mut names);
+    }
+
+    names
+}
+
+fn collect_installed_skill_names(root: &Path, names: &mut HashSet<String>) {
+    let Ok(entries) = fs::read_dir(root) else {
+        return;
+    };
+
+    for entry in entries.flatten() {
+        if let Some(name) = installed_skill_dir_name(entry) {
+            names.insert(name);
+        }
+    }
+}
+
+fn installed_skill_dir_name(entry: fs::DirEntry) -> Option<String> {
+    let file_type = entry.file_type().ok()?;
+    let path = entry.path();
+    let is_skill_dir = file_type.is_dir() || (file_type.is_symlink() && path.is_dir());
+    if !is_skill_dir {
+        return None;
+    }
+
+    normalize_skill_name(&entry.file_name().to_string_lossy())
+}
+
+fn non_empty_skill_names(names: HashSet<String>) -> Option<HashSet<String>> {
+    if names.is_empty() {
+        None
+    } else {
+        Some(names)
+    }
+}
+
+fn is_common_filesystem_root_name(raw: &str) -> bool {
+    matches!(
+        raw.to_ascii_lowercase().as_str(),
+        "bin"
+            | "dev"
+            | "etc"
+            | "home"
+            | "lib"
+            | "lib64"
+            | "mnt"
+            | "opt"
+            | "private"
+            | "proc"
+            | "sbin"
+            | "sys"
+            | "tmp"
+            | "usr"
+            | "users"
+            | "var"
+            | "volumes"
+    )
 }
 
 fn extract_skill_from_xml_block(text: &str) -> Option<String> {
@@ -107,117 +240,6 @@ fn extract_skill_from_using_marker(text: &str) -> Option<String> {
         .last()
 }
 
-fn normalize_skill_name(raw: &str) -> Option<String> {
-    let trimmed = raw.trim();
-    is_valid_skill_name_token(trimmed).then(|| trimmed.to_ascii_lowercase())
-}
-
-fn is_valid_skill_name_token(value: &str) -> bool {
-    !value.is_empty() && value.bytes().all(is_skill_name_byte)
-}
-
-fn is_skill_name_byte(byte: u8) -> bool {
-    byte.is_ascii_alphanumeric() || b"-_./".contains(&byte)
-}
-
-fn is_probable_skill_name(raw: &str) -> bool {
-    if raw.is_empty() {
-        return false;
-    }
-
-    let normalized = raw.trim().to_ascii_lowercase();
-    if normalized.is_empty() {
-        return false;
-    }
-
-    if is_builtin_skill_name(&normalized) {
-        return true;
-    }
-
-    if let Some(installed) = installed_skill_names() {
-        // Only enforce strict membership when the discovered registry looks
-        // complete enough to trust; tiny registries are often partial.
-        if installed.len() >= 5 {
-            return installed.contains(&normalized);
-        }
-        if installed.contains(&normalized) {
-            return true;
-        }
-    }
-
-    false
-}
-
-fn is_builtin_skill_name(normalized: &str) -> bool {
-    matches!(normalized, "commit" | "describe" | "domain-planner" | "gog")
-}
-
-fn installed_skill_names() -> Option<&'static HashSet<String>> {
-    static INSTALLED_SKILLS: OnceLock<Option<HashSet<String>>> = OnceLock::new();
-    INSTALLED_SKILLS
-        .get_or_init(load_installed_skill_names)
-        .as_ref()
-}
-
-fn load_installed_skill_names() -> Option<HashSet<String>> {
-    let home = std::env::var("HOME").ok()?;
-    let mut names = HashSet::new();
-
-    for rel_root in [".codex/skills", ".claude/skills"] {
-        let root = PathBuf::from(&home).join(rel_root);
-        let entries = match fs::read_dir(root) {
-            Ok(entries) => entries,
-            Err(_) => continue,
-        };
-
-        for entry in entries.flatten() {
-            let Ok(file_type) = entry.file_type() else {
-                continue;
-            };
-            let path = entry.path();
-            let is_skill_dir = file_type.is_dir() || (file_type.is_symlink() && path.is_dir());
-            if !is_skill_dir {
-                continue;
-            }
-
-            let name = entry.file_name();
-            let name = name.to_string_lossy();
-            if let Some(normalized) = normalize_skill_name(&name) {
-                names.insert(normalized);
-            }
-        }
-    }
-
-    if names.is_empty() {
-        None
-    } else {
-        Some(names)
-    }
-}
-
-fn is_common_filesystem_root_name(raw: &str) -> bool {
-    matches!(
-        raw.to_ascii_lowercase().as_str(),
-        "bin"
-            | "dev"
-            | "etc"
-            | "home"
-            | "lib"
-            | "lib64"
-            | "mnt"
-            | "opt"
-            | "private"
-            | "proc"
-            | "sbin"
-            | "sys"
-            | "tmp"
-            | "usr"
-            | "users"
-            | "var"
-            | "volumes"
-    )
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -245,6 +267,38 @@ mod tests {
         for (raw, expected) in cases {
             assert_eq!(normalize_skill_name(raw).as_deref(), expected, "{raw}");
         }
+    }
+
+    #[test]
+    fn load_installed_skill_names_from_home_returns_empty_for_missing_roots() {
+        let temp = tempfile::tempdir().expect("tempdir");
+
+        assert!(load_installed_skill_names_from_home(temp.path()).is_empty());
+        assert!(non_empty_skill_names(HashSet::new()).is_none());
+    }
+
+    #[test]
+    fn load_installed_skill_names_from_home_collects_valid_skill_dirs() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let codex = temp.path().join(".codex/skills");
+        let claude = temp.path().join(".claude/skills");
+        std::fs::create_dir_all(codex.join("Commit")).expect("codex skill");
+        std::fs::create_dir_all(codex.join("bad skill")).expect("invalid skill");
+        std::fs::create_dir_all(claude.join("domain-planner")).expect("claude skill");
+        std::fs::write(codex.join("describe"), "not a directory").expect("file entry");
+
+        let names = load_installed_skill_names_from_home(temp.path());
+
+        assert!(names.contains("commit"));
+        assert!(names.contains("domain-planner"));
+        assert!(!names.contains("bad skill"));
+        assert!(!names.contains("describe"));
+        assert_eq!(
+            non_empty_skill_names(names.clone())
+                .expect("non-empty names")
+                .len(),
+            names.len()
+        );
     }
 
     #[test]
