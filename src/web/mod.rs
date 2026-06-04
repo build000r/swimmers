@@ -29,6 +29,7 @@ use crate::types::{clamp_terminal_resize, opcodes, ControlEvent, SessionSummary}
 
 const APP_JS_ROUTE: &str = "/app.js";
 const APP_EVENT_BINDINGS_JS_ROUTE: &str = "/app_event_bindings.js";
+const TROGDOR_EVENT_BINDINGS_JS_ROUTE: &str = "/trogdor_event_bindings.js";
 const RENDERED_SURFACE_JS_ROUTE: &str = "/rendered_surface.js";
 const RENDERED_SURFACE_DRAW_JS_ROUTE: &str = "/rendered_surface_draw.js";
 const INPUT_SUPPORT_JS_ROUTE: &str = "/input_support.js";
@@ -104,6 +105,10 @@ pub fn routes() -> Router<Arc<AppState>> {
         .route(PUBLISHED_VIEW_ROUTE, get(selected_index))
         .route(APP_JS_ROUTE, get(app_js))
         .route(APP_EVENT_BINDINGS_JS_ROUTE, get(app_event_bindings_js))
+        .route(
+            TROGDOR_EVENT_BINDINGS_JS_ROUTE,
+            get(trogdor_event_bindings_js),
+        )
         .route(RENDERED_SURFACE_JS_ROUTE, get(rendered_surface_js))
         .route(
             RENDERED_SURFACE_DRAW_JS_ROUTE,
@@ -660,6 +665,13 @@ async fn app_event_bindings_js() -> Response {
     javascript_asset(
         "src/web/app_event_bindings.js",
         include_str!("app_event_bindings.js"),
+    )
+}
+
+async fn trogdor_event_bindings_js() -> Response {
+    javascript_asset(
+        "src/web/trogdor_event_bindings.js",
+        include_str!("trogdor_event_bindings.js"),
     )
 }
 
@@ -2746,6 +2758,16 @@ mod tests {
                 APP_EVENT_BINDINGS_JS_ROUTE,
                 app_event_bindings_js().await,
                 "export function bindAppEvents",
+            ),
+            (
+                APP_JS_ROUTE,
+                app_js().await,
+                "from \"./trogdor_event_bindings.js\"",
+            ),
+            (
+                TROGDOR_EVENT_BINDINGS_JS_ROUTE,
+                trogdor_event_bindings_js().await,
+                "export function bindTrogdorEvents",
             ),
             (
                 APP_JS_ROUTE,

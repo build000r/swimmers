@@ -757,6 +757,25 @@ fn header_filter_strip_toggles_filter_out_mode_and_excludes_selected_projects() 
 }
 
 #[test]
+fn active_thought_filter_text_combines_labels_in_stable_order() {
+    let api = MockApi::new();
+    let mut app = make_app(api);
+    app.thought_filter.cwd = Some("/tmp/swimmers".to_string());
+    app.thought_filter.tmux_name = Some("7".to_string());
+    app.thought_filter
+        .excluded_cwds
+        .insert("/tmp/zeta".to_string());
+    app.thought_filter
+        .excluded_cwds
+        .insert("/tmp/alpha".to_string());
+
+    assert_eq!(
+        app.active_thought_filter_text(),
+        "filter: pwd=swimmers, hide=alpha,zeta, num=7"
+    );
+}
+
+#[test]
 fn clicking_bracketed_thought_label_opens_that_session() {
     let api = MockApi::new();
     let layout = test_layout(120, 32);

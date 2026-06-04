@@ -1147,31 +1147,7 @@ impl<C: TuiApi> App<C> {
 
     #[allow(dead_code)]
     pub(crate) fn active_thought_filter_text(&self) -> String {
-        if !self.thought_filter.is_active() {
-            return "filter: none".to_string();
-        }
-
-        let mut parts = Vec::new();
-        if let Some(cwd) = self.thought_filter.cwd.as_deref() {
-            parts.push(format!(
-                "pwd={}",
-                path_tail_label(cwd).unwrap_or_else(|| cwd.to_string())
-            ));
-        }
-        if !self.thought_filter.excluded_cwds.is_empty() {
-            let mut hidden = self
-                .thought_filter
-                .excluded_cwds
-                .iter()
-                .map(|cwd| path_tail_label(cwd).unwrap_or_else(|| cwd.to_string()))
-                .collect::<Vec<_>>();
-            hidden.sort();
-            parts.push(format!("hide={}", hidden.join(",")));
-        }
-        if let Some(tmux_name) = self.thought_filter.tmux_name.as_deref() {
-            parts.push(format!("num={tmux_name}"));
-        }
-        format!("filter: {}", parts.join(", "))
+        active_thought_filter_text(&self.thought_filter)
     }
 
     pub(crate) fn set_thought_filter_cwd(&mut self, cwd: String) {

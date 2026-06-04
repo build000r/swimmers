@@ -3,13 +3,13 @@ use std::sync::Arc;
 
 use axum::extract::State;
 use axum::http::{HeaderMap, StatusCode};
-use axum::response::{IntoResponse, Response};
+use axum::response::Response;
 use axum::routing::get;
 use axum::{Extension, Json, Router};
 
 use crate::api::envelope::{
     api_error, api_error_msg, error_response, parse_if_match_version, reserve_version_locked,
-    success_json, PERSISTENCE_UNAVAILABLE, VERSION_CONFLICT,
+    success_json, VersionReservation, PERSISTENCE_UNAVAILABLE, VERSION_CONFLICT,
 };
 use crate::api::service::{
     persist_validated_thought_config, test_thought_config as test_thought_config_service,
@@ -17,6 +17,7 @@ use crate::api::service::{
 };
 use crate::api::AppState;
 use crate::auth::{AuthInfo, AuthScope};
+use crate::persistence::file_store::FileStore;
 use crate::thought::protocol::{build_sync_request, SyncRequest};
 use crate::thought::runtime_config::ThoughtConfig;
 use crate::types::ThoughtConfigResponse;
@@ -47,28 +48,46 @@ async fn put_thought_config(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     Json(body): Json<ThoughtConfig>,
-) -> impl IntoResponse {
-    if let Err(resp) = auth.require_scope(AuthScope::SessionsWrite) {
-        return resp;
-    }
+) -> Response {
+    put_thought_config_response(auth, state, headers, body)
+        .await
+        .unwrap_or_else(|response| response)
+}
 
-    let config = match validate_thought_config(body) {
-        Ok(config) => config,
-        Err(err) => return api_service_error_response(err),
-    };
-
-    let store = match state.current_file_store() {
-        Some(store) => store,
-        None => {
-            return api_error_msg(
-                &PERSISTENCE_UNAVAILABLE,
-                "thought config persistence is unavailable",
-            );
-        }
-    };
-
+async fn put_thought_config_response(
+    auth: AuthInfo,
+    state: Arc<AppState>,
+    headers: HeaderMap,
+    body: ThoughtConfig,
+) -> Result<Response, Response> {
+    auth.require_scope(AuthScope::SessionsWrite)?;
+    let config = validated_put_thought_config(body)?;
+    let store = thought_config_store(&state)?;
     let requested_version = parse_if_match_version(&headers);
+    let new_version =
+        persist_thought_config_update(&state, &store, config.clone(), requested_version).await?;
+    Ok(success_thought_config_response(&config, new_version))
+}
 
+fn validated_put_thought_config(config: ThoughtConfig) -> Result<ThoughtConfig, Response> {
+    validate_thought_config(config).map_err(api_service_error_response)
+}
+
+fn thought_config_store(state: &AppState) -> Result<Arc<FileStore>, Response> {
+    state.current_file_store().ok_or_else(|| {
+        api_error_msg(
+            &PERSISTENCE_UNAVAILABLE,
+            "thought config persistence is unavailable",
+        )
+    })
+}
+
+async fn persist_thought_config_update(
+    state: &AppState,
+    store: &Arc<FileStore>,
+    config: ThoughtConfig,
+    requested_version: Option<u64>,
+) -> Result<u64, Response> {
     // Hold the runtime-config write lock across the version reservation, the
     // disk write, and the in-memory update. This guarantees three things:
     //   * the version returned to the client matches the order in which
@@ -78,25 +97,38 @@ async fn put_thought_config(
     //     keep working,
     //   * disk and in-memory state can never diverge.
     let mut runtime_config = state.thought_config.write().await;
-    let reservation = match reserve_version_locked(&THOUGHT_CONFIG_VERSION, requested_version) {
-        Some(reservation) => reservation,
-        None => return api_error(&VERSION_CONFLICT),
-    };
+    let reservation = reserve_thought_config_version(requested_version)?;
 
-    if let Err(err) =
-        persist_validated_thought_config(&store, &mut runtime_config, config.clone()).await
-    {
-        return api_service_error_response(err);
-    }
+    persist_validated_thought_config(store, &mut runtime_config, config)
+        .await
+        .map_err(api_service_error_response)?;
 
     let new_version = reservation.commit();
     drop(runtime_config);
+    Ok(new_version)
+}
 
-    let mut body = serde_json::to_value(&config).unwrap_or_else(|_| serde_json::json!({}));
-    if let Some(obj) = body.as_object_mut() {
-        obj.insert("version".to_string(), serde_json::json!(new_version));
-    }
+fn reserve_thought_config_version(
+    requested_version: Option<u64>,
+) -> Result<VersionReservation<'static>, Response> {
+    reserve_version_locked(&THOUGHT_CONFIG_VERSION, requested_version)
+        .ok_or_else(|| api_error(&VERSION_CONFLICT))
+}
+
+fn success_thought_config_response(config: &ThoughtConfig, version: u64) -> Response {
+    let mut body = thought_config_response_body(config);
+    insert_thought_config_version(&mut body, version);
     success_json(StatusCode::OK, &body)
+}
+
+fn thought_config_response_body(config: &ThoughtConfig) -> serde_json::Value {
+    serde_json::to_value(config).unwrap_or_else(|_| serde_json::json!({}))
+}
+
+fn insert_thought_config_version(body: &mut serde_json::Value, version: u64) {
+    if let Some(obj) = body.as_object_mut() {
+        obj.insert("version".to_string(), serde_json::json!(version));
+    }
 }
 
 async fn post_thought_config_test(

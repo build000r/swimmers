@@ -7,6 +7,7 @@ import {
   normalizeTerminalZoomValue, terminalAuxiliaryControlsPlan, terminalFallbackScrollPlan, terminalInputDockPlan, terminalPaintProbeSchedulePlan, terminalPaintVerificationPlan, terminalPresentationPlan, terminalStageKeydownPlan, terminalStageMouseDownPlan, terminalStageMouseMovePlan, terminalStageMouseUpPlan, terminalStagePasteExecutorPlan, terminalStagePastePlan, terminalStageTouchEndPlan, terminalStageWheelPlan, terminalToolsAvailabilityPlan, terminalZoomControlsPlan, terminalZoomLoadValue, terminalZoomPercentLabel, terminalZoomPersistencePlan,
 } from "./input_support.js";
 import { bindAppEvents } from "./app_event_bindings.js";
+import { createTrogdorEventBindings } from "./trogdor_event_bindings.js";
 import { createSendController } from "./send_controller.js";
 import {
   createThoughtConfigSheetController,
@@ -95,7 +96,6 @@ import {
   trogdorAtlasTransitionState,
   trogdorCueTransitionState,
   trogdorCurrentSurfaceSessionForHover,
-  trogdorDomActionZoneForDataset,
   trogdorHoverReaderResetState,
   trogdorHoverSessionIdForZone,
   trogdorReadableHoveredSurfaceSession,
@@ -110,8 +110,6 @@ import {
   trogdorSessionCanReadForState,
   trogdorSessionBurntInMap,
   trogdorSessionAwaitingUser,
-  trogdorSurfaceClickPlan, trogdorSurfaceFocusInPlan, trogdorSurfaceFocusOutPlan, trogdorSurfaceMouseleavePlan,
-  trogdorSurfaceMouseoverPlan, trogdorSurfacePassthroughBindings, trogdorSurfacePointerDownPlan,
   trogdorSwordsmanVisibleForState,
   trogdorTerminalFocusStatus,
 } from "./trogdor_logic.js";
@@ -2989,88 +2987,20 @@ function syncTrogdorReaderTimer() {
   }
 }
 
-async function handleTrogdorDomAction(button) {
-  if (!button || button.disabled) {
-    return;
-  }
-  await handleSurfaceAction(trogdorDomActionZoneForDataset(button.dataset));
-}
-
-function trogdorEventTarget(event) { return event.target instanceof Element ? event.target : null; }
-
-function trogdorRelatedTarget(event) { return event.relatedTarget instanceof Element ? event.relatedTarget : null; }
-
-function handleTrogdorLauncherClick(event) { event.preventDefault(); openTrogdorAtlas(); }
-
-function handleTrogdorSurfacePointerDown(event) {
-  const plan = trogdorSurfacePointerDownPlan(trogdorEventTarget(event));
-  if (plan.type !== "open_agent_terminal") {
-    return;
-  }
-  if (plan.preventDefault) event.preventDefault();
-  if (plan.stopPropagation) event.stopPropagation();
-  void openTrogdorAgentTerminal(plan.sessionId);
-}
-
-function handleTrogdorSurfacePassthrough(event) { event.stopPropagation(); }
-
-function installTrogdorSurfacePassthroughBindings() {
-  for (const binding of trogdorSurfacePassthroughBindings()) {
-    el.trogdorSurface.addEventListener(binding.eventName, handleTrogdorSurfacePassthrough, binding.options);
-  }
-}
-
-function handleTrogdorSurfaceClick(event) {
-  const plan = trogdorSurfaceClickPlan(trogdorEventTarget(event));
-  if (plan.preventDefault) event.preventDefault();
-  if (plan.stopPropagation) event.stopPropagation();
-  if (plan.type === "dom_action") {
-    void handleTrogdorDomAction(plan.button);
-    return;
-  }
-  if (plan.type === "surface_action") {
-    void handleSurfaceAction(plan.zone);
-  }
-}
-
-function handleTrogdorSurfaceMouseover(event) {
-  const plan = trogdorSurfaceMouseoverPlan(trogdorEventTarget(event));
-  if (plan.type === "hover") updateHoveredTrogdorSurface(plan.hover);
-}
-
-function handleTrogdorSurfaceMouseleave() {
-  updateHoveredTrogdorSurface(trogdorSurfaceMouseleavePlan().hover);
-}
-
-function handleTrogdorSurfaceFocusIn(event) {
-  const plan = trogdorSurfaceFocusInPlan(trogdorEventTarget(event));
-  if (plan.type === "hover") updateHoveredTrogdorSurface(plan.hover);
-}
-
-function handleTrogdorSurfaceFocusOut(event) {
-  const next = trogdorRelatedTarget(event);
-  const plan = trogdorSurfaceFocusOutPlan({
-    relatedTargetInsideSurface: Boolean(next && el.trogdorSurface.contains(next)),
-  });
-  if (plan.type === "clear_hover") updateHoveredTrogdorSurface(plan.hover);
-}
+let trogdorEventBindings = null;
 
 function bindTrogdorEvents() {
-  if (el.trogdorLauncher) {
-    el.trogdorLauncher.addEventListener("click", handleTrogdorLauncherClick);
+  if (!trogdorEventBindings) {
+    trogdorEventBindings = createTrogdorEventBindings({
+      elements: el,
+      ElementClass: Element,
+      handleSurfaceAction,
+      openTrogdorAgentTerminal,
+      openTrogdorAtlas,
+      updateHoveredTrogdorSurface,
+    });
   }
-
-  if (!el.trogdorSurface) {
-    return;
-  }
-
-  el.trogdorSurface.addEventListener("pointerdown", handleTrogdorSurfacePointerDown);
-  installTrogdorSurfacePassthroughBindings();
-  el.trogdorSurface.addEventListener("click", handleTrogdorSurfaceClick);
-  el.trogdorSurface.addEventListener("mouseover", handleTrogdorSurfaceMouseover);
-  el.trogdorSurface.addEventListener("mouseleave", handleTrogdorSurfaceMouseleave);
-  el.trogdorSurface.addEventListener("focusin", handleTrogdorSurfaceFocusIn);
-  el.trogdorSurface.addEventListener("focusout", handleTrogdorSurfaceFocusOut);
+  trogdorEventBindings.bindTrogdorEvents();
 }
 
 function handleGlobalShortcut(event) {

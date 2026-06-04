@@ -491,25 +491,12 @@ fn adjacent_checkout_clawgs_bin(
     current_dir: Option<&Path>,
     executable: Option<&Path>,
 ) -> Option<String> {
-    let mut search_roots = Vec::new();
-    if let Some(dir) = current_dir {
-        search_roots.push(dir.to_path_buf());
-    }
-    if let Some(exe) = executable {
-        if let Some(parent) = exe.parent() {
-            search_roots.push(parent.to_path_buf());
-        }
-    }
-
-    for root in search_roots {
-        for candidate in adjacent_checkout_candidates(&root) {
-            if candidate.is_file() {
-                return Some(candidate.to_string_lossy().into_owned());
-            }
-        }
-    }
-
-    None
+    current_dir
+        .into_iter()
+        .chain(executable.and_then(Path::parent))
+        .flat_map(adjacent_checkout_candidates)
+        .find(|candidate| candidate.is_file())
+        .map(|candidate| candidate.to_string_lossy().into_owned())
 }
 
 fn adjacent_checkout_candidates(root: &Path) -> [PathBuf; 1] {
@@ -972,13 +959,7 @@ printf '%s\n' '{"type":"sync_result","id":"stale-request","updates":[]}'
     fn resolve_clawgs_bin_prefers_adjacent_opensource_checkout_before_path_lookup() {
         let temp = tempdir().expect("tempdir");
         let repo_root = temp.path().join("opensource/swimmers");
-        let adjacent = temp
-            .path()
-            .join("opensource/clawgs/target/release")
-            .join(default_clawgs_bin_name());
-        fs::create_dir_all(adjacent.parent().expect("parent dir"))
-            .expect("create adjacent clawgs dir");
-        fs::write(&adjacent, "#!/bin/sh\n").expect("write adjacent clawgs");
+        let adjacent = write_adjacent_checkout_bin(&temp.path().join("opensource"));
 
         let resolved = resolve_clawgs_bin_with(
             None,
@@ -990,6 +971,32 @@ printf '%s\n' '{"type":"sync_result","id":"stale-request","updates":[]}'
     }
 
     #[test]
+    fn resolve_clawgs_bin_prefers_current_dir_adjacent_before_executable_parent() {
+        let temp = tempdir().expect("tempdir");
+        let current_dir = temp.path().join("work/swimmers");
+        let executable = temp.path().join("bin/swimmers");
+        let current_dir_adjacent = write_adjacent_checkout_bin(&temp.path().join("work"));
+        let executable_adjacent = write_adjacent_checkout_bin(temp.path());
+
+        let resolved = resolve_clawgs_bin_with(None, Some(executable), Some(current_dir));
+
+        assert_eq!(resolved, current_dir_adjacent.to_string_lossy());
+        assert_ne!(resolved, executable_adjacent.to_string_lossy());
+    }
+
+    #[test]
+    fn resolve_clawgs_bin_uses_executable_parent_adjacent_checkout() {
+        let temp = tempdir().expect("tempdir");
+        let current_dir = temp.path().join("work/swimmers");
+        let executable = temp.path().join("bin/swimmers");
+        let executable_adjacent = write_adjacent_checkout_bin(temp.path());
+
+        let resolved = resolve_clawgs_bin_with(None, Some(executable), Some(current_dir));
+
+        assert_eq!(resolved, executable_adjacent.to_string_lossy());
+    }
+
+    #[test]
     fn resolve_clawgs_bin_falls_back_to_default_name() {
         let resolved = resolve_clawgs_bin_with(
             None,
@@ -997,6 +1004,16 @@ printf '%s\n' '{"type":"sync_result","id":"stale-request","updates":[]}'
             Some(PathBuf::from("/tmp/project")),
         );
         assert_eq!(resolved, default_clawgs_bin_name());
+    }
+
+    fn write_adjacent_checkout_bin(base: &Path) -> PathBuf {
+        let adjacent = base
+            .join("clawgs/target/release")
+            .join(default_clawgs_bin_name());
+        fs::create_dir_all(adjacent.parent().expect("parent dir"))
+            .expect("create adjacent clawgs dir");
+        fs::write(&adjacent, "#!/bin/sh\n").expect("write adjacent clawgs");
+        adjacent
     }
 
     fn restore_env_var(key: &str, value: Option<String>) {

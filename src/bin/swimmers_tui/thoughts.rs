@@ -523,6 +523,42 @@ pub(crate) fn path_tail_label(path: &str) -> Option<String> {
         .map(ToOwned::to_owned)
 }
 
+pub(crate) fn active_thought_filter_text(filter: &ThoughtFilter) -> String {
+    let parts = active_thought_filter_parts(filter);
+    if parts.is_empty() {
+        return "filter: none".to_string();
+    }
+    format!("filter: {}", parts.join(", "))
+}
+
+fn active_thought_filter_parts(filter: &ThoughtFilter) -> Vec<String> {
+    let mut parts = Vec::new();
+    if let Some(cwd) = filter.cwd.as_deref() {
+        parts.push(format!("pwd={}", thought_filter_cwd_label(cwd)));
+    }
+    if !filter.excluded_cwds.is_empty() {
+        parts.push(format!("hide={}", excluded_thought_filter_labels(filter)));
+    }
+    if let Some(tmux_name) = filter.tmux_name.as_deref() {
+        parts.push(format!("num={tmux_name}"));
+    }
+    parts
+}
+
+fn excluded_thought_filter_labels(filter: &ThoughtFilter) -> String {
+    let mut hidden = filter
+        .excluded_cwds
+        .iter()
+        .map(|cwd| thought_filter_cwd_label(cwd))
+        .collect::<Vec<_>>();
+    hidden.sort();
+    hidden.join(",")
+}
+
+fn thought_filter_cwd_label(cwd: &str) -> String {
+    path_tail_label(cwd).unwrap_or_else(|| cwd.to_string())
+}
+
 pub(crate) fn thought_session_label(pwd_label: Option<&str>, tmux_name: &str) -> String {
     match pwd_label.map(str::trim).filter(|label| !label.is_empty()) {
         Some(pwd_label) if !tmux_name.trim().is_empty() => format!("{pwd_label}/{tmux_name}"),
