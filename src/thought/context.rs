@@ -803,64 +803,14 @@ impl CodexReader {
     /// Walk `~/.codex/sessions/YYYY/MM/DD/` in reverse chronological order,
     /// returning the first `rollout-*.jsonl` whose `session_meta.cwd` matches.
     fn discover_file(&self) -> Option<PathBuf> {
-        let home = dirs_home()?;
-        let sessions_dir = home.join(".codex").join("sessions");
-
-        let years = sorted_subdirs_reverse(&sessions_dir, r"^\d{4}$")?;
-        for year in years {
-            let months = sorted_subdirs_reverse(&year, r"^\d{2}$");
-            for month in months.into_iter().flatten() {
-                let days = sorted_subdirs_reverse(&month, r"^\d{2}$");
-                for day in days.into_iter().flatten() {
-                    let mut files: Vec<PathBuf> = fs::read_dir(&day)
-                        .ok()
-                        .into_iter()
-                        .flatten()
-                        .filter_map(|e| e.ok())
-                        .map(|e| e.path())
-                        .filter(|p| {
-                            let name = p.file_name().and_then(|n| n.to_str()).unwrap_or("");
-                            name.starts_with("rollout-") && name.ends_with(".jsonl")
-                        })
-                        .collect();
-                    files.sort();
-                    files.reverse();
-
-                    for f in files {
-                        if self.excluded_paths.contains(&f) {
-                            continue;
-                        }
-                        if self.matches_cwd(&f) {
-                            return Some(f);
-                        }
-                    }
-                }
-            }
-        }
-        None
+        let sessions_dir = codex_sessions_dir()?;
+        discover_codex_rollout_file(&sessions_dir, &self.cwd, &self.excluded_paths)
     }
 
     /// Check if the first line of a JSONL file is a `session_meta` entry
     /// whose `cwd` matches ours.
     fn matches_cwd(&self, path: &Path) -> bool {
-        let result: std::io::Result<bool> = (|| {
-            use std::io::BufRead;
-            let file = fs::File::open(path)?;
-            let mut lines = std::io::BufReader::new(file).lines();
-            let first_line = lines.next().transpose()?.unwrap_or_default();
-            if first_line.is_empty() {
-                return Ok(false);
-            }
-            let entry: Value = serde_json::from_str(&first_line)
-                .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
-            if entry.get("type").and_then(Value::as_str) == Some("session_meta") {
-                if let Some(payload) = entry.get("payload") {
-                    return Ok(payload.get("cwd").and_then(Value::as_str) == Some(&self.cwd));
-                }
-            }
-            Ok(false)
-        })();
-        result.unwrap_or(false)
+        codex_file_matches_cwd(path, &self.cwd)
     }
 
     /// Parse entries and update internal state.
@@ -1134,6 +1084,79 @@ impl ContextReader for CodexReader {
     fn claimed_path(&self) -> Option<PathBuf> {
         self.file_path.clone()
     }
+}
+
+fn codex_sessions_dir() -> Option<PathBuf> {
+    dirs_home().map(|home| home.join(".codex").join("sessions"))
+}
+
+fn discover_codex_rollout_file(
+    sessions_dir: &Path,
+    cwd: &str,
+    excluded_paths: &[PathBuf],
+) -> Option<PathBuf> {
+    for day in codex_session_days_reverse(sessions_dir) {
+        for candidate in codex_rollout_files_reverse(&day) {
+            if codex_rollout_candidate_matches(&candidate, cwd, excluded_paths) {
+                return Some(candidate);
+            }
+        }
+    }
+    None
+}
+
+fn codex_session_days_reverse(sessions_dir: &Path) -> Vec<PathBuf> {
+    sorted_subdirs_reverse(sessions_dir, r"^\d{4}$")
+        .into_iter()
+        .flatten()
+        .flat_map(|year| sorted_subdirs_reverse(&year, r"^\d{2}$").unwrap_or_default())
+        .flat_map(|month| sorted_subdirs_reverse(&month, r"^\d{2}$").unwrap_or_default())
+        .collect()
+}
+
+fn codex_rollout_files_reverse(day: &Path) -> Vec<PathBuf> {
+    let mut files: Vec<PathBuf> = fs::read_dir(day)
+        .ok()
+        .into_iter()
+        .flatten()
+        .filter_map(|entry| entry.ok())
+        .map(|entry| entry.path())
+        .filter(|path| codex_is_rollout_jsonl(path))
+        .collect();
+    files.sort();
+    files.reverse();
+    files
+}
+
+fn codex_is_rollout_jsonl(path: &Path) -> bool {
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| name.starts_with("rollout-") && name.ends_with(".jsonl"))
+}
+
+fn codex_rollout_candidate_matches(path: &Path, cwd: &str, excluded_paths: &[PathBuf]) -> bool {
+    !excluded_paths.iter().any(|excluded| excluded == path) && codex_file_matches_cwd(path, cwd)
+}
+
+fn codex_file_matches_cwd(path: &Path, cwd: &str) -> bool {
+    codex_file_session_meta_cwd(path).is_some_and(|candidate_cwd| candidate_cwd == cwd)
+}
+
+fn codex_file_session_meta_cwd(path: &Path) -> Option<String> {
+    use std::io::BufRead;
+
+    let file = fs::File::open(path).ok()?;
+    let first_line = std::io::BufReader::new(file).lines().next()?.ok()?;
+    let entry: Value = serde_json::from_str(&first_line).ok()?;
+    (entry.get("type").and_then(Value::as_str) == Some("session_meta"))
+        .then(|| {
+            entry
+                .get("payload")
+                .and_then(|payload| payload.get("cwd"))
+                .and_then(Value::as_str)
+                .map(str::to_string)
+        })
+        .flatten()
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1562,6 +1585,96 @@ mod tests {
 
         let reader = CodexReader::new("/tmp/project", &[]);
         assert!(reader.matches_cwd(&path));
+    }
+
+    #[test]
+    fn codex_reader_discovery_skips_excluded_non_rollout_and_uses_reverse_order() {
+        let _lock = crate::test_support::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let older_dir = tmp
+            .path()
+            .join(".codex")
+            .join("sessions")
+            .join("2026")
+            .join("03")
+            .join("16");
+        let newer_dir = tmp
+            .path()
+            .join(".codex")
+            .join("sessions")
+            .join("2026")
+            .join("03")
+            .join("17");
+        fs::create_dir_all(&older_dir).expect("older sessions dir");
+        fs::create_dir_all(&newer_dir).expect("newer sessions dir");
+
+        let older_match = older_dir.join("rollout-z.jsonl");
+        fs::write(
+            &older_match,
+            "{\"type\":\"session_meta\",\"payload\":{\"cwd\":\"/tmp/project\"}}\n",
+        )
+        .expect("older match");
+
+        let wrong_cwd = newer_dir.join("rollout-c.jsonl");
+        fs::write(
+            &wrong_cwd,
+            "{\"type\":\"session_meta\",\"payload\":{\"cwd\":\"/tmp/other\"}}\n",
+        )
+        .expect("wrong cwd");
+        let excluded = newer_dir.join("rollout-b.jsonl");
+        fs::write(
+            &excluded,
+            "{\"type\":\"session_meta\",\"payload\":{\"cwd\":\"/tmp/project\"}}\n",
+        )
+        .expect("excluded");
+        let selected = newer_dir.join("rollout-a.jsonl");
+        fs::write(
+            &selected,
+            "{\"type\":\"session_meta\",\"payload\":{\"cwd\":\"/tmp/project\"}}\n",
+        )
+        .expect("selected");
+        fs::write(
+            newer_dir.join("session-newest.jsonl"),
+            "{\"type\":\"session_meta\",\"payload\":{\"cwd\":\"/tmp/project\"}}\n",
+        )
+        .expect("non rollout");
+
+        let previous_home = std::env::var_os("HOME");
+        std::env::set_var("HOME", tmp.path());
+
+        let reader = CodexReader::new("/tmp/project", &[excluded]);
+        assert_eq!(reader.discover_file(), Some(selected));
+
+        if let Some(prev) = previous_home {
+            std::env::set_var("HOME", prev);
+        } else {
+            std::env::remove_var("HOME");
+        }
+    }
+
+    #[test]
+    fn codex_file_matches_cwd_rejects_malformed_and_non_meta_first_lines() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let empty = tmp.path().join("rollout-empty.jsonl");
+        fs::write(&empty, "").expect("empty");
+        let malformed = tmp.path().join("rollout-malformed.jsonl");
+        fs::write(&malformed, "{not json}\n").expect("malformed");
+        let non_meta = tmp.path().join("rollout-non-meta.jsonl");
+        fs::write(
+            &non_meta,
+            "{\"type\":\"event_msg\",\"payload\":{\"cwd\":\"/tmp/project\"}}\n",
+        )
+        .expect("non meta");
+        let missing_cwd = tmp.path().join("rollout-missing-cwd.jsonl");
+        fs::write(&missing_cwd, "{\"type\":\"session_meta\",\"payload\":{}}\n")
+            .expect("missing cwd");
+
+        assert!(!codex_file_matches_cwd(&empty, "/tmp/project"));
+        assert!(!codex_file_matches_cwd(&malformed, "/tmp/project"));
+        assert!(!codex_file_matches_cwd(&non_meta, "/tmp/project"));
+        assert!(!codex_file_matches_cwd(&missing_cwd, "/tmp/project"));
     }
 
     #[test]

@@ -799,56 +799,104 @@ pub(crate) fn mermaid_detail_box_rects(
     projected: &[MermaidProjectedLine],
     content_rect: Rect,
 ) -> HashMap<String, MermaidOutlineLabelRect> {
-    let mut rects = HashMap::<String, MermaidOutlineLabelRect>::new();
-
-    for line in projected {
-        let Some(source) = semantic_lines.get(line.source_index) else {
-            continue;
-        };
-        if !mermaid_is_compact_box_owner_key(&source.owner_key) {
-            continue;
-        }
-
-        let line_left = line.x as i32;
-        let line_right = line_left + display_width(&line.text) as i32 - 1;
-        let line_y = line.y as i32;
-
-        rects
-            .entry(source.owner_key.clone())
-            .and_modify(|rect| {
-                rect.left = rect.left.min(line_left);
-                rect.right = rect.right.max(line_right);
-                rect.top = rect.top.min(line_y);
-                rect.bottom = rect.bottom.max(line_y);
-            })
-            .or_insert(MermaidOutlineLabelRect {
-                left: line_left,
-                right: line_right,
-                top: line_y,
-                bottom: line_y,
-            });
-    }
-
-    let min_x = content_rect.x as i32;
-    let max_x = content_rect.right() as i32 - 1;
-    let min_y = content_rect.y as i32;
-    let max_y = content_rect.bottom() as i32 - 1;
-
-    for rect in rects.values_mut() {
-        rect.left = (rect.left - 1).clamp(min_x, max_x);
-        rect.right = (rect.right + 1).clamp(rect.left, max_x);
-        rect.top = (rect.top - 1).clamp(min_y, max_y);
-        rect.bottom = (rect.bottom + 1).clamp(rect.top, max_y);
-
-        if rect.right == rect.left && rect.right < max_x {
-            rect.right += 1;
-        }
-        if rect.bottom == rect.top && rect.bottom < max_y {
-            rect.bottom += 1;
-        }
-    }
+    let mut rects = collect_mermaid_detail_box_rects(semantic_lines, projected);
+    let bounds = MermaidDetailBoxBounds::from_content_rect(content_rect);
+    rects
+        .values_mut()
+        .for_each(|rect| expand_mermaid_detail_box_rect(rect, bounds));
 
     rects
+}
+
+#[derive(Clone, Copy)]
+struct MermaidDetailBoxBounds {
+    min_x: i32,
+    max_x: i32,
+    min_y: i32,
+    max_y: i32,
+}
+
+impl MermaidDetailBoxBounds {
+    fn from_content_rect(content_rect: Rect) -> Self {
+        Self {
+            min_x: content_rect.x as i32,
+            max_x: content_rect.right() as i32 - 1,
+            min_y: content_rect.y as i32,
+            max_y: content_rect.bottom() as i32 - 1,
+        }
+    }
+}
+
+fn collect_mermaid_detail_box_rects(
+    semantic_lines: &[MermaidSemanticLine],
+    projected: &[MermaidProjectedLine],
+) -> HashMap<String, MermaidOutlineLabelRect> {
+    let mut rects = HashMap::<String, MermaidOutlineLabelRect>::new();
+    for line in projected {
+        if let Some((owner_key, line_rect)) = mermaid_detail_box_line_rect(semantic_lines, line) {
+            merge_mermaid_detail_box_rect(&mut rects, owner_key, line_rect);
+        }
+    }
+    rects
+}
+
+fn mermaid_detail_box_line_rect(
+    semantic_lines: &[MermaidSemanticLine],
+    line: &MermaidProjectedLine,
+) -> Option<(String, MermaidOutlineLabelRect)> {
+    let source = semantic_lines.get(line.source_index)?;
+    mermaid_is_compact_box_owner_key(&source.owner_key).then(|| {
+        let line_left = line.x as i32;
+        let line_right = line_left + display_width(&line.text) as i32 - 1;
+        (
+            source.owner_key.clone(),
+            MermaidOutlineLabelRect {
+                left: line_left,
+                right: line_right,
+                top: line.y as i32,
+                bottom: line.y as i32,
+            },
+        )
+    })
+}
+
+fn merge_mermaid_detail_box_rect(
+    rects: &mut HashMap<String, MermaidOutlineLabelRect>,
+    owner_key: String,
+    line_rect: MermaidOutlineLabelRect,
+) {
+    rects
+        .entry(owner_key)
+        .and_modify(|rect| {
+            rect.left = rect.left.min(line_rect.left);
+            rect.right = rect.right.max(line_rect.right);
+            rect.top = rect.top.min(line_rect.top);
+            rect.bottom = rect.bottom.max(line_rect.bottom);
+        })
+        .or_insert(line_rect);
+}
+
+fn expand_mermaid_detail_box_rect(
+    rect: &mut MermaidOutlineLabelRect,
+    bounds: MermaidDetailBoxBounds,
+) {
+    rect.left = (rect.left - 1).clamp(bounds.min_x, bounds.max_x);
+    rect.right = (rect.right + 1).clamp(rect.left, bounds.max_x);
+    rect.top = (rect.top - 1).clamp(bounds.min_y, bounds.max_y);
+    rect.bottom = (rect.bottom + 1).clamp(rect.top, bounds.max_y);
+    expand_mermaid_detail_box_min_extent(rect, bounds);
+}
+
+fn expand_mermaid_detail_box_min_extent(
+    rect: &mut MermaidOutlineLabelRect,
+    bounds: MermaidDetailBoxBounds,
+) {
+    if rect.right == rect.left && rect.right < bounds.max_x {
+        rect.right += 1;
+    }
+    if rect.bottom == rect.top && rect.bottom < bounds.max_y {
+        rect.bottom += 1;
+    }
 }
 
 pub(crate) fn mermaid_build_packed_detail_owners(

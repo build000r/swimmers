@@ -31,7 +31,7 @@ use crate::types::{
     CreateSessionsBatchResponse, CreateSessionsBatchResult, DirEntry,
     DirGroupMembershipUpdateRequest, DirGroupMembershipUpdateResponse, DirGroupMemberships,
     DirListResponse, DirRepoActionResponse, DirRepoSearchResponse, DirRestartResponse,
-    ErrorResponse, LaunchTargetSummary, NativeAttentionGroupOpenRequest,
+    ErrorResponse, GhosttyOpenMode, LaunchTargetSummary, NativeAttentionGroupOpenRequest,
     NativeAttentionGroupOpenResponse, NativeDesktopApp, NativeDesktopOpenResponse,
     NativeDesktopStatusResponse, PlanFileResponse, RepoActionKind, RepoActionState,
     RepoActionStatus, RepoTheme, SessionBatchMembership, SessionState, SessionSummary, SpawnTool,
@@ -1889,38 +1889,96 @@ pub async fn open_native_attention_group_for_host(
     let app = *state.native_desktop_app.read().await;
     let ghostty_mode = *state.ghostty_open_mode.read().await;
     let status = native::support_for_host(host, app);
-    let focus_native_desktop = request.focus && status.supported;
+    let plan = native_attention_group_plan(state, &request).await;
 
-    let plan = plan_attention_group_sessions(
+    open_native_attention_group_plan(app, ghostty_mode, request, status.supported, plan).await
+}
+
+async fn native_attention_group_plan(
+    state: &Arc<AppState>,
+    request: &NativeAttentionGroupOpenRequest,
+) -> AttentionGroupPlan {
+    plan_attention_group_sessions(
         state.supervisor.list_sessions().await,
         request.max_sessions.unwrap_or(6),
         &request.current_session_ids,
         request.include_unnumbered_sessions,
-    );
+    )
+}
+
+async fn open_native_attention_group_plan(
+    app: NativeDesktopApp,
+    ghostty_mode: GhosttyOpenMode,
+    request: NativeAttentionGroupOpenRequest,
+    native_supported: bool,
+    plan: AttentionGroupPlan,
+) -> Result<NativeAttentionGroupOpenResponse, NativeOpenServiceError> {
     if plan.visible.is_empty() {
-        if !request.focus && !request.current_session_ids.is_empty() {
-            return native::clear_native_attention_group()
-                .await
-                .map_err(|error| NativeOpenServiceError::Internal(error.to_string()));
-        }
-        return Err(NativeOpenServiceError::NoAttentionSessions);
+        return handle_empty_attention_group_plan(&request).await;
     }
 
-    let mut response = native::open_native_attention_group(
+    open_visible_native_attention_group(app, ghostty_mode, &request, native_supported, plan).await
+}
+
+async fn handle_empty_attention_group_plan(
+    request: &NativeAttentionGroupOpenRequest,
+) -> Result<NativeAttentionGroupOpenResponse, NativeOpenServiceError> {
+    match empty_attention_group_plan_outcome(request) {
+        EmptyAttentionGroupPlanOutcome::ClearNative => native::clear_native_attention_group()
+            .await
+            .map_err(|error| NativeOpenServiceError::Internal(error.to_string())),
+        EmptyAttentionGroupPlanOutcome::NoAttentionSessions => {
+            Err(NativeOpenServiceError::NoAttentionSessions)
+        }
+    }
+}
+
+fn empty_attention_group_plan_outcome(
+    request: &NativeAttentionGroupOpenRequest,
+) -> EmptyAttentionGroupPlanOutcome {
+    if !request.focus && !request.current_session_ids.is_empty() {
+        EmptyAttentionGroupPlanOutcome::ClearNative
+    } else {
+        EmptyAttentionGroupPlanOutcome::NoAttentionSessions
+    }
+}
+
+async fn open_visible_native_attention_group(
+    app: NativeDesktopApp,
+    ghostty_mode: GhosttyOpenMode,
+    request: &NativeAttentionGroupOpenRequest,
+    native_supported: bool,
+    plan: AttentionGroupPlan,
+) -> Result<NativeAttentionGroupOpenResponse, NativeOpenServiceError> {
+    let response = native::open_native_attention_group(
         app,
         ghostty_mode,
         &plan.visible,
-        focus_native_desktop,
+        request.focus && native_supported,
         request.layout.unwrap_or_default(),
     )
     .await
     .map_err(|error| NativeOpenServiceError::Internal(error.to_string()))?;
+
+    Ok(response_with_attention_backlog(response, &plan))
+}
+
+fn response_with_attention_backlog(
+    mut response: NativeAttentionGroupOpenResponse,
+    plan: &AttentionGroupPlan,
+) -> NativeAttentionGroupOpenResponse {
     response.backlog_session_ids = plan
         .backlog
         .iter()
         .map(|session| session.session_id.clone())
         .collect();
-    Ok(response)
+    response
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum EmptyAttentionGroupPlanOutcome {
+    ClearNative,
+    NoAttentionSessions,
 }
 
 #[derive(Debug, Clone)]
@@ -2716,6 +2774,81 @@ mod tests {
         .into_iter()
         .map(|session| session.session_id)
         .collect()
+    }
+
+    fn attention_group_request(
+        focus: bool,
+        current_session_ids: &[&str],
+    ) -> NativeAttentionGroupOpenRequest {
+        NativeAttentionGroupOpenRequest {
+            max_sessions: None,
+            current_session_ids: current_session_ids
+                .iter()
+                .map(|session_id| (*session_id).to_string())
+                .collect(),
+            include_unnumbered_sessions: false,
+            layout: None,
+            focus,
+        }
+    }
+
+    #[test]
+    fn attention_group_empty_focus_plan_reports_no_sessions() {
+        let request = attention_group_request(true, &["visible-a"]);
+
+        assert_eq!(
+            empty_attention_group_plan_outcome(&request),
+            EmptyAttentionGroupPlanOutcome::NoAttentionSessions
+        );
+    }
+
+    #[test]
+    fn attention_group_empty_non_focus_current_group_requests_native_clear() {
+        let request = attention_group_request(false, &["visible-a"]);
+
+        assert_eq!(
+            empty_attention_group_plan_outcome(&request),
+            EmptyAttentionGroupPlanOutcome::ClearNative
+        );
+    }
+
+    #[test]
+    fn attention_group_empty_non_focus_without_current_group_reports_no_sessions() {
+        let request = attention_group_request(false, &[]);
+
+        assert_eq!(
+            empty_attention_group_plan_outcome(&request),
+            EmptyAttentionGroupPlanOutcome::NoAttentionSessions
+        );
+    }
+
+    #[test]
+    fn attention_group_response_populates_backlog_session_ids() {
+        let visible = numbered_waiting_session("visible-a", "69", "/Users/b/repos/swimmers", 10);
+        let backlog_a = numbered_waiting_session("backlog-a", "70", "/Users/b/repos/swimmers", 20);
+        let backlog_b = numbered_waiting_session("backlog-b", "71", "/Users/b/repos/swimmers", 30);
+        let plan = AttentionGroupPlan {
+            visible: vec![visible],
+            backlog: vec![backlog_a, backlog_b],
+        };
+        let response = NativeAttentionGroupOpenResponse {
+            session_id: NATIVE_ATTENTION_GROUP_SESSION_ID.to_string(),
+            tmux_name: NATIVE_ATTENTION_GROUP_TMUX_NAME.to_string(),
+            session_count: 1,
+            session_ids: vec!["visible-a".to_string()],
+            backlog_session_ids: vec!["stale".to_string()],
+            status: "refreshed".to_string(),
+            focused: false,
+            pane_id: None,
+            attach_command: None,
+        };
+
+        let response = response_with_attention_backlog(response, &plan);
+
+        assert_eq!(
+            response.backlog_session_ids,
+            vec!["backlog-a".to_string(), "backlog-b".to_string()]
+        );
     }
 
     #[test]

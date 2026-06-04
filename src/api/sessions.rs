@@ -32,6 +32,7 @@ use crate::types::{
 
 const PANE_TAIL_LINES: usize = 300;
 const PANE_TAIL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+const INPUT_DELIVERY_ACK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
 
 #[path = "session_mermaid.rs"]
 mod session_mermaid;
@@ -446,7 +447,7 @@ fn session_input_command(
 async fn wait_for_input_delivery(
     ack_rx: oneshot::Receiver<InputDeliveryResult>,
 ) -> Result<InputDeliveryResult, Response> {
-    match tokio::time::timeout(std::time::Duration::from_secs(2), ack_rx).await {
+    match tokio::time::timeout(INPUT_DELIVERY_ACK_TIMEOUT, ack_rx).await {
         Ok(Ok(delivery)) => Ok(delivery),
         Ok(Err(_)) => Err(error_response(
             StatusCode::BAD_GATEWAY,
@@ -967,6 +968,46 @@ fn session_ready_for_group_input(summary: &SessionSummary) -> bool {
     session_ready_for_operator_group_input(summary)
 }
 
+#[derive(Debug)]
+struct GroupInputSessionError {
+    code: &'static str,
+    message: Option<String>,
+}
+
+impl GroupInputSessionError {
+    fn new(code: &'static str, message: Option<String>) -> Self {
+        Self { code, message }
+    }
+
+    fn not_found() -> Self {
+        Self::new("SESSION_NOT_FOUND", None)
+    }
+
+    fn into_result(self, session_id: String) -> SessionGroupInputResult {
+        group_input_error_result(session_id, self.code, self.message)
+    }
+}
+
+fn group_input_preflight_error(summary: Option<&SessionSummary>) -> Option<GroupInputSessionError> {
+    let Some(summary) = summary else {
+        return Some(GroupInputSessionError::not_found());
+    };
+
+    if summary.state == SessionState::Exited {
+        return Some(GroupInputSessionError::new(
+            "SESSION_EXITED",
+            Some("session has already exited".to_string()),
+        ));
+    }
+
+    (!session_ready_for_group_input(summary)).then(|| {
+        GroupInputSessionError::new(
+            "SESSION_NOT_READY",
+            Some("session is not waiting for input".to_string()),
+        )
+    })
+}
+
 fn group_input_batch_scope_error(summaries: &[SessionSummary]) -> Option<(&'static str, String)> {
     let batch_ids = summaries
         .iter()
@@ -1020,37 +1061,24 @@ fn group_input_bytes(text: &str) -> Vec<u8> {
     bytes
 }
 
-async fn send_group_input_to_session(
+async fn send_group_input_to_ready_session(
     state: &Arc<AppState>,
-    session_id: String,
-    summary: Option<SessionSummary>,
+    session_id: &str,
     input: &[u8],
-) -> SessionGroupInputResult {
-    let Some(summary) = summary else {
-        return group_input_error_result(session_id, "SESSION_NOT_FOUND", None);
-    };
+) -> Result<(), GroupInputSessionError> {
+    let handle = state
+        .supervisor
+        .get_session(session_id)
+        .await
+        .ok_or_else(GroupInputSessionError::not_found)?;
+    deliver_group_input_to_actor(session_id, &handle, input).await
+}
 
-    if summary.state == SessionState::Exited {
-        return group_input_error_result(
-            session_id,
-            "SESSION_EXITED",
-            Some("session has already exited".to_string()),
-        );
-    }
-
-    if !session_ready_for_group_input(&summary) {
-        return group_input_error_result(
-            session_id,
-            "SESSION_NOT_READY",
-            Some("session is not waiting for input".to_string()),
-        );
-    }
-
-    let handle = match state.supervisor.get_session(&session_id).await {
-        Some(handle) => handle,
-        None => return group_input_error_result(session_id, "SESSION_NOT_FOUND", None),
-    };
-
+async fn deliver_group_input_to_actor(
+    session_id: &str,
+    handle: &ActorHandle,
+    input: &[u8],
+) -> Result<(), GroupInputSessionError> {
     let (ack_tx, ack_rx) = oneshot::channel();
     if let Err(err) = handle
         .send(SessionCommand::WriteInputAck {
@@ -1060,28 +1088,57 @@ async fn send_group_input_to_session(
         .await
     {
         tracing::error!("[session {session_id}] send_group_input failed: {err}");
-        return group_input_error_result(session_id, "SESSION_NOT_FOUND", Some(err.to_string()));
+        return Err(GroupInputSessionError::new(
+            "SESSION_NOT_FOUND",
+            Some(err.to_string()),
+        ));
     }
 
-    match tokio::time::timeout(std::time::Duration::from_secs(2), ack_rx).await {
-        Ok(Ok(delivery)) if delivery.delivered => {}
-        Ok(Ok(delivery)) => {
-            return group_input_error_result(session_id, "INPUT_DELIVERY_FAILED", delivery.message);
-        }
-        Ok(Err(_)) => {
-            return group_input_error_result(
-                session_id,
-                "INPUT_DELIVERY_UNKNOWN",
-                Some("session actor dropped input delivery ack".to_string()),
-            );
-        }
-        Err(_) => {
-            return group_input_error_result(
-                session_id,
-                "INPUT_DELIVERY_TIMEOUT",
-                Some("timed out waiting for input delivery confirmation".to_string()),
-            );
-        }
+    wait_for_group_input_delivery_ack(ack_rx, INPUT_DELIVERY_ACK_TIMEOUT).await
+}
+
+async fn wait_for_group_input_delivery_ack(
+    ack_rx: oneshot::Receiver<InputDeliveryResult>,
+    timeout: std::time::Duration,
+) -> Result<(), GroupInputSessionError> {
+    match tokio::time::timeout(timeout, ack_rx).await {
+        Ok(Ok(delivery)) => classify_group_input_delivery_ack(delivery),
+        Ok(Err(_)) => Err(GroupInputSessionError::new(
+            "INPUT_DELIVERY_UNKNOWN",
+            Some("session actor dropped input delivery ack".to_string()),
+        )),
+        Err(_) => Err(GroupInputSessionError::new(
+            "INPUT_DELIVERY_TIMEOUT",
+            Some("timed out waiting for input delivery confirmation".to_string()),
+        )),
+    }
+}
+
+fn classify_group_input_delivery_ack(
+    delivery: InputDeliveryResult,
+) -> Result<(), GroupInputSessionError> {
+    if delivery.delivered {
+        Ok(())
+    } else {
+        Err(GroupInputSessionError::new(
+            "INPUT_DELIVERY_FAILED",
+            delivery.message,
+        ))
+    }
+}
+
+async fn send_group_input_to_session(
+    state: &Arc<AppState>,
+    session_id: String,
+    summary: Option<SessionSummary>,
+    input: &[u8],
+) -> SessionGroupInputResult {
+    if let Some(error) = group_input_preflight_error(summary.as_ref()) {
+        return error.into_result(session_id);
+    }
+
+    if let Err(error) = send_group_input_to_ready_session(state, &session_id, input).await {
+        return error.into_result(session_id);
     }
 
     SessionGroupInputResult {
@@ -1494,6 +1551,38 @@ mod tests {
                             method: "test",
                             message: None,
                         });
+                    }
+                    _ => {}
+                }
+            }
+        });
+        write_rx
+    }
+
+    async fn insert_group_input_delivery_test_handle(
+        state: &Arc<AppState>,
+        summary: SessionSummary,
+        delivery: Option<InputDeliveryResult>,
+    ) -> mpsc::Receiver<Vec<u8>> {
+        let session_id = summary.session_id.clone();
+        let tmux_name = summary.tmux_name.clone();
+        let (cmd_tx, mut cmd_rx) = mpsc::channel(8);
+        let (write_tx, write_rx) = mpsc::channel(1);
+        state
+            .supervisor
+            .insert_test_handle(ActorHandle::test_handle(&session_id, &tmux_name, cmd_tx))
+            .await;
+        tokio::spawn(async move {
+            while let Some(cmd) = cmd_rx.recv().await {
+                match cmd {
+                    SessionCommand::GetSummary(reply) => {
+                        let _ = reply.send(summary.clone());
+                    }
+                    SessionCommand::WriteInputAck { data, ack } => {
+                        let _ = write_tx.send(data).await;
+                        if let Some(delivery) = delivery.clone() {
+                            let _ = ack.send(delivery);
+                        }
                     }
                     _ => {}
                 }
@@ -3513,6 +3602,130 @@ esac
         assert!(
             matches!(busy_write, Err(_) | Ok(None)),
             "busy sessions must not receive group input"
+        );
+    }
+
+    #[tokio::test]
+    async fn send_group_input_reports_failed_delivery_ack() {
+        let state = test_state();
+        let ready = with_test_batch(summary("ready", SessionState::Idle), "batch-group");
+        let failed = with_test_batch(summary("failed", SessionState::Idle), "batch-group");
+        let mut ready_write_rx = insert_group_input_delivery_test_handle(
+            &state,
+            ready,
+            Some(InputDeliveryResult {
+                delivered: true,
+                method: "test",
+                message: None,
+            }),
+        )
+        .await;
+        let mut failed_write_rx = insert_group_input_delivery_test_handle(
+            &state,
+            failed,
+            Some(InputDeliveryResult {
+                delivered: false,
+                method: "test",
+                message: Some("pty write failed".to_string()),
+            }),
+        )
+        .await;
+
+        let response = send_group_input(
+            Extension(AuthInfo::new(OPERATOR_SCOPES.to_vec())),
+            State(state),
+            Json(SessionGroupInputRequest {
+                session_ids: vec!["ready".to_string(), "failed".to_string()],
+                text: "continue".to_string(),
+            }),
+        )
+        .await
+        .into_response();
+
+        assert_eq!(response.status(), StatusCode::MULTI_STATUS);
+        let json = response_json(response).await;
+        assert_eq!(json["delivered"], 1);
+        assert_eq!(json["skipped"], 1);
+        assert_eq!(json["results"][0]["ok"], true);
+        assert_eq!(json["results"][1]["session_id"], "failed");
+        assert_eq!(json["results"][1]["ok"], false);
+        assert_eq!(json["results"][1]["error"]["code"], "INPUT_DELIVERY_FAILED");
+        assert_eq!(json["results"][1]["error"]["message"], "pty write failed");
+        assert_eq!(
+            ready_write_rx.recv().await.expect("ready write"),
+            b"continue\r\r".to_vec()
+        );
+        assert_eq!(
+            failed_write_rx.recv().await.expect("failed write"),
+            b"continue\r\r".to_vec()
+        );
+    }
+
+    #[tokio::test]
+    async fn send_group_input_reports_dropped_delivery_ack() {
+        let state = test_state();
+        let ready = with_test_batch(summary("ready", SessionState::Idle), "batch-group");
+        let dropped = with_test_batch(summary("dropped", SessionState::Idle), "batch-group");
+        let mut ready_write_rx = insert_group_input_delivery_test_handle(
+            &state,
+            ready,
+            Some(InputDeliveryResult {
+                delivered: true,
+                method: "test",
+                message: None,
+            }),
+        )
+        .await;
+        let mut dropped_write_rx =
+            insert_group_input_delivery_test_handle(&state, dropped, None).await;
+
+        let response = send_group_input(
+            Extension(AuthInfo::new(OPERATOR_SCOPES.to_vec())),
+            State(state),
+            Json(SessionGroupInputRequest {
+                session_ids: vec!["ready".to_string(), "dropped".to_string()],
+                text: "continue".to_string(),
+            }),
+        )
+        .await
+        .into_response();
+
+        assert_eq!(response.status(), StatusCode::MULTI_STATUS);
+        let json = response_json(response).await;
+        assert_eq!(json["delivered"], 1);
+        assert_eq!(json["skipped"], 1);
+        assert_eq!(json["results"][0]["ok"], true);
+        assert_eq!(json["results"][1]["session_id"], "dropped");
+        assert_eq!(json["results"][1]["ok"], false);
+        assert_eq!(
+            json["results"][1]["error"]["code"],
+            "INPUT_DELIVERY_UNKNOWN"
+        );
+        assert_eq!(
+            json["results"][1]["error"]["message"],
+            "session actor dropped input delivery ack"
+        );
+        assert_eq!(
+            ready_write_rx.recv().await.expect("ready write"),
+            b"continue\r\r".to_vec()
+        );
+        assert_eq!(
+            dropped_write_rx.recv().await.expect("dropped write"),
+            b"continue\r\r".to_vec()
+        );
+    }
+
+    #[tokio::test]
+    async fn send_group_input_delivery_ack_reports_timeout() {
+        let (_ack_tx, ack_rx) = oneshot::channel();
+        let error = wait_for_group_input_delivery_ack(ack_rx, Duration::from_millis(1))
+            .await
+            .expect_err("timeout error");
+
+        assert_eq!(error.code, "INPUT_DELIVERY_TIMEOUT");
+        assert_eq!(
+            error.message.as_deref(),
+            Some("timed out waiting for input delivery confirmation")
         );
     }
 

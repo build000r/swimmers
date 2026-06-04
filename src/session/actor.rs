@@ -2664,31 +2664,37 @@ fn percent_decode(s: &str) -> String {
 /// Try to extract a cwd path from an OSC 0/2 window title.
 /// Common formats: "user@host: /path", "user@host:/path", "/path/to/dir"
 fn extract_cwd_from_title(title: &str) -> Option<String> {
-    // "user@host: /path" or "user@host:/path"
-    if let Some(pos) = title.find(": /").or_else(|| title.find(":/")) {
-        let path_start = if title[pos..].starts_with(": ") {
-            pos + 2
-        } else {
-            pos + 1
-        };
-        let path = title[path_start..].trim();
-        if !path.is_empty() {
-            return Some(path.to_string());
-        }
-    }
-    // Plain absolute path
-    if title.starts_with('/') {
-        return Some(title.trim().to_string());
-    }
-    // "~" or "~/something"
-    if title.starts_with('~') {
-        if let Ok(home) = std::env::var("HOME") {
-            let expanded = title.replacen('~', &home, 1);
-            return Some(expanded);
-        }
-        return Some(title.trim().to_string());
-    }
-    None
+    title_prefixed_cwd(title)
+        .or_else(|| title_absolute_cwd(title))
+        .or_else(|| title_home_cwd(title))
+}
+
+fn title_prefixed_cwd(title: &str) -> Option<String> {
+    title
+        .find(": /")
+        .map(|pos| pos + 2)
+        .or_else(|| title.find(":/").map(|pos| pos + 1))
+        .and_then(|path_start| non_blank_trimmed(title.get(path_start..)?))
+        .map(str::to_string)
+}
+
+fn title_absolute_cwd(title: &str) -> Option<String> {
+    title.starts_with('/').then(|| title.trim().to_string())
+}
+
+fn title_home_cwd(title: &str) -> Option<String> {
+    title.starts_with('~').then(|| expand_home_title(title))
+}
+
+fn expand_home_title(title: &str) -> String {
+    std::env::var("HOME")
+        .map(|home| title.replacen('~', &home, 1))
+        .unwrap_or_else(|_| title.trim().to_string())
+}
+
+fn non_blank_trimmed(value: &str) -> Option<&str> {
+    let value = value.trim();
+    (!value.is_empty()).then_some(value)
 }
 
 /// Detect a coding tool name from the window title.
@@ -4036,6 +4042,37 @@ fi
         } else {
             std::env::remove_var("HOME");
         }
+    }
+
+    #[test]
+    fn extract_cwd_from_title_ignores_blank_host_prefixed_paths_and_plain_titles() {
+        assert_eq!(extract_cwd_from_title("user@host:"), None);
+        assert_eq!(extract_cwd_from_title("user@host: "), None);
+        assert_eq!(extract_cwd_from_title("plain-title"), None);
+        assert_eq!(extract_cwd_from_title("build finished: ok"), None);
+    }
+
+    #[test]
+    fn extract_cwd_from_title_preserves_home_when_home_is_absent() {
+        let _guard = crate::test_support::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let previous_home = std::env::var_os("HOME");
+        std::env::remove_var("HOME");
+
+        assert_eq!(extract_cwd_from_title("~/repo"), Some("~/repo".to_string()));
+        assert_eq!(extract_cwd_from_title("~"), Some("~".to_string()));
+
+        if let Some(value) = previous_home {
+            std::env::set_var("HOME", value);
+        }
+    }
+
+    #[test]
+    fn extract_cwd_from_title_ignores_invalid_prefix_shapes() {
+        assert_eq!(extract_cwd_from_title("user@host:relative/path"), None);
+        assert_eq!(extract_cwd_from_title("user@host: ./project"), None);
+        assert_eq!(extract_cwd_from_title("user@host /tmp/project"), None);
     }
 
     #[test]

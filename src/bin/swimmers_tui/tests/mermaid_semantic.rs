@@ -349,6 +349,84 @@ fn mermaid_detail_box_rects_wrap_visible_lines_tightly() {
 }
 
 #[test]
+fn mermaid_detail_box_rects_ignore_non_compact_and_missing_sources() {
+    let content_rect = Rect {
+        x: 0,
+        y: 0,
+        width: 40,
+        height: 20,
+    };
+    let source_lines = vec![MermaidSemanticLine {
+        text: "rel".to_string(),
+        diagram_x: 0.0,
+        diagram_y: 0.0,
+        anchor: MermaidTextAnchor::Start,
+        kind: MermaidSemanticKind::EdgeLabel,
+        owner_key: "edge:USER:ORDER".to_string(),
+        outline_eligible: false,
+        owner_width: 20.0,
+        owner_height: 20.0,
+    }];
+    let projected = vec![
+        MermaidProjectedLine {
+            source_index: 0,
+            x: 3,
+            y: 4,
+            text: "rel".to_string(),
+            color: MERMAID_BODY_COLOR,
+        },
+        MermaidProjectedLine {
+            source_index: 99,
+            x: 5,
+            y: 6,
+            text: "missing".to_string(),
+            color: MERMAID_BODY_COLOR,
+        },
+    ];
+
+    assert!(mermaid_detail_box_rects(&source_lines, &projected, content_rect).is_empty());
+}
+
+#[test]
+fn mermaid_detail_box_rects_clamp_and_expand_at_content_edges() {
+    let content_rect = Rect {
+        x: 10,
+        y: 5,
+        width: 5,
+        height: 4,
+    };
+    let source_lines = vec![MermaidSemanticLine {
+        text: "X".to_string(),
+        diagram_x: 0.0,
+        diagram_y: 0.0,
+        anchor: MermaidTextAnchor::Start,
+        kind: MermaidSemanticKind::NodeTitle,
+        owner_key: "node:EDGE".to_string(),
+        outline_eligible: false,
+        owner_width: 20.0,
+        owner_height: 20.0,
+    }];
+    let projected = vec![MermaidProjectedLine {
+        source_index: 0,
+        x: 14,
+        y: 8,
+        text: "X".to_string(),
+        color: MERMAID_BODY_COLOR,
+    }];
+
+    let rects = mermaid_detail_box_rects(&source_lines, &projected, content_rect);
+    assert_eq!(
+        rects.get("node:EDGE").copied(),
+        Some(MermaidOutlineLabelRect {
+            left: 13,
+            right: 14,
+            top: 7,
+            bottom: 8,
+        })
+    );
+}
+
+#[test]
 fn mermaid_packed_detail_rects_center_cluster_within_viewport() {
     let content_rect = Rect {
         x: 0,

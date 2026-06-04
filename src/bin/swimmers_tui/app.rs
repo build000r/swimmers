@@ -7,9 +7,19 @@ mod mermaid_viewer;
 #[cfg(test)]
 pub(crate) use mermaid_viewer::read_plan_file_from_disk;
 use mermaid_viewer::MermaidCacheEntry;
+mod batch_create;
+mod collisions;
 #[path = "field_click.rs"]
 mod field_click;
+mod native_actions;
 mod picker_actions;
+mod picker_refresh;
+mod voice_interactions;
+#[cfg(test)]
+use voice_interactions::{
+    plan_finish_voice_recording, plan_toggle_voice_recording, FinishVoiceRecordingPlan,
+    ToggleVoiceRecordingPlan,
+};
 
 // Once the school is large, the O(n^2) pairwise collision pass gets expensive.
 // 50 entities is where we start seeing frame-time spikes on laptops, so we cap
@@ -80,79 +90,6 @@ enum PickerActivationPlan {
         path: String,
         managed_only: bool,
     },
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum FinishVoiceRecordingPlan {
-    WaitForPendingInteraction,
-    StartTranscription { generation: u64 },
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum ToggleVoiceRecordingPlan {
-    ShowMessage(&'static str),
-    FinishRecording,
-    StartRecording,
-}
-
-fn toggle_voice_recording_message(
-    has_initial_request: bool,
-    is_transcribing: bool,
-) -> Option<&'static str> {
-    missing_initial_request_voice_message(has_initial_request)
-        .or_else(|| transcribing_voice_message(is_transcribing))
-}
-
-fn missing_initial_request_voice_message(has_initial_request: bool) -> Option<&'static str> {
-    (!has_initial_request).then_some("open an initial request first")
-}
-
-fn transcribing_voice_message(is_transcribing: bool) -> Option<&'static str> {
-    is_transcribing.then_some("wait for voice transcription to finish")
-}
-
-fn toggle_voice_recording_action(has_recording: bool) -> ToggleVoiceRecordingPlan {
-    if has_recording {
-        ToggleVoiceRecordingPlan::FinishRecording
-    } else {
-        ToggleVoiceRecordingPlan::StartRecording
-    }
-}
-
-fn plan_toggle_voice_recording(
-    has_initial_request: bool,
-    is_transcribing: bool,
-    has_recording: bool,
-) -> ToggleVoiceRecordingPlan {
-    toggle_voice_recording_message(has_initial_request, is_transcribing)
-        .map(ToggleVoiceRecordingPlan::ShowMessage)
-        .unwrap_or_else(|| toggle_voice_recording_action(has_recording))
-}
-
-fn plan_finish_voice_recording(
-    has_pending_interaction: bool,
-    generation: u64,
-) -> FinishVoiceRecordingPlan {
-    if has_pending_interaction {
-        FinishVoiceRecordingPlan::WaitForPendingInteraction
-    } else {
-        FinishVoiceRecordingPlan::StartTranscription { generation }
-    }
-}
-
-async fn send_voice_transcription_result(
-    recording: VoiceRecording,
-    generation: u64,
-    tx: oneshot::Sender<PendingInteractionResult>,
-) {
-    let response = match tokio::task::spawn_blocking(move || recording.finish()).await {
-        Ok(response) => response,
-        Err(err) => Err(format!("voice task failed: {err}")),
-    };
-    let _ = tx.send(PendingInteractionResult::VoiceTranscription {
-        generation,
-        response,
-    });
 }
 
 impl ApiRefreshHealth {
@@ -282,96 +219,6 @@ struct OpenRouterRotationProbe {
 pub(crate) struct GroupInputTargets {
     pub(crate) session_ids: Vec<String>,
     pub(crate) label: String,
-}
-
-struct BatchCreateSuccess {
-    session: SessionSummary,
-    repo_theme: Option<RepoTheme>,
-}
-
-struct BatchCreatePartition {
-    total: usize,
-    successes: Vec<BatchCreateSuccess>,
-    first_error: Option<String>,
-}
-
-struct AppliedBatchCreate {
-    success_count: usize,
-    last_tmux_name: Option<String>,
-    last_session_id: Option<String>,
-}
-
-struct BatchCreateCompletion {
-    total: usize,
-    success_count: usize,
-    last_tmux_name: Option<String>,
-    last_session_id: Option<String>,
-    first_error: Option<String>,
-}
-
-impl BatchCreateCompletion {
-    fn should_close_picker(&self) -> bool {
-        self.success_count > 0
-    }
-
-    fn should_show_batch_thoughts(&self) -> bool {
-        self.success_count > 1
-    }
-
-    fn message(self) -> String {
-        if self.success_count == 0 {
-            return self
-                .first_error
-                .unwrap_or_else(|| "batch create failed".to_string());
-        }
-
-        if self.success_count != self.total {
-            return format!(
-                "created {}/{}; {}",
-                self.success_count,
-                self.total,
-                self.first_error
-                    .unwrap_or_else(|| "some sessions failed".to_string())
-            );
-        }
-
-        match self.last_tmux_name {
-            Some(name) if self.success_count == 1 => format!("created {name}"),
-            _ => format!("created {} sessions", self.success_count),
-        }
-    }
-}
-
-fn partition_batch_create_results(response: CreateSessionsBatchResponse) -> BatchCreatePartition {
-    let total = response.results.len();
-    let mut successes = Vec::new();
-    let mut first_error = None;
-
-    for result in response.results {
-        match (result.ok, result.session) {
-            (true, Some(session)) => successes.push(BatchCreateSuccess {
-                session,
-                repo_theme: result.repo_theme,
-            }),
-            (false, _) if first_error.is_none() => {
-                first_error = Some(batch_create_error_message(&result.cwd, result.error));
-            }
-            _ => {}
-        }
-    }
-
-    BatchCreatePartition {
-        total,
-        successes,
-        first_error,
-    }
-}
-
-fn batch_create_error_message(cwd: &str, error: Option<ErrorResponse>) -> String {
-    let detail = error
-        .and_then(|error| error.message)
-        .unwrap_or_else(|| "unknown error".to_string());
-    format!("{}: {detail}", shorten_path(cwd, 32))
 }
 
 pub(crate) enum PendingInteractionResult {
@@ -793,34 +640,6 @@ impl<C: TuiApi> App<C> {
         self.last_refresh
             .map(|last| last.elapsed() >= REFRESH_INTERVAL)
             .unwrap_or(true)
-    }
-
-    pub(crate) fn should_refresh_picker(&self) -> bool {
-        self.picker.is_some()
-            && self.pending_interaction.is_none()
-            && self.initial_request.is_none()
-            && self
-                .last_picker_refresh
-                .map(|last| last.elapsed() >= REFRESH_INTERVAL)
-                .unwrap_or(true)
-    }
-
-    pub(crate) fn maybe_refresh_picker(&mut self) {
-        if !self.should_refresh_picker() {
-            return;
-        }
-
-        let Some((path, managed_only, group)) = self.picker.as_ref().map(|picker| {
-            (
-                picker.current_path.clone(),
-                picker.managed_only,
-                picker.current_group.clone(),
-            )
-        }) else {
-            return;
-        };
-
-        self.picker_reload_with_options(Some(path), managed_only, group, false, true);
     }
 
     pub(crate) fn maybe_refresh_plans(&mut self) {
@@ -2041,38 +1860,6 @@ impl<C: TuiApi> App<C> {
         }
     }
 
-    fn apply_attention_group_result(
-        &mut self,
-        focus: bool,
-        response: Result<NativeAttentionGroupOpenResponse, String>,
-    ) {
-        match response {
-            Ok(response) => {
-                let previous = self.attention_group_session_ids.clone();
-                self.attention_group_session_ids = response.session_ids.clone();
-                if focus || previous != response.session_ids {
-                    let mut message = format!(
-                        "{} attention group: {} sessions",
-                        response.status, response.session_count
-                    );
-                    if focus && !response.focused {
-                        if let Some(command) = response.attach_command.as_deref() {
-                            message.push_str(" | ");
-                            message.push_str(command);
-                        }
-                    }
-                    self.set_message(message);
-                }
-            }
-            Err(err) => {
-                if !focus {
-                    self.attention_group_session_ids.clear();
-                }
-                self.set_message(err);
-            }
-        }
-    }
-
     fn apply_toggle_native_app_result(
         &mut self,
         next_app: NativeDesktopApp,
@@ -2137,20 +1924,6 @@ impl<C: TuiApi> App<C> {
             self.spawn_background_refresh(false);
         }
         self.set_message(outcome.message);
-    }
-
-    fn apply_voice_transcription_result(
-        &mut self,
-        generation: u64,
-        response: Result<String, String>,
-    ) {
-        match response {
-            Ok(transcript) => self.insert_voice_transcript(generation, transcript),
-            Err(err) => {
-                self.voice_state = VoiceUiState::Failed(err.clone());
-                self.set_message(err);
-            }
-        }
     }
 
     fn native_status_message(
@@ -2452,55 +2225,6 @@ impl<C: TuiApi> App<C> {
         for (slot, entity_index) in top_resting.into_iter().enumerate() {
             let (x, y) = top_rest_origin(field, slot);
             self.entities[entity_index].set_relative_position(x, y);
-        }
-    }
-
-    pub(crate) fn resolve_collisions(&mut self, field: Rect) {
-        let entity_count = self.entities.len();
-        let throttle_collisions = entity_count > COLLISION_THROTTLE_ENTITY_THRESHOLD;
-
-        for idx in 0..entity_count {
-            let (left, right) = self.entities.split_at_mut(idx + 1);
-            let a = &mut left[idx];
-            if throttle_collisions && !right.is_empty() {
-                let budget = COLLISION_THROTTLE_PAIR_BUDGET.min(right.len());
-                let start = (self.tick as usize).wrapping_add(idx.saturating_mul(13)) % right.len();
-                for step in 0..budget {
-                    let b_index = (start + step) % right.len();
-                    let b = &mut right[b_index];
-                    Self::resolve_collision_pair(a, b, field);
-                }
-            } else {
-                for b in right {
-                    Self::resolve_collision_pair(a, b, field);
-                }
-            }
-        }
-    }
-
-    fn resolve_collision_pair(a: &mut SessionEntity, b: &mut SessionEntity, field: Rect) {
-        let a_rect = a.screen_rect(field);
-        let b_rect = b.screen_rect(field);
-        if !intersects(a_rect, b_rect) {
-            return;
-        }
-
-        match (a.is_stationary(), b.is_stationary()) {
-            (true, true) => {}
-            (true, false) => separate_from_fixed_entity(b, a_rect, field),
-            (false, true) => separate_from_fixed_entity(a, b_rect, field),
-            (false, false) => {
-                std::mem::swap(&mut a.vx, &mut b.vx);
-                std::mem::swap(&mut a.vy, &mut b.vy);
-                a.x = (a.x - 1.0).max(0.0);
-                b.x = (b.x + 1.0).min(field.width.saturating_sub(ENTITY_WIDTH) as f32);
-                a.swim_anchor_x = a.x;
-                b.swim_anchor_x = b.x;
-                a.swim_anchor_y = a.y;
-                b.swim_anchor_y = b.y;
-                a.swim_center_y = a.y;
-                b.swim_center_y = b.y;
-            }
         }
     }
 
@@ -3436,91 +3160,6 @@ impl<C: TuiApi> App<C> {
             .then_some("wait for voice transcription to finish")
     }
 
-    pub(crate) fn toggle_voice_recording(&mut self) {
-        match plan_toggle_voice_recording(
-            self.initial_request.is_some(),
-            matches!(self.voice_state, VoiceUiState::Transcribing),
-            self.voice_recording.is_some(),
-        ) {
-            ToggleVoiceRecordingPlan::ShowMessage(message) => self.set_message(message),
-            ToggleVoiceRecordingPlan::FinishRecording => self.finish_current_voice_recording(),
-            ToggleVoiceRecordingPlan::StartRecording => self.start_voice_recording(),
-        }
-    }
-
-    fn finish_current_voice_recording(&mut self) {
-        if let Some(recording) = self.voice_recording.take() {
-            self.finish_voice_recording(recording);
-        }
-    }
-
-    fn start_voice_recording(&mut self) {
-        match start_recording() {
-            Ok(recording) => {
-                self.voice_recording = Some(recording);
-                self.voice_state = VoiceUiState::Recording;
-                self.set_message("voice recording started");
-            }
-            Err(err) => {
-                self.voice_state = VoiceUiState::Failed(err.clone());
-                self.set_message(err);
-            }
-        }
-    }
-
-    fn finish_voice_recording(&mut self, recording: VoiceRecording) {
-        match plan_finish_voice_recording(
-            self.pending_interaction.is_some(),
-            self.initial_request_generation,
-        ) {
-            FinishVoiceRecordingPlan::WaitForPendingInteraction => {
-                self.defer_voice_recording_finish(recording);
-            }
-            FinishVoiceRecordingPlan::StartTranscription { generation } => {
-                self.start_voice_transcription(recording, generation);
-            }
-        }
-    }
-
-    fn defer_voice_recording_finish(&mut self, recording: VoiceRecording) {
-        self.voice_recording = Some(recording);
-        self.set_message("wait for the current action to finish");
-    }
-
-    fn start_voice_transcription(&mut self, recording: VoiceRecording, generation: u64) {
-        let (tx, rx) = oneshot::channel();
-        self.pending_interaction = Some(rx);
-        self.voice_state = VoiceUiState::Transcribing;
-        self.set_message("transcribing voice capture...");
-        self.runtime
-            .spawn(send_voice_transcription_result(recording, generation, tx));
-    }
-
-    fn cancel_voice_recording(&mut self) {
-        if let Some(recording) = self.voice_recording.take() {
-            recording.cancel();
-        }
-        self.voice_state = default_ui_state();
-    }
-
-    fn insert_voice_transcript(&mut self, generation: u64, transcript: String) {
-        self.voice_state = default_ui_state();
-        if generation != self.initial_request_generation {
-            self.set_message("voice transcript finished after the composer changed");
-            return;
-        }
-        let Some(initial_request) = &mut self.initial_request else {
-            self.set_message("voice transcript finished after the composer closed");
-            return;
-        };
-
-        if !initial_request.value.trim().is_empty() {
-            initial_request.value.push('\n');
-        }
-        initial_request.value.push_str(transcript.trim());
-        self.set_message("voice transcript inserted");
-    }
-
     pub(crate) fn picker_activate_selection(&mut self, _field: Rect) {
         self.dispatch_picker_activation(self.selected_picker_activation());
     }
@@ -3654,63 +3293,6 @@ impl<C: TuiApi> App<C> {
         });
     }
 
-    fn apply_batch_create_response(&mut self, field: Rect, response: CreateSessionsBatchResponse) {
-        let partition = partition_batch_create_results(response);
-        let completion = self.apply_batch_create_successes(field, partition);
-
-        self.apply_batch_create_selection(completion.last_session_id.clone());
-        self.finish_batch_create(completion);
-    }
-
-    fn apply_batch_create_successes(
-        &mut self,
-        field: Rect,
-        partition: BatchCreatePartition,
-    ) -> BatchCreateCompletion {
-        let mut applied = AppliedBatchCreate {
-            success_count: 0,
-            last_tmux_name: None,
-            last_session_id: None,
-        };
-
-        for success in partition.successes {
-            applied.last_tmux_name = Some(success.session.tmux_name.clone());
-            applied.last_session_id = Some(success.session.session_id.clone());
-            self.remember_repo_theme(&success.session, success.repo_theme);
-            self.upsert_session(success.session, field);
-            applied.success_count += 1;
-        }
-
-        BatchCreateCompletion {
-            total: partition.total,
-            success_count: applied.success_count,
-            last_tmux_name: applied.last_tmux_name,
-            last_session_id: applied.last_session_id,
-            first_error: partition.first_error,
-        }
-    }
-
-    fn apply_batch_create_selection(&mut self, selected_session_id: Option<String>) {
-        let Some(session_id) = selected_session_id else {
-            return;
-        };
-
-        self.selected_id = Some(session_id);
-        self.reconcile_selection();
-        self.sync_selection_publication();
-    }
-
-    fn finish_batch_create(&mut self, completion: BatchCreateCompletion) {
-        if completion.should_close_picker() {
-            self.close_picker();
-        }
-        if completion.should_show_batch_thoughts() {
-            self.thought_group_by = ThoughtGroupBy::Batch;
-            self.thought_show_all = true;
-        }
-        self.set_message(completion.message());
-    }
-
     fn apply_group_input_response(&mut self, response: SessionGroupInputResponse) {
         let total = response.results.len();
         if response.skipped == 0 {
@@ -3820,18 +3402,6 @@ impl<C: TuiApi> App<C> {
         match self.commit_launcher.launch(&session) {
             Ok(launch) => self.set_message(format!("commit grok: {}", launch.watch_command)),
             Err(err) => self.set_message(format!("failed to launch commit grok: {err}")),
-        }
-    }
-
-    pub(crate) fn open_repo_in_editor(&mut self, cwd: &str) {
-        let repo_label = path_tail_label(cwd).unwrap_or_else(|| cwd.to_string());
-        match ProcessCommand::new("code")
-            .arg(".")
-            .current_dir(cwd)
-            .spawn()
-        {
-            Ok(_) => self.set_message(format!("code . -> {repo_label}")),
-            Err(err) => self.set_message(format!("failed to run code .: {err}")),
         }
     }
 
