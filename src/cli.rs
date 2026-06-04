@@ -484,6 +484,24 @@ pub struct DoctorFinding {
     pub detail: String,
 }
 
+fn doctor_ok(name: &'static str, detail: impl Into<String>) -> DoctorFinding {
+    DoctorFinding {
+        ok: true,
+        level: DoctorLevel::Ok,
+        name,
+        detail: detail.into(),
+    }
+}
+
+fn doctor_fail(name: &'static str, detail: impl Into<String>) -> DoctorFinding {
+    DoctorFinding {
+        ok: false,
+        level: DoctorLevel::Fail,
+        name,
+        detail: detail.into(),
+    }
+}
+
 pub fn config_diagnostic_findings(diagnostics: &[ConfigDiagnostic]) -> Vec<DoctorFinding> {
     diagnostics
         .iter()
@@ -518,124 +536,93 @@ pub fn run_doctor_checks(
     clawgs_defaults: Result<String, String>,
     data_dir_writable: Result<PathBuf, String>,
 ) -> Vec<DoctorFinding> {
-    let mut findings = Vec::new();
+    vec![
+        doctor_auth_bind_finding(config),
+        doctor_auth_token_finding(config),
+        doctor_tmux_finding(tmux_present),
+        doctor_clawgs_finding(clawgs_defaults),
+        doctor_data_dir_finding(data_dir_writable),
+    ]
+}
 
-    // Check 1: trusted auth modes must stay on their matching trusted network.
+fn doctor_auth_bind_finding(config: &Config) -> DoctorFinding {
     let bind_loopback = is_loopback_bind(&config.bind);
     let bind_tailnet = is_tailnet_bind(&config.bind);
     if matches!(config.auth_mode, AuthMode::LocalTrust) && !bind_loopback {
-        findings.push(DoctorFinding {
-            ok: false,
-            level: DoctorLevel::Fail,
-            name: "auth/bind",
-            detail: format!(
+        doctor_fail(
+            "auth/bind",
+            format!(
                 "SWIMMERS_BIND={} is non-loopback while AUTH_MODE=local_trust. \
                  This exposes the API to the network with no authentication. \
                  Bind to 127.0.0.1, use AUTH_MODE=tailnet_trust with a Tailscale bind address, \
                  or set AUTH_MODE=token AUTH_TOKEN=<secret>.",
                 config.bind
             ),
-        });
+        )
     } else if matches!(config.auth_mode, AuthMode::TailnetTrust) && !bind_tailnet {
-        findings.push(DoctorFinding {
-            ok: false,
-            level: DoctorLevel::Fail,
-            name: "auth/bind",
-            detail: format!(
+        doctor_fail(
+            "auth/bind",
+            format!(
                 "SWIMMERS_BIND={} is not a Tailscale address while AUTH_MODE=tailnet_trust. \
                  Bind to a Tailscale IP in 100.64.0.0/10 or fd7a:115c:a1e0::/48, \
                  or use AUTH_MODE=token AUTH_TOKEN=<secret> for non-tailnet exposure.",
                 config.bind
             ),
-        });
+        )
     } else {
-        findings.push(DoctorFinding {
-            ok: true,
-            level: DoctorLevel::Ok,
-            name: "auth/bind",
-            detail: format!(
+        doctor_ok(
+            "auth/bind",
+            format!(
                 "bind={} auth_mode={} (safe)",
                 config.bind,
                 config.auth_mode.as_env_value()
             ),
-        });
+        )
     }
+}
 
-    // Check 2: AUTH_MODE=token requires AUTH_TOKEN
+fn doctor_auth_token_finding(config: &Config) -> DoctorFinding {
     if matches!(config.auth_mode, AuthMode::Token) && config.auth_token.is_none() {
-        findings.push(DoctorFinding {
-            ok: false,
-            level: DoctorLevel::Fail,
-            name: "auth/token",
-            detail: "AUTH_MODE=token but AUTH_TOKEN is not set. Set AUTH_TOKEN=<secret>."
-                .to_string(),
-        });
+        doctor_fail(
+            "auth/token",
+            "AUTH_MODE=token but AUTH_TOKEN is not set. Set AUTH_TOKEN=<secret>.",
+        )
     } else {
-        findings.push(DoctorFinding {
-            ok: true,
-            level: DoctorLevel::Ok,
-            name: "auth/token",
-            detail: match config.auth_mode {
+        doctor_ok(
+            "auth/token",
+            match config.auth_mode {
                 AuthMode::Token => "token configuration ok",
                 AuthMode::TailnetTrust => "token not required in tailnet_trust mode",
                 AuthMode::LocalTrust => "token not required in local_trust mode",
-            }
-            .to_string(),
-        });
+            },
+        )
     }
+}
 
-    // Check 3: tmux on PATH
+fn doctor_tmux_finding(tmux_present: bool) -> DoctorFinding {
     if tmux_present {
-        findings.push(DoctorFinding {
-            ok: true,
-            level: DoctorLevel::Ok,
-            name: "tmux",
-            detail: "tmux found on PATH".to_string(),
-        });
+        doctor_ok("tmux", "tmux found on PATH")
     } else {
-        findings.push(DoctorFinding {
-            ok: false,
-            level: DoctorLevel::Fail,
-            name: "tmux",
-            detail: "tmux not found on PATH. Install with: brew install tmux (macOS) \
-                     or apt install tmux (Debian/Ubuntu)."
-                .to_string(),
-        });
+        doctor_fail(
+            "tmux",
+            "tmux not found on PATH. Install with: brew install tmux (macOS) \
+             or apt install tmux (Debian/Ubuntu).",
+        )
     }
+}
 
-    // Check 4: clawgs defaults available for the thought rail
+fn doctor_clawgs_finding(clawgs_defaults: Result<String, String>) -> DoctorFinding {
     match clawgs_defaults {
-        Ok(detail) => findings.push(DoctorFinding {
-            ok: true,
-            level: DoctorLevel::Ok,
-            name: "clawgs",
-            detail,
-        }),
-        Err(reason) => findings.push(DoctorFinding {
-            ok: false,
-            level: DoctorLevel::Fail,
-            name: "clawgs",
-            detail: reason,
-        }),
+        Ok(detail) => doctor_ok("clawgs", detail),
+        Err(reason) => doctor_fail("clawgs", reason),
     }
+}
 
-    // Check 5: data dir creatable / writable
+fn doctor_data_dir_finding(data_dir_writable: Result<PathBuf, String>) -> DoctorFinding {
     match data_dir_writable {
-        Ok(path) => findings.push(DoctorFinding {
-            ok: true,
-            level: DoctorLevel::Ok,
-            name: "data_dir",
-            detail: format!("writable: {}", path.display()),
-        }),
-        Err(reason) => findings.push(DoctorFinding {
-            ok: false,
-            level: DoctorLevel::Fail,
-            name: "data_dir",
-            detail: format!("data dir not writable: {reason}"),
-        }),
+        Ok(path) => doctor_ok("data_dir", format!("writable: {}", path.display())),
+        Err(reason) => doctor_fail("data_dir", format!("data dir not writable: {reason}")),
     }
-
-    findings
 }
 
 pub(crate) fn bind_host(bind: &str) -> &str {
@@ -1465,6 +1452,104 @@ esac
         let auth_bind = findings.iter().find(|f| f.name == "auth/bind").unwrap();
         assert!(!auth_bind.ok);
         assert!(auth_bind.detail.contains("non-loopback"));
+    }
+
+    #[test]
+    fn doctor_orders_findings_and_preserves_mixed_check_details() {
+        let c = cfg("127.0.0.1", AuthMode::LocalTrust, None);
+        let findings = run_doctor_checks(
+            &c,
+            false,
+            Err("clawgs not found at `clawgs`".to_string()),
+            Err("permission denied".to_string()),
+        );
+
+        assert_eq!(
+            findings,
+            vec![
+                DoctorFinding {
+                    ok: true,
+                    level: DoctorLevel::Ok,
+                    name: "auth/bind",
+                    detail: "bind=127.0.0.1 auth_mode=local_trust (safe)".to_string(),
+                },
+                DoctorFinding {
+                    ok: true,
+                    level: DoctorLevel::Ok,
+                    name: "auth/token",
+                    detail: "token not required in local_trust mode".to_string(),
+                },
+                DoctorFinding {
+                    ok: false,
+                    level: DoctorLevel::Fail,
+                    name: "tmux",
+                    detail: "tmux not found on PATH. Install with: brew install tmux (macOS) or apt install tmux (Debian/Ubuntu).".to_string(),
+                },
+                DoctorFinding {
+                    ok: false,
+                    level: DoctorLevel::Fail,
+                    name: "clawgs",
+                    detail: "clawgs not found at `clawgs`".to_string(),
+                },
+                DoctorFinding {
+                    ok: false,
+                    level: DoctorLevel::Fail,
+                    name: "data_dir",
+                    detail: "data dir not writable: permission denied".to_string(),
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn doctor_preserves_exact_auth_failure_details() {
+        let localtrust = cfg("0.0.0.0", AuthMode::LocalTrust, None);
+        let tailnet = cfg("0.0.0.0", AuthMode::TailnetTrust, None);
+        let token = cfg("127.0.0.1", AuthMode::Token, None);
+
+        assert_eq!(
+            run_doctor_checks(
+                &localtrust,
+                true,
+                Ok("`clawgs defaults` ok".to_string()),
+                Ok(PathBuf::from("/tmp")),
+            )[0],
+            DoctorFinding {
+                ok: false,
+                level: DoctorLevel::Fail,
+                name: "auth/bind",
+                detail: "SWIMMERS_BIND=0.0.0.0 is non-loopback while AUTH_MODE=local_trust. This exposes the API to the network with no authentication. Bind to 127.0.0.1, use AUTH_MODE=tailnet_trust with a Tailscale bind address, or set AUTH_MODE=token AUTH_TOKEN=<secret>.".to_string(),
+            }
+        );
+        assert_eq!(
+            run_doctor_checks(
+                &tailnet,
+                true,
+                Ok("`clawgs defaults` ok".to_string()),
+                Ok(PathBuf::from("/tmp")),
+            )[0],
+            DoctorFinding {
+                ok: false,
+                level: DoctorLevel::Fail,
+                name: "auth/bind",
+                detail: "SWIMMERS_BIND=0.0.0.0 is not a Tailscale address while AUTH_MODE=tailnet_trust. Bind to a Tailscale IP in 100.64.0.0/10 or fd7a:115c:a1e0::/48, or use AUTH_MODE=token AUTH_TOKEN=<secret> for non-tailnet exposure.".to_string(),
+            }
+        );
+        assert_eq!(
+            run_doctor_checks(
+                &token,
+                true,
+                Ok("`clawgs defaults` ok".to_string()),
+                Ok(PathBuf::from("/tmp")),
+            )[1],
+            DoctorFinding {
+                ok: false,
+                level: DoctorLevel::Fail,
+                name: "auth/token",
+                detail: "AUTH_MODE=token but AUTH_TOKEN is not set. Set AUTH_TOKEN=<secret>."
+                    .to_string(),
+            }
+        );
     }
 
     #[test]

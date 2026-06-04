@@ -1242,6 +1242,7 @@ async fn get_pane_tail(
     }
 }
 
+#[derive(Debug)]
 enum PaneTailError {
     SessionNotFound,
     ActorUnavailable,
@@ -1273,19 +1274,32 @@ async fn request_pane_tail(
 }
 
 async fn request_pane_tail_from_actor(handle: &ActorHandle) -> Result<String, PaneTailError> {
+    request_pane_tail_from_actor_with_timeout(handle, PANE_TAIL_TIMEOUT).await
+}
+
+async fn request_pane_tail_from_actor_with_timeout(
+    handle: &ActorHandle,
+    timeout: std::time::Duration,
+) -> Result<String, PaneTailError> {
     let (tx, rx) = oneshot::channel::<String>();
-    if handle
-        .send(SessionCommand::GetPaneTail {
-            lines: PANE_TAIL_LINES,
-            reply: tx,
-        })
-        .await
-        .is_err()
-    {
+    if handle.send(pane_tail_request(tx)).await.is_err() {
         return Err(PaneTailError::ActorUnavailable);
     }
 
-    match tokio::time::timeout(PANE_TAIL_TIMEOUT, rx).await {
+    classify_pane_tail_reply(tokio::time::timeout(timeout, rx).await)
+}
+
+fn pane_tail_request(reply: oneshot::Sender<String>) -> SessionCommand {
+    SessionCommand::GetPaneTail {
+        lines: PANE_TAIL_LINES,
+        reply,
+    }
+}
+
+fn classify_pane_tail_reply(
+    result: Result<Result<String, oneshot::error::RecvError>, tokio::time::error::Elapsed>,
+) -> Result<String, PaneTailError> {
+    match result {
         Ok(Ok(text)) => Ok(text),
         Ok(Err(_)) => Err(PaneTailError::ReplyDropped),
         Err(_) => Err(PaneTailError::TimedOut),
@@ -4029,6 +4043,72 @@ esac
         let json = response_json(response).await;
         assert_eq!(json["session_id"], "sess-tail");
         assert_eq!(json["text"], "recent pane output");
+    }
+
+    #[tokio::test]
+    async fn request_pane_tail_from_actor_returns_actor_text() {
+        let (cmd_tx, mut cmd_rx) = mpsc::channel(8);
+        let handle = ActorHandle::test_handle("sess-tail", "tmux-tail", cmd_tx);
+
+        tokio::spawn(async move {
+            if let Some(SessionCommand::GetPaneTail { lines, reply }) = cmd_rx.recv().await {
+                assert_eq!(lines, PANE_TAIL_LINES);
+                let _ = reply.send("recent pane output".to_string());
+            }
+        });
+
+        let text = request_pane_tail_from_actor(&handle)
+            .await
+            .expect("pane tail");
+
+        assert_eq!(text, "recent pane output");
+    }
+
+    #[tokio::test]
+    async fn request_pane_tail_from_actor_returns_actor_unavailable_when_send_fails() {
+        let (cmd_tx, cmd_rx) = mpsc::channel(8);
+        drop(cmd_rx);
+        let handle = ActorHandle::test_handle("sess-tail", "tmux-tail", cmd_tx);
+
+        let result = request_pane_tail_from_actor(&handle).await;
+
+        assert!(matches!(result, Err(PaneTailError::ActorUnavailable)));
+    }
+
+    #[tokio::test]
+    async fn request_pane_tail_from_actor_returns_reply_dropped_when_actor_drops_reply() {
+        let (cmd_tx, mut cmd_rx) = mpsc::channel(8);
+        let handle = ActorHandle::test_handle("sess-tail", "tmux-tail", cmd_tx);
+
+        tokio::spawn(async move {
+            if let Some(SessionCommand::GetPaneTail { lines, reply }) = cmd_rx.recv().await {
+                assert_eq!(lines, PANE_TAIL_LINES);
+                drop(reply);
+            }
+        });
+
+        let result = request_pane_tail_from_actor(&handle).await;
+
+        assert!(matches!(result, Err(PaneTailError::ReplyDropped)));
+    }
+
+    #[tokio::test]
+    async fn request_pane_tail_from_actor_returns_timed_out_when_actor_keeps_reply() {
+        let (cmd_tx, mut cmd_rx) = mpsc::channel(8);
+        let handle = ActorHandle::test_handle("sess-tail", "tmux-tail", cmd_tx);
+
+        tokio::spawn(async move {
+            if let Some(SessionCommand::GetPaneTail { lines, reply }) = cmd_rx.recv().await {
+                assert_eq!(lines, PANE_TAIL_LINES);
+                tokio::time::sleep(Duration::from_millis(50)).await;
+                drop(reply);
+            }
+        });
+
+        let result =
+            request_pane_tail_from_actor_with_timeout(&handle, Duration::from_millis(1)).await;
+
+        assert!(matches!(result, Err(PaneTailError::TimedOut)));
     }
 
     #[tokio::test]
