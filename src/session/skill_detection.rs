@@ -140,13 +140,23 @@ fn collect_installed_skill_names(root: &Path, names: &mut HashSet<String>) {
 }
 
 fn installed_skill_dir_name(entry: fs::DirEntry) -> Option<String> {
-    let file_type = entry.file_type().ok()?;
-    let path = entry.path();
-    let is_skill_dir = file_type.is_dir() || (file_type.is_symlink() && path.is_dir());
-    if !is_skill_dir {
+    if !installed_skill_entry_is_dir(&entry)? {
         return None;
     }
 
+    installed_skill_entry_name(&entry)
+}
+
+fn installed_skill_entry_is_dir(entry: &fs::DirEntry) -> Option<bool> {
+    let file_type = entry.file_type().ok()?;
+    Some(installed_skill_file_type_is_dir(&file_type, &entry.path()))
+}
+
+fn installed_skill_file_type_is_dir(file_type: &fs::FileType, path: &Path) -> bool {
+    file_type.is_dir() || (file_type.is_symlink() && path.is_dir())
+}
+
+fn installed_skill_entry_name(entry: &fs::DirEntry) -> Option<String> {
     normalize_skill_name(&entry.file_name().to_string_lossy())
 }
 
@@ -299,6 +309,63 @@ mod tests {
                 .len(),
             names.len()
         );
+    }
+
+    #[test]
+    fn installed_skill_dir_name_accepts_real_directory_and_normalizes_name() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        std::fs::create_dir(temp.path().join("Commit")).expect("skill dir");
+
+        let entry = dir_entry_named(temp.path(), "Commit");
+
+        assert_eq!(installed_skill_dir_name(entry), Some("commit".to_string()));
+    }
+
+    #[test]
+    fn installed_skill_dir_name_rejects_non_directories_and_invalid_names() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        std::fs::write(temp.path().join("describe"), "not a directory").expect("skill file");
+        std::fs::create_dir(temp.path().join("bad skill")).expect("invalid skill dir");
+
+        let file_entry = dir_entry_named(temp.path(), "describe");
+        let invalid_dir_entry = dir_entry_named(temp.path(), "bad skill");
+
+        assert_eq!(installed_skill_dir_name(file_entry), None);
+        assert_eq!(installed_skill_dir_name(invalid_dir_entry), None);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn installed_skill_dir_name_accepts_directory_symlink_when_target_is_dir() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        std::fs::create_dir(temp.path().join("target")).expect("target dir");
+        std::os::unix::fs::symlink(temp.path().join("target"), temp.path().join("Commit"))
+            .expect("dir symlink");
+
+        let entry = dir_entry_named(temp.path(), "Commit");
+
+        assert_eq!(installed_skill_dir_name(entry), Some("commit".to_string()));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn installed_skill_dir_name_rejects_file_symlink() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        std::fs::write(temp.path().join("target"), "not a directory").expect("target file");
+        std::os::unix::fs::symlink(temp.path().join("target"), temp.path().join("Commit"))
+            .expect("file symlink");
+
+        let entry = dir_entry_named(temp.path(), "Commit");
+
+        assert_eq!(installed_skill_dir_name(entry), None);
+    }
+
+    fn dir_entry_named(root: &Path, name: &str) -> fs::DirEntry {
+        std::fs::read_dir(root)
+            .expect("read dir")
+            .filter_map(Result::ok)
+            .find(|entry| entry.file_name() == name)
+            .expect("dir entry")
     }
 
     #[test]

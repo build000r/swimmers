@@ -84,47 +84,118 @@ async fn ensure_server_with_opts(
         // Parent only reads readiness; child is sole writer.
         drop(writer);
 
-        let read_task = tokio::task::spawn_blocking(move || read_ready_byte(reader));
+        await_server_readiness(&mut child, &log_path, wait_timeout, reader).await?;
+        spawn_reaper(child, log_path.clone());
+        Ok(ServerHandle::Managed { pid })
+    }
+}
 
-        match tokio::time::timeout(wait_timeout, read_task).await {
-            Ok(Ok(Ok(b'R'))) => {
-                spawn_reaper(child, log_path.clone());
-                Ok(ServerHandle::Managed { pid })
+#[cfg(unix)]
+async fn await_server_readiness(
+    child: &mut Child,
+    log_path: &Path,
+    wait_timeout: Duration,
+    reader: os_pipe::PipeReader,
+) -> Result<(), String> {
+    let read_task = tokio::task::spawn_blocking(move || read_ready_byte(reader));
+    let wait_result = tokio::time::timeout(wait_timeout, read_task).await;
+    let outcome = classify_readiness_wait(wait_result);
+    let disposition = classify_readiness_outcome(&outcome, log_path, wait_timeout);
+
+    apply_readiness_disposition(child, disposition)
+}
+
+#[cfg(unix)]
+fn classify_readiness_wait(
+    wait_result: Result<
+        Result<io::Result<u8>, tokio::task::JoinError>,
+        tokio::time::error::Elapsed,
+    >,
+) -> ReadinessOutcome {
+    match wait_result {
+        Ok(Ok(read_result)) => classify_ready_read(read_result),
+        Ok(Err(join_err)) => ReadinessOutcome::JoinError(join_err.to_string()),
+        Err(_) => ReadinessOutcome::Timeout,
+    }
+}
+
+fn apply_readiness_disposition(
+    child: &mut Child,
+    disposition: ReadinessDisposition,
+) -> Result<(), String> {
+    match disposition {
+        ReadinessDisposition::Ready => Ok(()),
+        ReadinessDisposition::Error { terminate, message } => {
+            if terminate {
+                terminate_child(child);
             }
-            Ok(Ok(Ok(other))) => {
-                terminate_child(&mut child);
-                Err(format!(
-                    "swimmers server signaled unexpected readiness byte {other} (expected 82). See log: {}",
-                    log_path.display()
-                ))
-            }
-            Ok(Ok(Err(err))) if err.kind() == io::ErrorKind::UnexpectedEof => Err(format!(
-                "swimmers server exited before signaling readiness (EOF). See log: {}",
-                log_path.display()
-            )),
-            Ok(Ok(Err(err))) => {
-                terminate_child(&mut child);
-                Err(format!(
-                    "failed while reading swimmers readiness signal: {err}. See log: {}",
-                    log_path.display()
-                ))
-            }
-            Ok(Err(join_err)) => {
-                terminate_child(&mut child);
-                Err(format!(
-                    "readiness wait task failed: {join_err}. See log: {}",
-                    log_path.display()
-                ))
-            }
-            Err(_) => {
-                terminate_child(&mut child);
-                Err(format!(
-                    "timed out waiting {:?} for swimmers readiness signal. See log: {}",
-                    wait_timeout,
-                    log_path.display()
-                ))
-            }
+            Err(message)
         }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ReadinessOutcome {
+    Ready,
+    UnexpectedByte(u8),
+    Eof,
+    ReadError(String),
+    JoinError(String),
+    Timeout,
+}
+
+fn classify_ready_read(read_result: io::Result<u8>) -> ReadinessOutcome {
+    match read_result {
+        Ok(b'R') => ReadinessOutcome::Ready,
+        Ok(other) => ReadinessOutcome::UnexpectedByte(other),
+        Err(err) if err.kind() == io::ErrorKind::UnexpectedEof => ReadinessOutcome::Eof,
+        Err(err) => ReadinessOutcome::ReadError(err.to_string()),
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ReadinessDisposition {
+    Ready,
+    Error { terminate: bool, message: String },
+}
+
+fn classify_readiness_outcome(
+    outcome: &ReadinessOutcome,
+    log_path: &Path,
+    wait_timeout: Duration,
+) -> ReadinessDisposition {
+    let log_path = log_path.display();
+    match outcome {
+        ReadinessOutcome::Ready => ReadinessDisposition::Ready,
+        ReadinessOutcome::UnexpectedByte(other) => ReadinessDisposition::Error {
+            terminate: true,
+            message: format!(
+                "swimmers server signaled unexpected readiness byte {other} (expected 82). See log: {log_path}"
+            ),
+        },
+        ReadinessOutcome::Eof => ReadinessDisposition::Error {
+            terminate: false,
+            message: format!(
+                "swimmers server exited before signaling readiness (EOF). See log: {log_path}"
+            ),
+        },
+        ReadinessOutcome::ReadError(err) => ReadinessDisposition::Error {
+            terminate: true,
+            message: format!(
+                "failed while reading swimmers readiness signal: {err}. See log: {log_path}"
+            ),
+        },
+        ReadinessOutcome::JoinError(join_err) => ReadinessDisposition::Error {
+            terminate: true,
+            message: format!("readiness wait task failed: {join_err}. See log: {log_path}"),
+        },
+        ReadinessOutcome::Timeout => ReadinessDisposition::Error {
+            terminate: true,
+            message: format!(
+                "timed out waiting {:?} for swimmers readiness signal. See log: {log_path}",
+                wait_timeout
+            ),
+        },
     }
 }
 
@@ -882,6 +953,102 @@ mod tests {
         .expect("non-InvalidInput kill error should be reportable");
         assert_eq!(err.kind(), io::ErrorKind::PermissionDenied);
         assert_eq!(err.to_string(), "cannot signal child");
+    }
+
+    #[test]
+    fn classify_ready_read_maps_ready_unexpected_eof_and_errors() {
+        assert_eq!(classify_ready_read(Ok(b'R')), ReadinessOutcome::Ready);
+        assert_eq!(
+            classify_ready_read(Ok(b'X')),
+            ReadinessOutcome::UnexpectedByte(b'X')
+        );
+        assert_eq!(
+            classify_ready_read(Err(io::Error::new(io::ErrorKind::UnexpectedEof, "eof"))),
+            ReadinessOutcome::Eof
+        );
+        assert_eq!(
+            classify_ready_read(Err(io::Error::new(io::ErrorKind::BrokenPipe, "pipe broke"))),
+            ReadinessOutcome::ReadError("pipe broke".to_string())
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn classify_readiness_wait_maps_completed_reads() {
+        assert_eq!(
+            classify_readiness_wait(Ok(Ok(Ok(b'R')))),
+            ReadinessOutcome::Ready
+        );
+        assert_eq!(
+            classify_readiness_wait(Ok(Ok(Ok(b'X')))),
+            ReadinessOutcome::UnexpectedByte(b'X')
+        );
+        assert_eq!(
+            classify_readiness_wait(Ok(Ok(Err(io::Error::new(
+                io::ErrorKind::UnexpectedEof,
+                "eof",
+            ))))),
+            ReadinessOutcome::Eof
+        );
+    }
+
+    #[test]
+    fn classify_readiness_outcome_preserves_termination_semantics() {
+        let log_path = Path::new("/tmp/swimmers-ready.log");
+        let timeout = Duration::from_secs(3);
+
+        assert_eq!(
+            classify_readiness_outcome(&ReadinessOutcome::Ready, log_path, timeout),
+            ReadinessDisposition::Ready
+        );
+
+        let cases = [
+            (
+                ReadinessOutcome::UnexpectedByte(b'X'),
+                true,
+                "unexpected readiness byte 88",
+            ),
+            (
+                ReadinessOutcome::Eof,
+                false,
+                "before signaling readiness (EOF)",
+            ),
+            (
+                ReadinessOutcome::ReadError("pipe broke".to_string()),
+                true,
+                "failed while reading swimmers readiness signal: pipe broke",
+            ),
+            (
+                ReadinessOutcome::JoinError("task panicked".to_string()),
+                true,
+                "readiness wait task failed: task panicked",
+            ),
+            (
+                ReadinessOutcome::Timeout,
+                true,
+                "timed out waiting 3s for swimmers readiness signal",
+            ),
+        ];
+
+        for (outcome, expected_terminate, expected_message) in cases {
+            let disposition = classify_readiness_outcome(&outcome, log_path, timeout);
+            match disposition {
+                ReadinessDisposition::Ready => {
+                    panic!("expected error disposition for {outcome:?}");
+                }
+                ReadinessDisposition::Error { terminate, message } => {
+                    assert_eq!(terminate, expected_terminate, "outcome: {outcome:?}");
+                    assert!(
+                        message.contains(expected_message),
+                        "message `{message}` should contain `{expected_message}`"
+                    );
+                    assert!(
+                        message.contains(&log_path.display().to_string()),
+                        "message should include log path: {message}"
+                    );
+                }
+            }
+        }
     }
 
     #[test]

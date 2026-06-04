@@ -174,36 +174,55 @@ fn denamespace_for_configured_targets<'a>(
 }
 
 pub async fn list_remote_sessions() -> Vec<SessionSummary> {
-    #[cfg(test)]
-    if std::env::var_os("SWIMMERS_TEST_ENABLE_REMOTE_POLLING").is_none() {
+    if !remote_polling_enabled_for_environment() {
         return Vec::new();
     }
 
     let Some(overlay) = default_overlay() else {
         return Vec::new();
     };
-    let targets = overlay
-        .all_launch_targets()
-        .into_iter()
-        .filter(is_swimmers_api_target)
-        .filter(|target| {
-            if target_points_at_current_server(target, &Config::from_env()) {
-                tracing::debug!(
-                    target = %target.id,
-                    base_url = ?target.base_url,
-                    "skipping self-target remote session polling"
-                );
-                false
-            } else {
-                true
-            }
-        })
-        .collect::<Vec<_>>();
+    let targets = remote_poll_targets(overlay.all_launch_targets(), &Config::from_env());
     if targets.is_empty() {
         return Vec::new();
     }
 
     list_remote_sessions_for_targets(targets).await
+}
+
+fn remote_polling_enabled_for_environment() -> bool {
+    #[cfg(test)]
+    {
+        std::env::var_os("SWIMMERS_TEST_ENABLE_REMOTE_POLLING").is_some()
+    }
+
+    #[cfg(not(test))]
+    {
+        true
+    }
+}
+
+fn remote_poll_targets(
+    targets: Vec<LaunchTargetSummary>,
+    config: &Config,
+) -> Vec<LaunchTargetSummary> {
+    targets
+        .into_iter()
+        .filter(is_swimmers_api_target)
+        .filter(|target| !is_current_server_poll_target(target, config))
+        .collect()
+}
+
+fn is_current_server_poll_target(target: &LaunchTargetSummary, config: &Config) -> bool {
+    if target_points_at_current_server(target, config) {
+        tracing::debug!(
+            target = %target.id,
+            base_url = ?target.base_url,
+            "skipping self-target remote session polling"
+        );
+        true
+    } else {
+        false
+    }
 }
 
 async fn list_remote_sessions_for_targets(
@@ -1618,6 +1637,74 @@ mod tests {
         target.base_url = Some("http://localhost:3210".to_string());
 
         assert!(target_points_at_current_server(&target, &config));
+    }
+
+    #[test]
+    fn remote_polling_test_gate_requires_explicit_enablement() {
+        let _guard = crate::test_support::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        std::env::remove_var("SWIMMERS_TEST_ENABLE_REMOTE_POLLING");
+        assert!(!remote_polling_enabled_for_environment());
+
+        std::env::set_var("SWIMMERS_TEST_ENABLE_REMOTE_POLLING", "1");
+        assert!(remote_polling_enabled_for_environment());
+        std::env::remove_var("SWIMMERS_TEST_ENABLE_REMOTE_POLLING");
+    }
+
+    #[test]
+    fn remote_poll_targets_keeps_only_swimmers_api_targets() {
+        let config = Config::default();
+        let mut swimmers = target();
+        swimmers.id = "swimmers".to_string();
+        swimmers.base_url = Some("http://remote.example:3210".to_string());
+
+        let mut unsupported = target();
+        unsupported.id = "ssh".to_string();
+        unsupported.kind = "ssh".to_string();
+        unsupported.base_url = Some("http://other.example:3210".to_string());
+
+        let targets = remote_poll_targets(vec![unsupported, swimmers], &config);
+
+        assert_eq!(targets.len(), 1);
+        assert_eq!(targets[0].id, "swimmers");
+    }
+
+    #[test]
+    fn remote_poll_targets_skips_current_server_target() {
+        let mut config = Config::default();
+        config.bind = "127.0.0.1".to_string();
+        config.port = 3210;
+
+        let mut self_target = target();
+        self_target.id = "self".to_string();
+        self_target.base_url = Some("http://localhost:3210".to_string());
+
+        let mut remote_target = target();
+        remote_target.id = "remote".to_string();
+        remote_target.base_url = Some("http://remote.example:3210".to_string());
+
+        let targets = remote_poll_targets(vec![self_target, remote_target], &config);
+
+        assert_eq!(targets.len(), 1);
+        assert_eq!(targets[0].id, "remote");
+    }
+
+    #[test]
+    fn remote_poll_targets_returns_empty_when_no_pollable_targets_remain() {
+        let mut config = Config::default();
+        config.bind = "127.0.0.1".to_string();
+        config.port = 3210;
+
+        let mut self_target = target();
+        self_target.base_url = Some("http://localhost:3210".to_string());
+
+        let mut unsupported = target();
+        unsupported.kind = "ssh".to_string();
+
+        let targets = remote_poll_targets(vec![self_target, unsupported], &config);
+
+        assert!(targets.is_empty());
     }
 
     #[tokio::test]

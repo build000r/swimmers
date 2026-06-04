@@ -806,10 +806,13 @@ fn tmux_command() -> ProcessCommand {
 }
 
 fn numbered_tmux_name(value: &str) -> Option<u64> {
-    if value.is_empty() || !value.chars().all(|ch| ch.is_ascii_digit()) {
-        return None;
-    }
-    value.parse::<u64>().ok()
+    is_exact_ascii_digits(value)
+        .then(|| value.parse::<u64>().ok())
+        .flatten()
+}
+
+fn is_exact_ascii_digits(value: &str) -> bool {
+    !value.is_empty() && value.bytes().all(|byte| byte.is_ascii_digit())
 }
 
 fn tmux_list_has_no_server(stderr: &str) -> bool {
@@ -1190,6 +1193,25 @@ mod tests {
     }
 
     #[test]
+    fn numbered_tmux_name_rejects_empty_and_non_exact_digits() {
+        for name in ["", " 8", "8 ", "\t8", "+8", "-8", "8a", "８", "１２"] {
+            assert_eq!(numbered_tmux_name(name), None, "{name:?}");
+        }
+    }
+
+    #[test]
+    fn numbered_tmux_name_accepts_ascii_digits_with_leading_zeroes() {
+        assert_eq!(numbered_tmux_name("0"), Some(0));
+        assert_eq!(numbered_tmux_name("0008"), Some(8));
+    }
+
+    #[test]
+    fn numbered_tmux_name_handles_u64_bounds() {
+        assert_eq!(numbered_tmux_name("18446744073709551615"), Some(u64::MAX));
+        assert_eq!(numbered_tmux_name("18446744073709551616"), None);
+    }
+
+    #[test]
     fn next_numeric_tmux_name_uses_highest_existing_number_plus_one() {
         let names = [
             "6",
@@ -1222,6 +1244,16 @@ mod tests {
         assert_eq!(
             next_numeric_tmux_name_from_names(names).expect("next numeric name"),
             "11"
+        );
+    }
+
+    #[test]
+    fn next_numeric_tmux_name_errors_when_highest_number_overflows() {
+        let names = ["18446744073709551615", "18446744073709551614", "alpha"];
+
+        assert_eq!(
+            next_numeric_tmux_name_from_names(names),
+            Err("numeric tmux session counter exhausted".to_string())
         );
     }
 
