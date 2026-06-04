@@ -820,31 +820,54 @@ fn is_transient_iterm_open_error(err: &anyhow::Error) -> bool {
 }
 
 fn host_is_loopback(host: &str) -> bool {
-    let trimmed = host.trim();
-    if trimmed.is_empty() {
-        return false;
-    }
+    host_without_port(host).is_some_and(host_part_is_loopback)
+}
 
-    let without_port = if let Some(stripped) = trimmed.strip_prefix('[') {
-        stripped.split(']').next().unwrap_or(trimmed).trim()
-    } else if let Some((candidate_host, candidate_port)) = trimmed.rsplit_once(':') {
-        if !candidate_host.contains(':')
-            && !candidate_host.is_empty()
-            && candidate_port.chars().all(|ch| ch.is_ascii_digit())
-        {
-            candidate_host.trim()
-        } else {
-            trimmed
-        }
-    } else {
-        trimmed
-    };
+fn host_without_port(host: &str) -> Option<&str> {
+    let trimmed = trimmed_host(host)?;
+    Some(
+        bracketed_host(trimmed)
+            .map(str::trim)
+            .unwrap_or_else(|| strip_numeric_host_port(trimmed)),
+    )
+}
 
-    without_port == "localhost"
-        || without_port
-            .parse::<IpAddr>()
-            .map(|ip| ip.is_loopback())
-            .unwrap_or(false)
+fn trimmed_host(host: &str) -> Option<&str> {
+    non_empty_trimmed(host)
+}
+
+fn bracketed_host(host: &str) -> Option<&str> {
+    host.strip_prefix('[')
+        .map(|stripped| stripped.split(']').next().unwrap_or(host))
+}
+
+fn strip_numeric_host_port(host: &str) -> &str {
+    host.rsplit_once(':')
+        .filter(|(candidate_host, candidate_port)| {
+            is_strippable_host_port(candidate_host, candidate_port)
+        })
+        .map(|(candidate_host, _)| candidate_host.trim())
+        .unwrap_or(host)
+}
+
+fn is_strippable_host_port(candidate_host: &str, candidate_port: &str) -> bool {
+    is_plain_host(candidate_host) && is_ascii_port(candidate_port)
+}
+
+fn is_plain_host(candidate_host: &str) -> bool {
+    !candidate_host.contains(':') && !candidate_host.is_empty()
+}
+
+fn is_ascii_port(candidate_port: &str) -> bool {
+    candidate_port.chars().all(|ch| ch.is_ascii_digit())
+}
+
+fn host_part_is_loopback(host: &str) -> bool {
+    host == "localhost" || ip_addr_is_loopback(host)
+}
+
+fn ip_addr_is_loopback(host: &str) -> bool {
+    host.parse::<IpAddr>().is_ok_and(|ip| ip.is_loopback())
 }
 
 #[cfg(test)]
@@ -1022,6 +1045,46 @@ mod tests {
     fn host_loopback_rejects_remote_variants() {
         assert!(!host_is_loopback("100.101.1.2:3210"));
         assert!(!host_is_loopback("example.local:3210"));
+    }
+
+    #[test]
+    fn host_loopback_trims_surrounding_whitespace() {
+        assert!(host_is_loopback(" localhost "));
+        assert!(host_is_loopback("\t127.0.0.1:3210\n"));
+        assert!(host_is_loopback(" [::1]:3210 "));
+    }
+
+    #[test]
+    fn host_loopback_accepts_bracketed_ipv6_with_and_without_port() {
+        assert!(host_is_loopback("[::1]"));
+        assert!(host_is_loopback("[::1]:3210"));
+    }
+
+    #[test]
+    fn host_loopback_accepts_unbracketed_ipv6() {
+        assert!(host_is_loopback("::1"));
+        assert!(host_is_loopback("0:0:0:0:0:0:0:1"));
+    }
+
+    #[test]
+    fn host_loopback_rejects_malformed_ports() {
+        assert!(!host_is_loopback("localhost:http"));
+        assert!(!host_is_loopback("127.0.0.1:http"));
+        assert!(!host_is_loopback("::1:http"));
+    }
+
+    #[test]
+    fn host_loopback_rejects_colon_containing_remote_strings() {
+        assert!(!host_is_loopback("example.local:3210:extra"));
+        assert!(!host_is_loopback("100.101.1.2:3210:extra"));
+    }
+
+    #[test]
+    fn host_loopback_rejects_empty_and_non_loopback_dns_hosts() {
+        assert!(!host_is_loopback(""));
+        assert!(!host_is_loopback("   "));
+        assert!(!host_is_loopback("example.com"));
+        assert!(!host_is_loopback("example.com:3210"));
     }
 
     #[test]

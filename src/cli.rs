@@ -16,7 +16,7 @@
 use std::io::ErrorKind;
 use std::net::IpAddr;
 use std::path::PathBuf;
-use std::process::{Command as ProcessCommand, Stdio};
+use std::process::{Child, Command as ProcessCommand, ExitStatus, Output, Stdio};
 use std::time::{Duration, Instant};
 
 use clap::{Parser, Subcommand};
@@ -839,74 +839,136 @@ pub fn check_clawgs_defaults() -> Result<String, String> {
 }
 
 fn check_clawgs_defaults_for_bin(bin: &str, timeout: Duration) -> Result<String, String> {
-    let mut child = ProcessCommand::new(bin)
+    let mut child = spawn_clawgs_defaults(bin)?;
+    wait_for_clawgs_defaults(bin, &mut child, timeout)?;
+    let output = collect_clawgs_defaults_output(bin, child)?;
+    summarize_clawgs_defaults_output(bin, output)
+}
+
+fn spawn_clawgs_defaults(bin: &str) -> Result<Child, String> {
+    ProcessCommand::new(bin)
         .arg("defaults")
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
-        .map_err(|err| match err.kind() {
-            ErrorKind::NotFound => format!(
-                "clawgs not found at `{bin}`. Install clawgs or set CLAWGS_BIN=/path/to/clawgs; \
-                 the thought rail will run in degraded mode until this works."
-            ),
-            _ => format!(
-                "failed to run `{bin} defaults`: {err}. Set CLAWGS_BIN=/path/to/clawgs if needed."
-            ),
-        })?;
+        .map_err(|err| format_clawgs_spawn_error(bin, err))
+}
 
-    let deadline = Instant::now() + timeout;
-    loop {
-        match child.try_wait() {
-            Ok(Some(_)) => break,
-            Ok(None) if Instant::now() >= deadline => {
-                let _ = child.kill();
-                let _ = child.wait();
-                return Err(format!(
-                    "`{bin} defaults` timed out after {}ms. Run it manually or set \
-                     CLAWGS_BIN=/path/to/clawgs; the thought rail will run in degraded mode \
-                     until this works.",
-                    timeout.as_millis()
-                ));
-            }
-            Ok(None) => std::thread::sleep(Duration::from_millis(25)),
-            Err(err) => {
-                let _ = child.kill();
-                let _ = child.wait();
-                return Err(format!("failed to inspect `{bin} defaults`: {err}"));
-            }
+fn format_clawgs_spawn_error(bin: &str, err: std::io::Error) -> String {
+    match err.kind() {
+        ErrorKind::NotFound => format!(
+            "clawgs not found at `{bin}`. Install clawgs or set CLAWGS_BIN=/path/to/clawgs; \
+             the thought rail will run in degraded mode until this works."
+        ),
+        _ => {
+            format!(
+                "failed to run `{bin} defaults`: {err}. Set CLAWGS_BIN=/path/to/clawgs if needed."
+            )
         }
     }
+}
 
-    let output = child
-        .wait_with_output()
-        .map_err(|err| format!("failed to collect `{bin} defaults` output: {err}"))?;
-
-    if !output.status.success() {
-        let stderr = compact_command_text(&output.stderr);
-        let detail = if stderr.is_empty() {
-            output.status.to_string()
-        } else {
-            format!("{}: {stderr}", output.status)
+fn wait_for_clawgs_defaults(bin: &str, child: &mut Child, timeout: Duration) -> Result<(), String> {
+    let deadline = Instant::now() + timeout;
+    loop {
+        let finished = match clawgs_defaults_finished(child) {
+            Ok(finished) => finished,
+            Err(err) => {
+                stop_clawgs_defaults_child(child);
+                return Err(format_clawgs_inspect_error(bin, err));
+            }
         };
-        return Err(format!(
-            "`{bin} defaults` failed ({detail}). Install or rebuild clawgs, or set \
-             CLAWGS_BIN=/path/to/clawgs."
-        ));
+        if finished {
+            return Ok(());
+        }
+        if Instant::now() >= deadline {
+            stop_clawgs_defaults_child(child);
+            return Err(format_clawgs_timeout_error(bin, timeout));
+        }
+        std::thread::sleep(Duration::from_millis(25));
+    }
+}
+
+fn clawgs_defaults_finished(child: &mut Child) -> Result<bool, std::io::Error> {
+    child.try_wait().map(|status| status.is_some())
+}
+
+fn stop_clawgs_defaults_child(child: &mut Child) {
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
+fn format_clawgs_timeout_error(bin: &str, timeout: Duration) -> String {
+    format!(
+        "`{bin} defaults` timed out after {}ms. Run it manually or set \
+         CLAWGS_BIN=/path/to/clawgs; the thought rail will run in degraded mode \
+         until this works.",
+        timeout.as_millis()
+    )
+}
+
+fn format_clawgs_inspect_error(bin: &str, err: std::io::Error) -> String {
+    format!("failed to inspect `{bin} defaults`: {err}")
+}
+
+fn collect_clawgs_defaults_output(bin: &str, child: Child) -> Result<Output, String> {
+    child
+        .wait_with_output()
+        .map_err(|err| format_clawgs_collect_error(bin, err))
+}
+
+fn format_clawgs_collect_error(bin: &str, err: std::io::Error) -> String {
+    format!("failed to collect `{bin} defaults` output: {err}")
+}
+
+fn summarize_clawgs_defaults_output(bin: &str, output: Output) -> Result<String, String> {
+    if !output.status.success() {
+        return Err(format_clawgs_nonzero_error(bin, &output));
     }
 
-    let defaults: DaemonDefaults = serde_json::from_slice(&output.stdout).map_err(|err| {
+    summarize_successful_clawgs_defaults(bin, &output.stdout)
+}
+
+fn format_clawgs_nonzero_error(bin: &str, output: &Output) -> String {
+    let stderr = compact_command_text(&output.stderr);
+    let detail = clawgs_exit_detail(&output.status, &stderr);
+    format!(
+        "`{bin} defaults` failed ({detail}). Install or rebuild clawgs, or set \
+         CLAWGS_BIN=/path/to/clawgs."
+    )
+}
+
+fn clawgs_exit_detail(status: &ExitStatus, stderr: &str) -> String {
+    if stderr.is_empty() {
+        status.to_string()
+    } else {
+        format!("{status}: {stderr}")
+    }
+}
+
+fn summarize_successful_clawgs_defaults(bin: &str, stdout: &[u8]) -> Result<String, String> {
+    let defaults: DaemonDefaults = serde_json::from_slice(stdout).map_err(|err| {
         format!("`{bin} defaults` returned invalid JSON: {err}. Rebuild clawgs or set CLAWGS_BIN.")
     })?;
-    let backend = if defaults.backend.trim().is_empty() {
+
+    Ok(format_clawgs_defaults_success(bin, &defaults))
+}
+
+fn format_clawgs_defaults_success(bin: &str, defaults: &DaemonDefaults) -> String {
+    let backend = clawgs_defaults_backend(defaults);
+    format!(
+        "`{bin} defaults` ok (backend={backend}, model={})",
+        defaults.model
+    )
+}
+
+fn clawgs_defaults_backend(defaults: &DaemonDefaults) -> &str {
+    if defaults.backend.trim().is_empty() {
         "unknown"
     } else {
         defaults.backend.as_str()
-    };
-    Ok(format!(
-        "`{bin} defaults` ok (backend={backend}, model={})",
-        defaults.model
-    ))
+    }
 }
 
 fn compact_command_text(bytes: &[u8]) -> String {
@@ -1919,6 +1981,12 @@ esac
         path
     }
 
+    fn write_plain_script(dir: &std::path::Path, name: &str, body: &str) -> PathBuf {
+        let path = dir.join(name);
+        std::fs::write(&path, body).expect("write script");
+        path
+    }
+
     #[test]
     fn check_clawgs_defaults_reports_not_found_for_missing_bin() {
         let tmp = tempfile::tempdir().expect("tempdir");
@@ -1932,14 +2000,46 @@ esac
     }
 
     #[test]
+    fn check_clawgs_defaults_reports_spawn_error_when_bin_is_not_executable() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let script = write_plain_script(
+            tmp.path(),
+            "not-executable-clawgs",
+            "#!/bin/sh\nprintf '{}\\n'\n",
+        );
+        let err = check_clawgs_defaults_for_bin(script.to_str().unwrap(), fast_timeout())
+            .expect_err("non-executable bin must error");
+        assert!(
+            err.contains("failed to run"),
+            "expected generic spawn branch, got: {err}"
+        );
+        assert!(
+            err.contains("Set CLAWGS_BIN=/path/to/clawgs"),
+            "spawn error should include CLAWGS_BIN guidance: {err}"
+        );
+    }
+
+    #[test]
     fn check_clawgs_defaults_reports_failure_when_bin_exits_non_zero() {
         let tmp = tempfile::tempdir().expect("tempdir");
-        let script = write_executable_script(tmp.path(), "fail-clawgs", "#!/bin/sh\nexit 7\n");
+        let script = write_executable_script(
+            tmp.path(),
+            "fail-clawgs",
+            "#!/bin/sh\nprintf 'bad defaults\\nsecond line\\n' >&2\nexit 7\n",
+        );
         let err = check_clawgs_defaults_for_bin(script.to_str().unwrap(), fast_timeout())
             .expect_err("non-zero exit must error");
         assert!(
             err.contains("failed"),
             "expected non-zero failure branch, got: {err}"
+        );
+        assert!(
+            err.contains("bad defaults"),
+            "expected stderr detail branch, got: {err}"
+        );
+        assert!(
+            !err.contains("second line"),
+            "stderr detail should stay compact, got: {err}"
         );
     }
 
@@ -1960,6 +2060,23 @@ esac
     }
 
     #[test]
+    fn check_clawgs_defaults_reports_missing_model_as_invalid_json() {
+        let err = summarize_successful_clawgs_defaults(
+            "clawgs",
+            br#"{"backend":"claude","agent_prompt":"a","terminal_prompt":"t"}"#,
+        )
+        .expect_err("missing model must stay in invalid JSON bucket");
+        assert!(
+            err.contains("invalid JSON"),
+            "expected JSON validation branch, got: {err}"
+        );
+        assert!(
+            err.contains("missing field"),
+            "expected missing-field detail, got: {err}"
+        );
+    }
+
+    #[test]
     fn check_clawgs_defaults_reports_timeout_for_slow_bin() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let script = write_executable_script(tmp.path(), "slow-clawgs", "#!/bin/sh\nsleep 5\n");
@@ -1969,6 +2086,24 @@ esac
         assert!(
             err.contains("timed out"),
             "expected timeout branch, got: {err}"
+        );
+    }
+
+    #[test]
+    fn check_clawgs_defaults_formats_wait_and_collect_errors() {
+        let inspect = format_clawgs_inspect_error(
+            "clawgs",
+            std::io::Error::new(ErrorKind::Other, "wait failed"),
+        );
+        assert_eq!(inspect, "failed to inspect `clawgs defaults`: wait failed");
+
+        let collect = format_clawgs_collect_error(
+            "clawgs",
+            std::io::Error::new(ErrorKind::Other, "pipe failed"),
+        );
+        assert_eq!(
+            collect,
+            "failed to collect `clawgs defaults` output: pipe failed"
         );
     }
 
@@ -1988,6 +2123,19 @@ esac
             "summary missing backend: {ok}"
         );
         assert!(ok.contains("model=sonnet-4"), "summary missing model: {ok}");
+    }
+
+    #[test]
+    fn check_clawgs_defaults_uses_unknown_for_missing_backend() {
+        let ok = summarize_successful_clawgs_defaults(
+            "clawgs",
+            br#"{"model":"m","agent_prompt":"a","terminal_prompt":"t"}"#,
+        )
+        .expect("missing backend should use serde default");
+        assert!(
+            ok.contains("backend=unknown"),
+            "missing backend should fall back to 'unknown': {ok}"
+        );
     }
 
     #[test]

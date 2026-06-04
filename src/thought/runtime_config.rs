@@ -57,58 +57,11 @@ impl ThoughtConfig {
     }
 
     pub fn validate(&self) -> Result<(), ThoughtConfigValidationError> {
-        if self.model.chars().count() > MODEL_MAX_CHARS {
-            return Err(ThoughtConfigValidationError::new(
-                "model",
-                format!("must be <= {MODEL_MAX_CHARS} characters"),
-            ));
-        }
-
-        const VALID_BACKENDS: &[&str] = &["openrouter", "grok"];
-        if !VALID_BACKENDS
-            .iter()
-            .any(|v| v.eq_ignore_ascii_case(&self.backend))
-        {
-            return Err(ThoughtConfigValidationError::new(
-                "backend",
-                format!(
-                    "unrecognized backend {:?}; expected one of: openrouter, grok",
-                    self.backend
-                ),
-            ));
-        }
-
-        if !(CADENCE_HOT_MIN_MS..=CADENCE_HOT_MAX_MS).contains(&self.cadence_hot_ms) {
-            return Err(ThoughtConfigValidationError::new(
-                "cadence_hot_ms",
-                format!(
-                    "must be between {CADENCE_HOT_MIN_MS} and {CADENCE_HOT_MAX_MS} (inclusive)"
-                ),
-            ));
-        }
-
-        if self.cadence_warm_ms < self.cadence_hot_ms || self.cadence_warm_ms > CADENCE_WARM_MAX_MS
-        {
-            return Err(ThoughtConfigValidationError::new(
-                "cadence_warm_ms",
-                format!(
-                    "must be between cadence_hot_ms ({}) and {} (inclusive)",
-                    self.cadence_hot_ms, CADENCE_WARM_MAX_MS
-                ),
-            ));
-        }
-
-        if self.cadence_cold_ms < self.cadence_warm_ms || self.cadence_cold_ms > CADENCE_COLD_MAX_MS
-        {
-            return Err(ThoughtConfigValidationError::new(
-                "cadence_cold_ms",
-                format!(
-                    "must be between cadence_warm_ms ({}) and {} (inclusive)",
-                    self.cadence_warm_ms, CADENCE_COLD_MAX_MS
-                ),
-            ));
-        }
-
+        validate_model_len(&self.model)?;
+        validate_backend(&self.backend)?;
+        validate_cadence_hot_ms(self.cadence_hot_ms)?;
+        validate_cadence_warm_ms(self.cadence_hot_ms, self.cadence_warm_ms)?;
+        validate_cadence_cold_ms(self.cadence_warm_ms, self.cadence_cold_ms)?;
         validate_optional_len("agent_prompt", self.agent_prompt.as_deref())?;
         validate_optional_len("terminal_prompt", self.terminal_prompt.as_deref())?;
 
@@ -160,6 +113,72 @@ pub struct DaemonDefaults {
     pub backend: String,
     pub agent_prompt: String,
     pub terminal_prompt: String,
+}
+
+fn validate_model_len(model: &str) -> Result<(), ThoughtConfigValidationError> {
+    if model.chars().count() > MODEL_MAX_CHARS {
+        return Err(ThoughtConfigValidationError::new(
+            "model",
+            format!("must be <= {MODEL_MAX_CHARS} characters"),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_backend(backend: &str) -> Result<(), ThoughtConfigValidationError> {
+    const VALID_BACKENDS: &[&str] = &["openrouter", "grok"];
+    if !VALID_BACKENDS
+        .iter()
+        .any(|v| v.eq_ignore_ascii_case(backend))
+    {
+        return Err(ThoughtConfigValidationError::new(
+            "backend",
+            format!("unrecognized backend {backend:?}; expected one of: openrouter, grok"),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_cadence_hot_ms(cadence_hot_ms: u64) -> Result<(), ThoughtConfigValidationError> {
+    if !(CADENCE_HOT_MIN_MS..=CADENCE_HOT_MAX_MS).contains(&cadence_hot_ms) {
+        return Err(ThoughtConfigValidationError::new(
+            "cadence_hot_ms",
+            format!("must be between {CADENCE_HOT_MIN_MS} and {CADENCE_HOT_MAX_MS} (inclusive)"),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_cadence_warm_ms(
+    cadence_hot_ms: u64,
+    cadence_warm_ms: u64,
+) -> Result<(), ThoughtConfigValidationError> {
+    if cadence_warm_ms < cadence_hot_ms || cadence_warm_ms > CADENCE_WARM_MAX_MS {
+        return Err(ThoughtConfigValidationError::new(
+            "cadence_warm_ms",
+            format!(
+                "must be between cadence_hot_ms ({}) and {} (inclusive)",
+                cadence_hot_ms, CADENCE_WARM_MAX_MS
+            ),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_cadence_cold_ms(
+    cadence_warm_ms: u64,
+    cadence_cold_ms: u64,
+) -> Result<(), ThoughtConfigValidationError> {
+    if cadence_cold_ms < cadence_warm_ms || cadence_cold_ms > CADENCE_COLD_MAX_MS {
+        return Err(ThoughtConfigValidationError::new(
+            "cadence_cold_ms",
+            format!(
+                "must be between cadence_warm_ms ({}) and {} (inclusive)",
+                cadence_warm_ms, CADENCE_COLD_MAX_MS
+            ),
+        ));
+    }
+    Ok(())
 }
 
 fn validate_optional_len(
@@ -240,6 +259,11 @@ const fn default_cadence_cold_ms() -> u64 {
 mod tests {
     use super::*;
 
+    fn assert_validation_error(config: ThoughtConfig, field: &'static str, message: String) {
+        let err = config.validate().expect_err("config should be rejected");
+        assert_eq!(err, ThoughtConfigValidationError { field, message });
+    }
+
     #[test]
     fn default_config_is_valid() {
         let config = ThoughtConfig::default();
@@ -259,6 +283,24 @@ mod tests {
         config.normalize();
         assert!(config.agent_prompt.is_none());
         assert!(config.terminal_prompt.is_none());
+    }
+
+    #[test]
+    fn model_length_must_not_exceed_limit() {
+        let config = ThoughtConfig {
+            model: "m".repeat(MODEL_MAX_CHARS),
+            ..ThoughtConfig::default()
+        };
+        assert!(config.validate().is_ok());
+
+        assert_validation_error(
+            ThoughtConfig {
+                model: "m".repeat(MODEL_MAX_CHARS + 1),
+                ..ThoughtConfig::default()
+            },
+            "model",
+            format!("must be <= {MODEL_MAX_CHARS} characters"),
+        );
     }
 
     #[test]
@@ -300,6 +342,104 @@ mod tests {
             .validate()
             .expect_err("cold cadence below warm cadence should be rejected");
         assert_eq!(err.field, "cadence_cold_ms");
+    }
+
+    #[test]
+    fn cadence_upper_bounds_must_be_in_range() {
+        assert_validation_error(
+            ThoughtConfig {
+                cadence_hot_ms: CADENCE_HOT_MAX_MS + 1,
+                ..ThoughtConfig::default()
+            },
+            "cadence_hot_ms",
+            format!("must be between {CADENCE_HOT_MIN_MS} and {CADENCE_HOT_MAX_MS} (inclusive)"),
+        );
+
+        assert_validation_error(
+            ThoughtConfig {
+                cadence_warm_ms: CADENCE_WARM_MAX_MS + 1,
+                ..ThoughtConfig::default()
+            },
+            "cadence_warm_ms",
+            format!(
+                "must be between cadence_hot_ms ({}) and {} (inclusive)",
+                default_cadence_hot_ms(),
+                CADENCE_WARM_MAX_MS
+            ),
+        );
+
+        assert_validation_error(
+            ThoughtConfig {
+                cadence_cold_ms: CADENCE_COLD_MAX_MS + 1,
+                ..ThoughtConfig::default()
+            },
+            "cadence_cold_ms",
+            format!(
+                "must be between cadence_warm_ms ({}) and {} (inclusive)",
+                default_cadence_warm_ms(),
+                CADENCE_COLD_MAX_MS
+            ),
+        );
+    }
+
+    #[test]
+    fn prompt_lengths_must_not_exceed_limit() {
+        let config = ThoughtConfig {
+            agent_prompt: Some("a".repeat(PROMPT_MAX_CHARS)),
+            terminal_prompt: Some("t".repeat(PROMPT_MAX_CHARS)),
+            ..ThoughtConfig::default()
+        };
+        assert!(config.validate().is_ok());
+
+        assert_validation_error(
+            ThoughtConfig {
+                agent_prompt: Some("a".repeat(PROMPT_MAX_CHARS + 1)),
+                ..ThoughtConfig::default()
+            },
+            "agent_prompt",
+            format!("must be <= {PROMPT_MAX_CHARS} characters"),
+        );
+
+        assert_validation_error(
+            ThoughtConfig {
+                terminal_prompt: Some("t".repeat(PROMPT_MAX_CHARS + 1)),
+                ..ThoughtConfig::default()
+            },
+            "terminal_prompt",
+            format!("must be <= {PROMPT_MAX_CHARS} characters"),
+        );
+    }
+
+    #[test]
+    fn validation_reports_first_invalid_field_in_order() {
+        assert_validation_error(
+            ThoughtConfig {
+                model: "m".repeat(MODEL_MAX_CHARS + 1),
+                backend: "gemini".to_string(),
+                cadence_hot_ms: CADENCE_HOT_MAX_MS + 1,
+                cadence_warm_ms: CADENCE_WARM_MAX_MS + 1,
+                cadence_cold_ms: CADENCE_COLD_MAX_MS + 1,
+                agent_prompt: Some("a".repeat(PROMPT_MAX_CHARS + 1)),
+                terminal_prompt: Some("t".repeat(PROMPT_MAX_CHARS + 1)),
+                ..ThoughtConfig::default()
+            },
+            "model",
+            format!("must be <= {MODEL_MAX_CHARS} characters"),
+        );
+
+        assert_validation_error(
+            ThoughtConfig {
+                backend: "gemini".to_string(),
+                cadence_hot_ms: CADENCE_HOT_MAX_MS + 1,
+                cadence_warm_ms: CADENCE_WARM_MAX_MS + 1,
+                cadence_cold_ms: CADENCE_COLD_MAX_MS + 1,
+                agent_prompt: Some("a".repeat(PROMPT_MAX_CHARS + 1)),
+                terminal_prompt: Some("t".repeat(PROMPT_MAX_CHARS + 1)),
+                ..ThoughtConfig::default()
+            },
+            "backend",
+            "unrecognized backend \"gemini\"; expected one of: openrouter, grok".to_string(),
+        );
     }
 
     #[test]

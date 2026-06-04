@@ -799,39 +799,67 @@ fn append_services_if_new<I>(
 }
 
 fn service_entries_from_scan_root(root: &Path, base_path: &Path) -> Vec<OverlayServiceEntry> {
-    let root = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
-    let base = base_path
-        .canonicalize()
-        .unwrap_or_else(|_| base_path.to_path_buf());
-    if root == base || root.starts_with(&base) {
+    let canonical = canonical_scan_root_paths(root, base_path);
+    if !scan_root_is_outside_base(&canonical.root, &canonical.base) {
         return Vec::new();
     }
 
-    let Ok(entries) = std::fs::read_dir(&root) else {
+    collect_sorted_service_entries(repo_dirs_in_scan_root(&canonical.root), base_path)
+}
+
+struct CanonicalScanRootPaths {
+    root: PathBuf,
+    base: PathBuf,
+}
+
+fn canonical_scan_root_paths(root: &Path, base_path: &Path) -> CanonicalScanRootPaths {
+    CanonicalScanRootPaths {
+        root: canonical_or_original(root),
+        base: canonical_or_original(base_path),
+    }
+}
+
+fn canonical_or_original(path: &Path) -> PathBuf {
+    path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
+}
+
+fn scan_root_is_outside_base(root: &Path, base: &Path) -> bool {
+    root != base && !root.starts_with(base)
+}
+
+fn repo_dirs_in_scan_root(root: &Path) -> Vec<PathBuf> {
+    let Ok(entries) = std::fs::read_dir(root) else {
         return Vec::new();
     };
-    let mut services = Vec::new();
-    for entry in entries.flatten() {
-        let Ok(file_type) = entry.file_type() else {
-            continue;
-        };
-        if !file_type.is_dir() {
-            continue;
-        }
-        let path = entry.path();
-        let Some(name) = path
-            .file_name()
-            .map(|name| name.to_string_lossy().into_owned())
-        else {
-            continue;
-        };
-        if name.starts_with('.') || !path.join(".git").is_dir() {
-            continue;
-        }
-        if let Some(service) = service_entry_from_repo_path(None, path, base_path) {
-            services.push(service);
-        }
+
+    entries.flatten().filter_map(repo_dir_from_entry).collect()
+}
+
+fn repo_dir_from_entry(entry: std::fs::DirEntry) -> Option<PathBuf> {
+    if !entry.file_type().ok()?.is_dir() {
+        return None;
     }
+
+    let path = entry.path();
+    visible_git_repo_dir(&path).then_some(path)
+}
+
+fn visible_git_repo_dir(path: &Path) -> bool {
+    let Some(name) = path.file_name().map(|name| name.to_string_lossy()) else {
+        return false;
+    };
+
+    !name.starts_with('.') && path.join(".git").is_dir()
+}
+
+fn collect_sorted_service_entries<I>(repo_dirs: I, base_path: &Path) -> Vec<OverlayServiceEntry>
+where
+    I: IntoIterator<Item = PathBuf>,
+{
+    let mut services: Vec<OverlayServiceEntry> = repo_dirs
+        .into_iter()
+        .filter_map(|path| service_entry_from_repo_path(None, path, base_path))
+        .collect();
     services.sort_by(|a, b| a.name.cmp(&b.name));
     services
 }
@@ -1166,6 +1194,10 @@ mod tests {
             .open(path)
             .expect("open for mtime");
         file.set_modified(when).expect("set_modified");
+    }
+
+    fn create_git_repo(path: &Path) {
+        std::fs::create_dir_all(path.join(".git")).expect("git repo");
     }
 
     fn test_launch_target(id: &str, label: &str, kind: &str) -> LaunchTargetSummary {
@@ -1601,6 +1633,99 @@ mod tests {
         );
         assert_eq!(services[1].dir, external.join("alpha").to_string_lossy());
         assert_eq!(services[2].dir, external.join("zeta").to_string_lossy());
+    }
+
+    #[test]
+    fn scan_root_is_outside_base_uses_canonical_root_and_base() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let base = tmp.path().join("base");
+        let nested = base.join("nested");
+        let sibling = tmp.path().join("sibling");
+        std::fs::create_dir_all(&nested).expect("nested");
+        std::fs::create_dir_all(&sibling).expect("sibling");
+
+        let same_base = canonical_scan_root_paths(&base.join("..").join("base"), &base);
+        assert!(!scan_root_is_outside_base(&same_base.root, &same_base.base));
+
+        let nested_root = canonical_scan_root_paths(&nested, &base);
+        assert!(!scan_root_is_outside_base(
+            &nested_root.root,
+            &nested_root.base
+        ));
+
+        let sibling_root = canonical_scan_root_paths(&sibling, &base);
+        assert!(scan_root_is_outside_base(
+            &sibling_root.root,
+            &sibling_root.base
+        ));
+    }
+
+    #[test]
+    fn service_entries_from_scan_root_excludes_roots_equal_to_or_inside_base() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let base = tmp.path().join("base");
+        let nested = base.join("nested");
+        create_git_repo(&base.join("alpha"));
+        create_git_repo(&nested.join("beta"));
+
+        assert!(service_entries_from_scan_root(&base, &base).is_empty());
+        assert!(service_entries_from_scan_root(&nested, &base).is_empty());
+    }
+
+    #[test]
+    fn service_entries_from_scan_root_returns_empty_when_root_cannot_be_read() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let base = tmp.path().join("base");
+        let missing_root = tmp.path().join("missing-scan-root");
+        std::fs::create_dir_all(&base).expect("base");
+
+        assert!(service_entries_from_scan_root(&missing_root, &base).is_empty());
+    }
+
+    #[test]
+    fn repo_dirs_in_scan_root_keeps_only_visible_git_repo_dirs() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let root = tmp.path().join("root");
+        create_git_repo(&root.join("alpha"));
+        create_git_repo(&root.join(".hidden"));
+        std::fs::create_dir_all(root.join("no-git")).expect("no-git");
+        std::fs::write(root.join("not-a-dir"), "x").expect("file");
+
+        let names = repo_dirs_in_scan_root(&root)
+            .into_iter()
+            .map(|path| {
+                path.file_name()
+                    .expect("repo dir name")
+                    .to_string_lossy()
+                    .into_owned()
+            })
+            .collect::<BTreeSet<_>>();
+
+        assert_eq!(names, BTreeSet::from(["alpha".to_string()]));
+    }
+
+    #[test]
+    fn collect_sorted_service_entries_sorts_by_service_name() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let base = tmp.path().join("base");
+        let external = tmp.path().join("external");
+        let zeta = external.join("zeta");
+        let alpha = external.join("alpha");
+        std::fs::create_dir_all(&base).expect("base");
+        std::fs::create_dir_all(&zeta).expect("zeta");
+        std::fs::create_dir_all(&alpha).expect("alpha");
+
+        let services = collect_sorted_service_entries(vec![zeta, alpha], &base);
+
+        assert_eq!(
+            services
+                .iter()
+                .map(|service| service.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["alpha", "zeta"]
+        );
+        assert_eq!(services[0].dir, external.join("alpha").to_string_lossy());
+        assert_eq!(services[1].dir, external.join("zeta").to_string_lossy());
     }
 
     #[test]
