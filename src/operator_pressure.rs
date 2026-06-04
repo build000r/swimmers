@@ -98,72 +98,148 @@ pub fn operator_pressure_for_session(session: &SessionSummary) -> OperatorPressu
 
 pub fn build_operator_pressure_response(sessions: &[SessionSummary]) -> OperatorPressureResponse {
     let batch_send_map = batch_send_session_map(sessions);
-    let mut summary = OperatorPressureSummary {
-        max_score: 0,
-        action_cues: 0,
-        batch_send_groups: batch_send_map
-            .values()
-            .map(|ids| ids.join("\0"))
-            .collect::<std::collections::HashSet<_>>()
-            .len(),
-    };
-
-    let mut repo_map: HashMap<String, OperatorPressureRepo> = HashMap::new();
-    let mut pressure_sessions = Vec::with_capacity(sessions.len());
+    let mut builder = OperatorPressureResponseBuilder::new(sessions.len(), &batch_send_map);
     for session in sessions {
+        builder.push(
+            session,
+            batch_send_ids_for_session(&batch_send_map, &session.session_id),
+        );
+    }
+
+    builder.finish()
+}
+
+struct OperatorPressureResponseBuilder {
+    summary: OperatorPressureSummary,
+    repos: HashMap<String, OperatorPressureRepo>,
+    sessions: Vec<OperatorPressureSession>,
+}
+
+impl OperatorPressureResponseBuilder {
+    fn new(session_count: usize, batch_send_map: &HashMap<String, Vec<String>>) -> Self {
+        Self {
+            summary: OperatorPressureSummary {
+                max_score: 0,
+                action_cues: 0,
+                batch_send_groups: batch_send_group_count(batch_send_map),
+            },
+            repos: HashMap::new(),
+            sessions: Vec::with_capacity(session_count),
+        }
+    }
+
+    fn push(&mut self, session: &SessionSummary, batch_send_session_ids: Vec<String>) {
         let pressure = operator_pressure_for_session(session);
         let repo_key = repo_key(session);
         let repo_label = repo_label(&repo_key);
-        summary.max_score = summary.max_score.max(pressure.score);
-        summary.action_cues += pressure.action_cue_count;
 
-        let repo = repo_map
-            .entry(repo_key.clone())
-            .or_insert_with(|| OperatorPressureRepo {
-                repo_key: repo_key.clone(),
-                repo_label: repo_label.clone(),
-                score: 0,
-                reason: "quiet".to_string(),
-                session_ids: Vec::new(),
-            });
-        repo.session_ids.push(session.session_id.clone());
-        if pressure.score > repo.score {
-            repo.score = pressure.score;
-            repo.reason = pressure.reason.clone();
-        }
-
-        pressure_sessions.push(OperatorPressureSession {
-            session_id: session.session_id.clone(),
+        update_operator_pressure_summary(&mut self.summary, &pressure);
+        update_operator_pressure_repo(&mut self.repos, session, &repo_key, &repo_label, &pressure);
+        self.sessions.push(operator_pressure_session(
+            session,
             repo_key,
             repo_label,
             pressure,
-            batch_send_session_ids: batch_send_map
-                .get(&session.session_id)
-                .cloned()
-                .unwrap_or_default(),
-        });
+            batch_send_session_ids,
+        ));
     }
 
-    let mut repos = repo_map.into_values().collect::<Vec<_>>();
+    fn finish(mut self) -> OperatorPressureResponse {
+        let mut repos = self.repos.into_values().collect::<Vec<_>>();
+        sort_operator_pressure_repos(&mut repos);
+        sort_operator_pressure_sessions(&mut self.sessions);
+
+        OperatorPressureResponse {
+            sessions: self.sessions,
+            repos,
+            summary: self.summary,
+        }
+    }
+}
+
+fn batch_send_group_count(batch_send_map: &HashMap<String, Vec<String>>) -> usize {
+    batch_send_map
+        .values()
+        .map(|ids| ids.join("\0"))
+        .collect::<std::collections::HashSet<_>>()
+        .len()
+}
+
+fn batch_send_ids_for_session(
+    batch_send_map: &HashMap<String, Vec<String>>,
+    session_id: &str,
+) -> Vec<String> {
+    batch_send_map.get(session_id).cloned().unwrap_or_default()
+}
+
+fn update_operator_pressure_summary(
+    summary: &mut OperatorPressureSummary,
+    pressure: &OperatorPressure,
+) {
+    summary.max_score = summary.max_score.max(pressure.score);
+    summary.action_cues += pressure.action_cue_count;
+}
+
+fn update_operator_pressure_repo(
+    repo_map: &mut HashMap<String, OperatorPressureRepo>,
+    session: &SessionSummary,
+    repo_key: &str,
+    repo_label: &str,
+    pressure: &OperatorPressure,
+) {
+    let repo = repo_map
+        .entry(repo_key.to_string())
+        .or_insert_with(|| operator_pressure_repo(repo_key, repo_label));
+    repo.session_ids.push(session.session_id.clone());
+    if pressure.score > repo.score {
+        repo.score = pressure.score;
+        repo.reason = pressure.reason.clone();
+    }
+}
+
+fn operator_pressure_repo(repo_key: &str, repo_label: &str) -> OperatorPressureRepo {
+    OperatorPressureRepo {
+        repo_key: repo_key.to_string(),
+        repo_label: repo_label.to_string(),
+        score: 0,
+        reason: "quiet".to_string(),
+        session_ids: Vec::new(),
+    }
+}
+
+fn operator_pressure_session(
+    session: &SessionSummary,
+    repo_key: String,
+    repo_label: String,
+    pressure: OperatorPressure,
+    batch_send_session_ids: Vec<String>,
+) -> OperatorPressureSession {
+    OperatorPressureSession {
+        session_id: session.session_id.clone(),
+        repo_key,
+        repo_label,
+        pressure,
+        batch_send_session_ids,
+    }
+}
+
+fn sort_operator_pressure_repos(repos: &mut [OperatorPressureRepo]) {
     repos.sort_by(|left, right| {
         right
             .score
             .cmp(&left.score)
             .then_with(|| left.repo_label.cmp(&right.repo_label))
     });
-    pressure_sessions.sort_by(|left, right| {
+}
+
+fn sort_operator_pressure_sessions(sessions: &mut [OperatorPressureSession]) {
+    sessions.sort_by(|left, right| {
         right
             .pressure
             .score
             .cmp(&left.pressure.score)
             .then_with(|| left.session_id.cmp(&right.session_id))
     });
-
-    OperatorPressureResponse {
-        sessions: pressure_sessions,
-        repos,
-        summary,
-    }
 }
 
 pub fn session_ready_for_operator_group_input(session: &SessionSummary) -> bool {
@@ -421,17 +497,49 @@ fn pressure_reason_label(kind: OperatorPressureReasonKind) -> &'static str {
 }
 
 fn pressure_glyph(session: &SessionSummary, primary_cue: Option<ActionCueKind>) -> &'static str {
+    pressure_glyph_for_action_cue(primary_cue)
+        .unwrap_or_else(|| pressure_glyph_for_session_state(session))
+}
+
+fn pressure_glyph_for_action_cue(primary_cue: Option<ActionCueKind>) -> Option<&'static str> {
     match primary_cue {
-        Some(ActionCueKind::AwaitingUser) => "!",
-        Some(ActionCueKind::CommitReady) => "$",
-        Some(ActionCueKind::ValidationMissingAfterEdit) => "v",
-        Some(ActionCueKind::DirtyCheckMissing) => "d",
-        None if session.state == SessionState::Attention => "!",
-        None if session_idle_agent_can_accept_operator_input(session) => "!",
-        None if session.state == SessionState::Error => "x",
-        None if session.commit_candidate => "$",
-        None => "a",
+        Some(ActionCueKind::AwaitingUser) => Some("!"),
+        Some(ActionCueKind::CommitReady) => Some("$"),
+        Some(ActionCueKind::ValidationMissingAfterEdit) => Some("v"),
+        Some(ActionCueKind::DirtyCheckMissing) => Some("d"),
+        None => None,
     }
+}
+
+fn pressure_glyph_for_session_state(session: &SessionSummary) -> &'static str {
+    type PressureGlyphClassifier = fn(&SessionSummary) -> Option<&'static str>;
+    let classifiers: [PressureGlyphClassifier; 4] = [
+        pressure_glyph_for_attention_state,
+        pressure_glyph_for_idle_input,
+        pressure_glyph_for_error_state,
+        pressure_glyph_for_commit_candidate,
+    ];
+
+    classifiers
+        .into_iter()
+        .find_map(|classify| classify(session))
+        .unwrap_or("a")
+}
+
+fn pressure_glyph_for_attention_state(session: &SessionSummary) -> Option<&'static str> {
+    (session.state == SessionState::Attention).then_some("!")
+}
+
+fn pressure_glyph_for_idle_input(session: &SessionSummary) -> Option<&'static str> {
+    session_idle_agent_can_accept_operator_input(session).then_some("!")
+}
+
+fn pressure_glyph_for_error_state(session: &SessionSummary) -> Option<&'static str> {
+    (session.state == SessionState::Error).then_some("x")
+}
+
+fn pressure_glyph_for_commit_candidate(session: &SessionSummary) -> Option<&'static str> {
+    session.commit_candidate.then_some("$")
 }
 
 fn pressure_tone(
@@ -587,6 +695,13 @@ mod tests {
         session
     }
 
+    fn quiet_summary(id: &str) -> SessionSummary {
+        let mut session = trusted_summary(id, SessionState::Idle);
+        session.tool = None;
+        session.rest_state = RestState::Active;
+        session
+    }
+
     fn assign_batch(
         session: &mut SessionSummary,
         id: &str,
@@ -638,6 +753,25 @@ mod tests {
     }
 
     #[test]
+    fn cue_priority_keeps_commit_before_validation_and_dirty_checks() {
+        let mut session = quiet_summary("priority-commit");
+        session.action_cues = vec![
+            cue(ActionCueKind::DirtyCheckMissing),
+            cue(ActionCueKind::ValidationMissingAfterEdit),
+            cue(ActionCueKind::CommitReady),
+        ];
+
+        let pressure = operator_pressure_for_session(&session);
+
+        assert_eq!(
+            pressure.reason_kind,
+            OperatorPressureReasonKind::CommitReady
+        );
+        assert_eq!(pressure.glyph, "$");
+        assert!(pressure.commit_ready);
+    }
+
+    #[test]
     fn awaiting_user_outranks_other_action_cues() {
         let mut session = summary("s1", SessionState::Idle);
         session.action_cues = vec![
@@ -653,6 +787,65 @@ mod tests {
         );
         assert_eq!(pressure.glyph, "!");
         assert!(pressure.needs_input);
+    }
+
+    #[test]
+    fn pressure_scores_keep_existing_weights_and_clamp() {
+        let quiet = quiet_summary("quiet-score");
+        assert_eq!(operator_pressure_for_session(&quiet).score, 1);
+
+        let mut busy = trusted_summary("busy-score", SessionState::Busy);
+        busy.tool = None;
+        assert_eq!(operator_pressure_for_session(&busy).score, 12);
+
+        let mut dirty_check = quiet_summary("dirty-score");
+        dirty_check.action_cues = vec![cue(ActionCueKind::DirtyCheckMissing)];
+        assert_eq!(operator_pressure_for_session(&dirty_check).score, 35);
+
+        let mut clamped = quiet_summary("clamped-score");
+        clamped.action_cues = vec![
+            cue(ActionCueKind::AwaitingUser),
+            cue(ActionCueKind::CommitReady),
+            cue(ActionCueKind::ValidationMissingAfterEdit),
+            cue(ActionCueKind::DirtyCheckMissing),
+        ];
+        assert_eq!(operator_pressure_for_session(&clamped).score, 99);
+    }
+
+    #[test]
+    fn pressure_glyphs_keep_cue_mapping_and_session_fallback_priority() {
+        for (kind, expected) in [
+            (ActionCueKind::AwaitingUser, "!"),
+            (ActionCueKind::CommitReady, "$"),
+            (ActionCueKind::ValidationMissingAfterEdit, "v"),
+            (ActionCueKind::DirtyCheckMissing, "d"),
+        ] {
+            let mut session = quiet_summary(kind.as_str());
+            session.action_cues = vec![cue(kind)];
+            assert_eq!(operator_pressure_for_session(&session).glyph, expected);
+        }
+
+        let mut attention = trusted_summary("attention-glyph", SessionState::Attention);
+        attention.tool = None;
+        attention.commit_candidate = true;
+        assert_eq!(operator_pressure_for_session(&attention).glyph, "!");
+
+        let idle_agent = trusted_summary("idle-agent-glyph", SessionState::Idle);
+        assert_eq!(operator_pressure_for_session(&idle_agent).glyph, "!");
+
+        let mut error = trusted_summary("error-glyph", SessionState::Error);
+        error.tool = None;
+        error.commit_candidate = true;
+        assert_eq!(operator_pressure_for_session(&error).glyph, "x");
+
+        let mut commit = quiet_summary("commit-glyph");
+        commit.commit_candidate = true;
+        assert_eq!(operator_pressure_for_session(&commit).glyph, "$");
+
+        assert_eq!(
+            operator_pressure_for_session(&quiet_summary("idle-glyph")).glyph,
+            "a"
+        );
     }
 
     #[test]
@@ -804,6 +997,62 @@ mod tests {
         session.tool = None;
 
         assert!(!session_ready_for_operator_group_input(&session));
+    }
+
+    #[test]
+    fn operator_pressure_response_handles_empty_sessions() {
+        let response = build_operator_pressure_response(&[]);
+
+        assert!(response.sessions.is_empty());
+        assert!(response.repos.is_empty());
+        assert_eq!(
+            response.summary,
+            OperatorPressureSummary {
+                max_score: 0,
+                action_cues: 0,
+                batch_send_groups: 0,
+            }
+        );
+    }
+
+    #[test]
+    fn operator_pressure_response_keeps_busy_session_fields() {
+        let mut busy = trusted_summary("busy-response", SessionState::Busy);
+        busy.tool = None;
+
+        let response = build_operator_pressure_response(&[busy]);
+
+        assert_eq!(
+            response.summary,
+            OperatorPressureSummary {
+                max_score: 12,
+                action_cues: 0,
+                batch_send_groups: 0,
+            }
+        );
+        assert_eq!(response.repos.len(), 1);
+        assert_eq!(response.repos[0].score, 12);
+        assert_eq!(response.repos[0].reason, "busy");
+        assert_eq!(
+            response.repos[0].session_ids,
+            vec!["busy-response".to_string()]
+        );
+
+        let session = &response.sessions[0];
+        assert_eq!(session.session_id, "busy-response");
+        assert_eq!(session.repo_key, "/tmp/repos/swimmers");
+        assert_eq!(session.repo_label, "swimmers");
+        assert!(session.batch_send_session_ids.is_empty());
+        assert_eq!(session.pressure.score, 12);
+        assert_eq!(
+            session.pressure.reason_kind,
+            OperatorPressureReasonKind::Busy
+        );
+        assert_eq!(session.pressure.reason, "busy");
+        assert_eq!(session.pressure.glyph, "a");
+        assert_eq!(session.pressure.tone, OperatorPressureTone::Working);
+        assert!(!session.pressure.needs_input);
+        assert!(!session.pressure.commit_ready);
     }
 
     #[test]

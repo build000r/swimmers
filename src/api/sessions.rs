@@ -1056,6 +1056,51 @@ fn group_input_error_result(
     }
 }
 
+struct ValidatedGroupInputRequest {
+    session_ids: Vec<String>,
+    input: Vec<u8>,
+}
+
+fn validate_group_input_request(
+    body: SessionGroupInputRequest,
+) -> Result<ValidatedGroupInputRequest, ErrorResponse> {
+    if body.session_ids.is_empty() {
+        return Err(error_body(
+            "VALIDATION_FAILED",
+            Some("session_ids must not be empty".to_string()),
+        ));
+    }
+
+    let text = body.text.trim().to_string();
+    if text.is_empty() {
+        return Err(error_body(
+            "VALIDATION_FAILED",
+            Some("text must not be empty".to_string()),
+        ));
+    }
+
+    let session_ids = unique_group_input_session_ids(body.session_ids);
+    if session_ids.len() < 2 {
+        return Err(error_body(
+            "VALIDATION_FAILED",
+            Some("session_ids must include at least two unique sessions".to_string()),
+        ));
+    }
+
+    Ok(ValidatedGroupInputRequest {
+        session_ids,
+        input: group_input_bytes(&text),
+    })
+}
+
+fn unique_group_input_session_ids(session_ids: Vec<String>) -> Vec<String> {
+    let mut seen = HashSet::new();
+    session_ids
+        .into_iter()
+        .filter(|session_id| seen.insert(session_id.clone()))
+        .collect()
+}
+
 fn session_ready_for_group_input(summary: &SessionSummary) -> bool {
     session_ready_for_operator_group_input(summary)
 }
@@ -1105,6 +1150,53 @@ fn group_input_batch_scope_error(summaries: &[SessionSummary]) -> Option<(&'stat
         .iter()
         .map(|summary| summary.batch.as_ref().map(|batch| batch.id.as_str()));
     GroupInputBatchScope::from_batch_ids(batch_ids).error()
+}
+
+async fn group_input_summary_map(state: &Arc<AppState>) -> HashMap<String, SessionSummary> {
+    state
+        .supervisor
+        .list_sessions()
+        .await
+        .into_iter()
+        .map(|summary| (summary.session_id.clone(), summary))
+        .collect()
+}
+
+fn group_input_batch_scope_error_for_targets(
+    session_ids: &[String],
+    summaries: &HashMap<String, SessionSummary>,
+) -> Option<(&'static str, String)> {
+    let found_summaries = session_ids
+        .iter()
+        .filter_map(|session_id| summaries.get(session_id).cloned())
+        .collect::<Vec<_>>();
+    group_input_batch_scope_error(&found_summaries)
+}
+
+fn group_input_batch_error_response(
+    session_ids: Vec<String>,
+    summaries: &HashMap<String, SessionSummary>,
+    code: &'static str,
+    message: String,
+) -> SessionGroupInputResponse {
+    let results = session_ids
+        .into_iter()
+        .map(|session_id| group_input_batch_error_result(session_id, summaries, code, &message))
+        .collect();
+    SessionGroupInputResponse::from_results(results)
+}
+
+fn group_input_batch_error_result(
+    session_id: String,
+    summaries: &HashMap<String, SessionSummary>,
+    code: &'static str,
+    message: &str,
+) -> SessionGroupInputResult {
+    if summaries.contains_key(&session_id) {
+        group_input_error_result(session_id, code, Some(message.to_string()))
+    } else {
+        group_input_error_result(session_id, "SESSION_NOT_FOUND", None)
+    }
 }
 
 #[derive(Default)]
@@ -1240,67 +1332,39 @@ async fn send_group_input_to_session(
     }
 }
 
+async fn send_group_input_to_targets(
+    state: &Arc<AppState>,
+    session_ids: Vec<String>,
+    summaries: &HashMap<String, SessionSummary>,
+    input: &[u8],
+) -> SessionGroupInputResponse {
+    let results = futures::future::join_all(session_ids.into_iter().map(|session_id| {
+        let summary = summaries.get(&session_id).cloned();
+        send_group_input_to_session(state, session_id, summary, input)
+    }))
+    .await;
+    SessionGroupInputResponse::from_results(results)
+}
+
 pub async fn send_group_input_service(
     state: Arc<AppState>,
     body: SessionGroupInputRequest,
 ) -> Result<SessionGroupInputResponse, ErrorResponse> {
-    if body.session_ids.is_empty() {
-        return Err(error_body(
-            "VALIDATION_FAILED",
-            Some("session_ids must not be empty".to_string()),
-        ));
-    }
-    let text = body.text.trim().to_string();
-    if text.is_empty() {
-        return Err(error_body(
-            "VALIDATION_FAILED",
-            Some("text must not be empty".to_string()),
+    let ValidatedGroupInputRequest { session_ids, input } = validate_group_input_request(body)?;
+    let summaries = group_input_summary_map(&state).await;
+
+    if let Some((code, message)) =
+        group_input_batch_scope_error_for_targets(&session_ids, &summaries)
+    {
+        return Ok(group_input_batch_error_response(
+            session_ids,
+            &summaries,
+            code,
+            message,
         ));
     }
 
-    let mut seen = HashSet::new();
-    let session_ids = body
-        .session_ids
-        .into_iter()
-        .filter(|session_id| seen.insert(session_id.clone()))
-        .collect::<Vec<_>>();
-    if session_ids.len() < 2 {
-        return Err(error_body(
-            "VALIDATION_FAILED",
-            Some("session_ids must include at least two unique sessions".to_string()),
-        ));
-    }
-    let summaries = state
-        .supervisor
-        .list_sessions()
-        .await
-        .into_iter()
-        .map(|summary| (summary.session_id.clone(), summary))
-        .collect::<HashMap<_, _>>();
-    let found_summaries = session_ids
-        .iter()
-        .filter_map(|session_id| summaries.get(session_id).cloned())
-        .collect::<Vec<_>>();
-    if let Some((code, message)) = group_input_batch_scope_error(&found_summaries) {
-        let results = session_ids
-            .into_iter()
-            .map(|session_id| {
-                if summaries.contains_key(&session_id) {
-                    group_input_error_result(session_id, code, Some(message.clone()))
-                } else {
-                    group_input_error_result(session_id, "SESSION_NOT_FOUND", None)
-                }
-            })
-            .collect::<Vec<_>>();
-        return Ok(SessionGroupInputResponse::from_results(results));
-    }
-    let input = group_input_bytes(&text);
-    let results = futures::future::join_all(session_ids.into_iter().map(|session_id| {
-        let summary = summaries.get(&session_id).cloned();
-        send_group_input_to_session(&state, session_id, summary, &input)
-    }))
-    .await;
-    Ok(SessionGroupInputResponse::from_results(results))
+    Ok(send_group_input_to_targets(&state, session_ids, &summaries, &input).await)
 }
 
 async fn send_group_input(
@@ -3737,6 +3801,25 @@ esac
         assert_eq!(json["message"], "session_ids must not be empty");
     }
 
+    #[tokio::test]
+    async fn send_group_input_rejects_whitespace_text() {
+        let response = send_group_input(
+            Extension(AuthInfo::new(OPERATOR_SCOPES.to_vec())),
+            State(test_state()),
+            Json(SessionGroupInputRequest {
+                session_ids: vec!["one".to_string(), "two".to_string()],
+                text: " \n\t ".to_string(),
+            }),
+        )
+        .await
+        .into_response();
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let json = response_json(response).await;
+        assert_eq!(json["code"], "VALIDATION_FAILED");
+        assert_eq!(json["message"], "text must not be empty");
+    }
+
     #[test]
     fn group_input_bytes_appends_double_enter_for_agent_delivery() {
         assert_eq!(group_input_bytes("ship it"), b"ship it\r\r");
@@ -3797,6 +3880,32 @@ esac
             json["message"],
             "session_ids must include at least two unique sessions"
         );
+    }
+
+    #[tokio::test]
+    async fn send_group_input_returns_not_found_for_all_missing_sessions() {
+        let response = send_group_input(
+            Extension(AuthInfo::new(OPERATOR_SCOPES.to_vec())),
+            State(test_state()),
+            Json(SessionGroupInputRequest {
+                session_ids: vec!["missing-a".to_string(), "missing-b".to_string()],
+                text: "continue".to_string(),
+            }),
+        )
+        .await
+        .into_response();
+
+        assert_eq!(response.status(), StatusCode::MULTI_STATUS);
+        let json = response_json(response).await;
+        assert_eq!(json["delivered"], 0);
+        assert_eq!(json["skipped"], 2);
+        let results = json["results"].as_array().expect("results");
+        assert_eq!(results[0]["session_id"], "missing-a");
+        assert_eq!(results[0]["ok"], false);
+        assert_eq!(results[0]["error"]["code"], "SESSION_NOT_FOUND");
+        assert_eq!(results[1]["session_id"], "missing-b");
+        assert_eq!(results[1]["ok"], false);
+        assert_eq!(results[1]["error"]["code"], "SESSION_NOT_FOUND");
     }
 
     #[tokio::test]
@@ -3982,6 +4091,64 @@ esac
         );
         assert_eq!(
             failed_write_rx.recv().await.expect("failed write"),
+            b"continue\r\r".to_vec()
+        );
+    }
+
+    #[tokio::test]
+    async fn send_group_input_reports_actor_unavailable_send_failure() {
+        let state = test_state();
+        let ready = with_test_batch(summary("ready", SessionState::Idle), "batch-group");
+        let mut ready_write_rx = insert_group_input_delivery_test_handle(
+            &state,
+            ready,
+            Some(InputDeliveryResult {
+                delivered: true,
+                method: "test",
+                message: None,
+            }),
+        )
+        .await;
+
+        let unavailable =
+            with_test_batch(summary("unavailable", SessionState::Idle), "batch-group");
+        let (cmd_tx, mut cmd_rx) = mpsc::channel(8);
+        state
+            .supervisor
+            .insert_test_handle(ActorHandle::test_handle(
+                "unavailable",
+                "tmux-unavailable",
+                cmd_tx,
+            ))
+            .await;
+        tokio::spawn(async move {
+            if let Some(SessionCommand::GetSummary(reply)) = cmd_rx.recv().await {
+                let _ = reply.send(unavailable);
+            }
+        });
+
+        let response = send_group_input(
+            Extension(AuthInfo::new(OPERATOR_SCOPES.to_vec())),
+            State(state),
+            Json(SessionGroupInputRequest {
+                session_ids: vec!["ready".to_string(), "unavailable".to_string()],
+                text: "continue".to_string(),
+            }),
+        )
+        .await
+        .into_response();
+
+        assert_eq!(response.status(), StatusCode::MULTI_STATUS);
+        let json = response_json(response).await;
+        assert_eq!(json["delivered"], 1);
+        assert_eq!(json["skipped"], 1);
+        assert_eq!(json["results"][0]["ok"], true);
+        assert_eq!(json["results"][1]["session_id"], "unavailable");
+        assert_eq!(json["results"][1]["ok"], false);
+        assert_eq!(json["results"][1]["error"]["code"], "SESSION_NOT_FOUND");
+        assert_eq!(json["results"][1]["error"]["message"], "channel closed");
+        assert_eq!(
+            ready_write_rx.recv().await.expect("ready write"),
             b"continue\r\r".to_vec()
         );
     }

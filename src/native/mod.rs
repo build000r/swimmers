@@ -12,7 +12,7 @@ use thiserror::Error;
 use tokio::io::AsyncReadExt;
 use tokio::process::Command;
 use tokio::sync::Mutex as AsyncMutex;
-use tokio::time::{sleep, timeout, Duration};
+use tokio::time::{timeout, Duration};
 
 use crate::session::actor::run_bounded_tmux_command;
 use crate::tmux_target::{exact_pane_target, exact_session_target};
@@ -25,6 +25,7 @@ use crate::types::{
 
 mod attention_group;
 mod ghostty_open;
+mod iterm;
 mod script_path;
 
 #[cfg(test)]
@@ -35,12 +36,17 @@ use attention_group::ATTENTION_GROUP_TMUX_NAME;
 pub use attention_group::{
     attention_group_attach_command, clear_native_attention_group, open_native_attention_group,
 };
+use ghostty_open::open_or_focus_ghostty_session;
+#[cfg(test)]
+use ghostty_open::parse_osascript_output;
 #[cfg(test)]
 use ghostty_open::{
     cached_ghostty_preview_term_id, clear_ghostty_preview_term_cache,
     remember_ghostty_preview_term_id,
 };
-use ghostty_open::{open_or_focus_ghostty_session, parse_osascript_output};
+pub use iterm::open_or_focus_iterm_session;
+#[cfg(test)]
+use iterm::{build_iterm_attach_command, build_iterm_display_name, is_transient_iterm_open_error};
 #[cfg(test)]
 use script_path::{materialize_bundled_script, resolve_script_path, unique_tmp_suffix};
 use script_path::{script_path_for_app, script_path_for_app_without_materializing};
@@ -50,9 +56,6 @@ const GHOSTTY_MODE_ENV: &str = "SWIMMERS_GHOSTTY_MODE";
 const NATIVE_SCRIPT_ROOT_ENV: &str = "SWIMMERS_NATIVE_SCRIPT_ROOT";
 const ITERM_SCRIPT_RELATIVE_PATH: &str = "scripts/iterm-focus.scpt";
 const ITERM_SCRIPT_SOURCE: &str = include_str!("../../scripts/iterm-focus.scpt");
-const ITERM_OPEN_RETRY_ATTEMPTS: usize = 2;
-const ITERM_OPEN_RETRY_DELAY_MS: u64 = 150;
-const DEFAULT_ITERM_SESSION_NAME: &str = "Swimmers";
 const GHOSTTY_SCRIPT_RELATIVE_PATH: &str = "scripts/ghostty-open.scpt";
 const GHOSTTY_SCRIPT_SOURCE: &str = include_str!("../../scripts/ghostty-open.scpt");
 const GHOSTTY_MANAGED_TITLE_PREFIX: &str = "swimmers-preview :: ";
@@ -277,56 +280,6 @@ pub async fn open_native_session(
             open_or_focus_ghostty_session(session_id, tmux_name, cwd, ghostty_mode).await
         }
     }
-}
-
-pub async fn open_or_focus_iterm_session(
-    session_id: &str,
-    tmux_name: &str,
-    cwd: &str,
-) -> Result<NativeDesktopOpenResponse> {
-    let _guard = NATIVE_OPEN_LOCK.lock().await;
-    let script = script_path_for_app(NativeDesktopApp::Iterm)?;
-    if !script.exists() {
-        return Err(anyhow!("native iTerm script missing: {}", script.display()));
-    }
-
-    let tmux_path = resolve_tmux_binary()?;
-    let attach_command = build_iterm_attach_command(tmux_name, &tmux_path);
-    let (tmux_pane_id, tmux_cwd) = query_tmux_pane_metadata(&tmux_path, tmux_name)
-        .await
-        .unwrap_or((None, None));
-    let display_name = build_iterm_display_name(
-        tmux_cwd.as_deref().unwrap_or(cwd),
-        tmux_name,
-        tmux_pane_id.as_deref(),
-    );
-    let known_pane_id = cached_pane_id(session_id);
-    for attempt in 0..ITERM_OPEN_RETRY_ATTEMPTS {
-        match run_open_or_focus_script(
-            &script,
-            session_id,
-            tmux_name,
-            &attach_command,
-            &display_name,
-            known_pane_id.as_deref(),
-        )
-        .await
-        {
-            Ok(result) => {
-                remember_pane_id(session_id, result.pane_id.as_deref());
-                return Ok(result);
-            }
-            Err(err)
-                if attempt + 1 < ITERM_OPEN_RETRY_ATTEMPTS
-                    && is_transient_iterm_open_error(&err) =>
-            {
-                sleep(Duration::from_millis(ITERM_OPEN_RETRY_DELAY_MS)).await;
-            }
-            Err(err) => return Err(err),
-        }
-    }
-
-    unreachable!("native iTerm open loop should always return or error")
 }
 
 fn ghostty_unavailable_reason() -> Option<String> {
@@ -596,73 +549,6 @@ async fn run_osascript_output_with_timeout(
     })
 }
 
-async fn run_open_or_focus_script(
-    script: &Path,
-    session_id: &str,
-    tmux_name: &str,
-    attach_command: &str,
-    display_name: &str,
-    known_pane_id: Option<&str>,
-) -> Result<NativeDesktopOpenResponse> {
-    run_open_or_focus_script_with_timeout(
-        script,
-        session_id,
-        tmux_name,
-        attach_command,
-        display_name,
-        known_pane_id,
-        OSASCRIPT_TIMEOUT,
-    )
-    .await
-}
-
-async fn run_open_or_focus_script_with_timeout(
-    script: &Path,
-    session_id: &str,
-    tmux_name: &str,
-    attach_command: &str,
-    display_name: &str,
-    known_pane_id: Option<&str>,
-    timeout_duration: Duration,
-) -> Result<NativeDesktopOpenResponse> {
-    validate_osascript_script_arg("tmux_name", tmux_name)?;
-    validate_osascript_script_arg("attach_command", attach_command)?;
-
-    let safe_session_id = sanitize_osascript_text_arg(session_id);
-    let safe_display_name = sanitize_osascript_text_arg(display_name);
-    let mut command = Command::new("osascript");
-    command
-        .arg(script)
-        .arg(&safe_session_id)
-        .arg(tmux_name)
-        .arg(attach_command)
-        .arg(&safe_display_name);
-    if let Some(pane_id) = known_pane_id.filter(|value| !value.is_empty()) {
-        command.arg(pane_id);
-    }
-
-    let output = run_osascript_output_with_timeout(
-        &mut command,
-        "opening/focusing iTerm session",
-        timeout_duration,
-    )
-    .await
-    .with_context(|| format!("failed to run {}", script.display()))?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-        let message = if stderr.is_empty() {
-            "osascript returned a non-zero exit status".to_string()
-        } else {
-            stderr
-        };
-        return Err(anyhow!(message));
-    }
-
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    parse_osascript_output(stdout.trim(), session_id)
-}
-
 async fn query_tmux_pane_metadata(
     tmux_path: &Path,
     tmux_name: &str,
@@ -707,17 +593,6 @@ async fn query_tmux_pane_metadata(
         .map(ToOwned::to_owned);
 
     Ok((pane_id, cwd))
-}
-
-fn build_iterm_display_name(cwd: &str, tmux_name: &str, tmux_pane_id: Option<&str>) -> String {
-    let target_name = cwd_basename(cwd)
-        .or_else(|| non_empty_trimmed(tmux_name).map(ToOwned::to_owned))
-        .unwrap_or_else(|| DEFAULT_ITERM_SESSION_NAME.to_string());
-
-    match normalize_tmux_pane_id(tmux_pane_id.unwrap_or_default()) {
-        Some(pane_id) => format!("{pane_id} {target_name}"),
-        None => target_name,
-    }
 }
 
 fn cwd_basename(cwd: &str) -> Option<String> {
@@ -774,14 +649,6 @@ pub(super) fn shell_quote_token(value: &str) -> String {
     }
 
     format!("'{}'", value.replace('\'', "'\"'\"'"))
-}
-
-fn build_iterm_attach_command(tmux_name: &str, tmux_path: &Path) -> String {
-    format!(
-        "exec {} attach-session -t {}",
-        shell_quote_token(&tmux_path.to_string_lossy()),
-        shell_quote_token(&exact_session_target(tmux_name))
-    )
 }
 
 fn build_ghostty_attach_command(tmux_name: &str, tmux_path: &Path) -> String {
@@ -857,13 +724,6 @@ fn is_allowed_osascript_script_arg_char(field: &'static str, ch: char) -> bool {
     ch.is_ascii_alphanumeric()
         || matches!(ch, '_' | '-' | '.' | '/' | ':' | ' ')
         || (osascript_arg_allows_shell_quotes(field) && matches!(ch, '\'' | '='))
-}
-
-fn is_transient_iterm_open_error(err: &anyhow::Error) -> bool {
-    let message = err.to_string();
-    (message.contains("session 1 of missing value") && message.contains("(-1728)"))
-        || (message.contains("unable to resolve iTerm session after tab creation")
-            && message.contains("(-2700)"))
 }
 
 fn host_is_loopback(host: &str) -> bool {

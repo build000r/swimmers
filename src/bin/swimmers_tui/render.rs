@@ -669,30 +669,61 @@ fn prefix_by_display_width(text: &str, max_cols: usize) -> String {
     out
 }
 
+struct DisplayWidthSuffix {
+    start: usize,
+    budget: DisplayWidthBudget,
+    has_base: bool,
+}
+
+impl DisplayWidthSuffix {
+    fn new(text_len: usize, max_cols: usize) -> Self {
+        Self {
+            start: text_len,
+            budget: DisplayWidthBudget::new(max_cols),
+            has_base: false,
+        }
+    }
+
+    fn collect_start(mut self, text: &str) -> usize {
+        for (idx, ch) in text.char_indices().rev() {
+            if !self.accept_reversed_char(idx, ch) {
+                break;
+            }
+        }
+        self.start
+    }
+
+    fn accept_reversed_char(&mut self, idx: usize, ch: char) -> bool {
+        let ch_width = char_display_width(ch);
+        if ch_width == 0 {
+            self.accept_zero_width_char(idx);
+            return true;
+        }
+        self.accept_base_char(idx, ch_width)
+    }
+
+    fn accept_zero_width_char(&mut self, idx: usize) {
+        if self.has_base {
+            self.start = idx;
+        }
+    }
+
+    fn accept_base_char(&mut self, idx: usize, ch_width: usize) -> bool {
+        if !self.budget.consume(ch_width) {
+            return false;
+        }
+        self.has_base = true;
+        self.start = idx;
+        true
+    }
+}
+
 fn suffix_by_display_width(text: &str, max_cols: usize) -> String {
     if max_cols == 0 {
         return String::new();
     }
 
-    let mut start = text.len();
-    let mut used = 0usize;
-    let mut has_base = false;
-    for (idx, ch) in text.char_indices().rev() {
-        let ch_width = char_display_width(ch);
-        if ch_width == 0 {
-            if has_base {
-                start = idx;
-            }
-            continue;
-        }
-        if used.saturating_add(ch_width) > max_cols {
-            break;
-        }
-        used = used.saturating_add(ch_width);
-        has_base = true;
-        start = idx;
-    }
-
+    let start = DisplayWidthSuffix::new(text.len(), max_cols).collect_start(text);
     let mut out = text[start..].to_string();
     trim_trailing_joiners(&mut out);
     out
@@ -1060,6 +1091,33 @@ mod tests {
             assert!(
                 UnicodeWidthStr::width(prefix.as_str()) <= max_cols,
                 "{prefix:?} exceeded {max_cols} cols"
+            );
+        }
+    }
+
+    #[test]
+    fn suffix_by_display_width_handles_mixed_width_and_zero_width_text() {
+        let cases = [
+            ("abcdef", 0, ""),
+            ("abcdef", 3, "def"),
+            ("abcdef", 6, "abcdef"),
+            ("漢字a", 4, "字a"),
+            ("漢字a", 5, "漢字a"),
+            ("abce\u{0301}", 2, "ce\u{0301}"),
+            ("\u{0301}abc", 2, "bc"),
+            ("\u{0301}abc", 3, "\u{0301}abc"),
+            ("a\u{0301}漢b", 3, "\u{0301}漢b"),
+            ("ab\u{200d}", 1, "b"),
+            ("a\u{200d}b", 1, "\u{200d}b"),
+        ];
+
+        for (text, max_cols, expected) in cases {
+            let suffix = suffix_by_display_width(text, max_cols);
+
+            assert_eq!(suffix, expected, "{text:?} at {max_cols} cols");
+            assert!(
+                UnicodeWidthStr::width(suffix.as_str()) <= max_cols,
+                "{suffix:?} exceeded {max_cols} cols"
             );
         }
     }

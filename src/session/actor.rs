@@ -26,7 +26,10 @@ use crate::types::{
 };
 
 mod liveness;
+mod percent_decode;
 mod tmux_input;
+
+use self::percent_decode::percent_decode;
 
 #[cfg(test)]
 use self::tmux_input::TmuxInputChunk;
@@ -2632,35 +2635,6 @@ fn cwd_from_osc7_payload(payload: &str) -> Option<String> {
     Some(percent_decode(path))
 }
 
-// ---------------------------------------------------------------------------
-// Title / CWD helpers
-// ---------------------------------------------------------------------------
-
-/// Decode percent-encoded characters in a URI path (e.g. `%20` -> ` `).
-fn percent_decode(s: &str) -> String {
-    let mut out = Vec::with_capacity(s.len());
-    let mut chars = s.bytes();
-    while let Some(b) = chars.next() {
-        if b == b'%' {
-            let hi = chars.next();
-            let lo = chars.next();
-            if let (Some(h), Some(l)) = (hi, lo) {
-                let hex = [h, l];
-                if let Ok(s) = std::str::from_utf8(&hex) {
-                    if let Ok(val) = u8::from_str_radix(s, 16) {
-                        out.push(val);
-                        continue;
-                    }
-                }
-            }
-            out.push(b);
-        } else {
-            out.push(b);
-        }
-    }
-    String::from_utf8_lossy(&out).into_owned()
-}
-
 /// Try to extract a cwd path from an OSC 0/2 window title.
 /// Common formats: "user@host: /path", "user@host:/path", "/path/to/dir"
 fn extract_cwd_from_title(title: &str) -> Option<String> {
@@ -2856,19 +2830,18 @@ mod tests {
         detect_tool_from_process_snapshot, extract_cwd_from_title, find_osc_payload_end,
         initial_spawn_pty_size, line_looks_prompt_like, normalize_submit_line_text,
         osc7_cwd_update_plan, osc_payloads, output_counts_as_meaningful_activity,
-        parse_process_entry, percent_decode, process_entries_cache, pty_read_error_log,
-        pty_read_step, query_tmux_session_created, query_tool_from_tmux_process_tree,
-        resolve_tmux_colorterm, resolve_tmux_term, resolve_tmux_terminal_env,
-        run_bounded_tmux_command, should_clear_startup_replay, should_refresh_cwd_from_tmux,
-        should_refresh_tool_from_tmux, state_detector_for_initial_tool, submit_line_fallback_input,
-        subscriber_cap_rejection, title_cwd_update, title_tool_update, tmux_input_chunks,
-        tool_refresh_changes_tool, validate_spawn_start_cwd, visible_output_is_meaningful,
-        write_and_flush_input, write_input_counts_as_activity, ControlEvent, DeadlineSleep,
-        LivenessReconciliation, LivenessRefresh, OutputFrame, PaneLiveness, ProcessEntriesCache,
-        ProcessEntriesSnapshot, ProcessEntry, ProcessSnapshotToolDetection, PtyReadErrorLog,
-        PtyReadLoopStep, SessionActor, SessionCommand, SubscribeOutcome, TmuxInputChunk,
-        TmuxSpawnMode, CWD_REFRESH_MIN_INTERVAL, MAX_OUTPUT_SUBSCRIBERS_PER_SESSION,
-        PROCESS_ENTRIES_CACHE_TTL, TOOL_REFRESH_MIN_INTERVAL,
+        parse_process_entry, process_entries_cache, pty_read_error_log, pty_read_step,
+        query_tmux_session_created, query_tool_from_tmux_process_tree, resolve_tmux_colorterm,
+        resolve_tmux_term, resolve_tmux_terminal_env, run_bounded_tmux_command,
+        should_clear_startup_replay, should_refresh_cwd_from_tmux, should_refresh_tool_from_tmux,
+        state_detector_for_initial_tool, submit_line_fallback_input, subscriber_cap_rejection,
+        title_cwd_update, title_tool_update, tmux_input_chunks, tool_refresh_changes_tool,
+        validate_spawn_start_cwd, visible_output_is_meaningful, write_and_flush_input,
+        write_input_counts_as_activity, ControlEvent, DeadlineSleep, LivenessReconciliation,
+        LivenessRefresh, OutputFrame, PaneLiveness, ProcessEntriesCache, ProcessEntriesSnapshot,
+        ProcessEntry, ProcessSnapshotToolDetection, PtyReadErrorLog, PtyReadLoopStep, SessionActor,
+        SessionCommand, SubscribeOutcome, TmuxInputChunk, TmuxSpawnMode, CWD_REFRESH_MIN_INTERVAL,
+        MAX_OUTPUT_SUBSCRIBERS_PER_SESSION, PROCESS_ENTRIES_CACHE_TTL, TOOL_REFRESH_MIN_INTERVAL,
     };
     use crate::config::Config;
     use crate::scroll::guard::ScrollGuard;
@@ -4073,13 +4046,6 @@ fi
         assert_eq!(extract_cwd_from_title("user@host:relative/path"), None);
         assert_eq!(extract_cwd_from_title("user@host: ./project"), None);
         assert_eq!(extract_cwd_from_title("user@host /tmp/project"), None);
-    }
-
-    #[test]
-    fn percent_decode_decodes_hex_sequences_and_keeps_invalid_ones() {
-        assert_eq!(percent_decode("/tmp/My%20Repo"), "/tmp/My Repo");
-        assert_eq!(percent_decode("/tmp/caf%C3%A9"), "/tmp/caf\u{e9}");
-        assert_eq!(percent_decode("%ZZ/path"), "%/path");
     }
 
     #[test]
