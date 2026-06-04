@@ -148,10 +148,18 @@ pub(super) fn validate_osascript_script_arg(field: &'static str, value: &str) ->
 }
 
 fn invalid_osascript_script_arg_reason(field: &'static str, value: &str) -> Option<String> {
-    osascript_arg_length_error(value)
+    osascript_arg_empty_error(value)
+        .or_else(|| osascript_arg_length_error(value))
         .or_else(|| osascript_arg_newline_error(value))
         .or_else(|| osascript_arg_quote_error(field, value))
         .or_else(|| osascript_arg_character_error(field, value))
+}
+
+fn osascript_arg_empty_error(value: &str) -> Option<String> {
+    value
+        .trim()
+        .is_empty()
+        .then(|| "value cannot be empty".to_string())
 }
 
 fn osascript_arg_length_error(value: &str) -> Option<String> {

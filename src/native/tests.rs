@@ -83,6 +83,26 @@ fn validate_osascript_script_arg_rejects_newline_payload() {
 }
 
 #[test]
+fn validate_osascript_script_arg_rejects_empty_payloads() {
+    for (field, value) in [
+        ("tmux_name", ""),
+        ("tmux_name", "   "),
+        ("attach_command", ""),
+        ("attach_command", "\t"),
+    ] {
+        let err = validate_osascript_script_arg(field, value).unwrap_err();
+        let typed = err
+            .downcast_ref::<NativeScriptError>()
+            .expect("typed native error");
+        assert!(
+            matches!(typed, NativeScriptError::InvalidOsaScriptArg { .. }),
+            "{field}={value:?} should be rejected as an invalid osascript argument"
+        );
+        assert!(err.to_string().contains("value cannot be empty"));
+    }
+}
+
+#[test]
 fn native_app_env_defaults_to_iterm() {
     assert_eq!(
         NativeDesktopApp::from_env_value(""),
