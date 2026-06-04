@@ -317,6 +317,120 @@ fn mermaid_er_order_keeps_components_contiguous_when_xy_positions_interleave() {
 }
 
 #[test]
+fn mermaid_er_order_ignores_self_and_unknown_neighbors_for_tie_breaks() {
+    let order = mermaid_order_er_nodes(&[
+        er_order_node("node:b", 10.0, 10.0, &[]),
+        er_order_node("node:a", 10.0, 10.0, &["node:a", "node:missing"]),
+    ]);
+
+    assert_eq!(order, vec!["node:a".to_string(), "node:b".to_string()]);
+}
+
+#[test]
+fn mermaid_er_box_content_filters_title_and_attrs_by_view_state() {
+    let lines = vec![
+        er_semantic_line("ACCOUNT", 1.0, MermaidSemanticKind::NodeSummary),
+        er_semantic_line("ACCOUNT", 1.0, MermaidSemanticKind::NodeTitle),
+        er_semantic_line("uuid", 2.0, MermaidSemanticKind::ErAttributeType),
+        er_semantic_line("id PK", 2.0, MermaidSemanticKind::ErAttributeName),
+        er_semantic_line("uuid", 3.0, MermaidSemanticKind::ErAttributeType),
+        er_semantic_line("user_id FK", 3.0, MermaidSemanticKind::ErAttributeName),
+        er_semantic_line("string", 4.0, MermaidSemanticKind::ErAttributeType),
+        er_semantic_line("display_name", 4.0, MermaidSemanticKind::ErAttributeName),
+    ];
+    let source_indices = (0..lines.len()).collect::<Vec<_>>();
+
+    let (entity_titles, entity_attrs) =
+        mermaid_build_er_box_content(&lines, &source_indices, MermaidViewState::ErEntities);
+    assert_eq!(entity_titles, vec![(0, "ACCOUNT".to_string())]);
+    assert!(entity_attrs.is_empty());
+
+    let (key_titles, key_attrs) =
+        mermaid_build_er_box_content(&lines, &source_indices, MermaidViewState::ErKeys);
+    assert_eq!(key_titles, vec![(1, "ACCOUNT".to_string())]);
+    assert_eq!(
+        key_attrs
+            .iter()
+            .map(|row| row.name_text.as_str())
+            .collect::<Vec<_>>(),
+        vec!["id PK", "user_id FK"]
+    );
+
+    let (_, column_attrs) =
+        mermaid_build_er_box_content(&lines, &source_indices, MermaidViewState::ErColumns);
+    assert_eq!(column_attrs.len(), 3);
+    assert!(column_attrs
+        .iter()
+        .all(|row| row.type_text.as_deref().is_some()));
+}
+
+#[test]
+fn mermaid_er_pack_plan_prefers_viewport_fit_and_keeps_fallback_shape() {
+    let specs = vec![
+        MermaidErBoxSize {
+            outer_width: 10,
+            outer_height: 4,
+            type_col_width: 0,
+        },
+        MermaidErBoxSize {
+            outer_width: 10,
+            outer_height: 4,
+            type_col_width: 0,
+        },
+        MermaidErBoxSize {
+            outer_width: 10,
+            outer_height: 4,
+            type_col_width: 0,
+        },
+        MermaidErBoxSize {
+            outer_width: 10,
+            outer_height: 4,
+            type_col_width: 0,
+        },
+    ];
+
+    let plan = mermaid_plan_er_box_packing(&specs, 24, 10, 2, 1);
+    assert_eq!(plan.column_count, 2);
+    assert_eq!(plan.row_widths, vec![22, 22]);
+    assert_eq!(plan.row_heights, vec![4, 4]);
+    assert_eq!(plan.cluster_height, 9);
+
+    let fallback = mermaid_plan_er_box_packing(
+        &[MermaidErBoxSize {
+            outer_width: 50,
+            outer_height: 20,
+            type_col_width: 0,
+        }],
+        10,
+        5,
+        2,
+        1,
+    );
+    assert_eq!(fallback.column_count, 1);
+    assert_eq!(fallback.row_widths, vec![50]);
+    assert_eq!(fallback.row_heights, vec![20]);
+    assert_eq!(fallback.cluster_height, 5);
+}
+
+#[test]
+fn mermaid_er_connected_owner_pair_filters_missing_and_same_owner_edges() {
+    let owners = HashMap::from([
+        ("node-a".to_string(), "owner-a".to_string()),
+        ("node-a-label".to_string(), "owner-a".to_string()),
+        ("node-b".to_string(), "owner-b".to_string()),
+    ]);
+
+    assert!(mermaid_er_connected_owner_pair("node-a", "missing", &owners).is_none());
+    assert!(mermaid_er_connected_owner_pair("node-a", "node-a-label", &owners).is_none());
+
+    let Some((from, to)) = mermaid_er_connected_owner_pair("node-a", "node-b", &owners) else {
+        panic!("expected connected owner pair");
+    };
+    assert_eq!(from, "owner-a");
+    assert_eq!(to, "owner-b");
+}
+
+#[test]
 fn mermaid_too_small_view_keeps_existing_guard() {
     let (mut app, mut renderer, _layout) =
         open_mermaid_test_viewer("graph TD\nA[Alpha Node] --> B[Beta Node]\n", 120, 32);
@@ -338,4 +452,18 @@ fn mermaid_too_small_view_keeps_existing_guard() {
         FishBowlMode::Aquarium => panic!("expected Mermaid viewer mode"),
     };
     assert_eq!(semantic_count, 0);
+}
+
+fn er_semantic_line(text: &str, diagram_y: f32, kind: MermaidSemanticKind) -> MermaidSemanticLine {
+    MermaidSemanticLine {
+        text: text.to_string(),
+        diagram_x: 0.0,
+        diagram_y,
+        anchor: MermaidTextAnchor::Start,
+        kind,
+        owner_key: "node:account".to_string(),
+        outline_eligible: true,
+        owner_width: 100.0,
+        owner_height: 60.0,
+    }
 }

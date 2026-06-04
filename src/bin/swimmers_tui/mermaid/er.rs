@@ -25,6 +25,29 @@ pub(crate) struct MermaidErOrderNode {
     pub(crate) neighbors: Vec<String>,
 }
 
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct MermaidErBoxSize {
+    pub(crate) outer_width: u16,
+    pub(crate) outer_height: u16,
+    pub(crate) type_col_width: u16,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct MermaidErPackPlan {
+    pub(crate) column_count: usize,
+    pub(crate) row_widths: Vec<u16>,
+    pub(crate) row_heights: Vec<u16>,
+    pub(crate) cluster_height: u16,
+}
+
+#[derive(Default)]
+struct MermaidErAttrParts {
+    name_source_index: Option<usize>,
+    name_text: Option<String>,
+    type_source_index: Option<usize>,
+    type_text: Option<String>,
+}
+
 pub(crate) fn mermaid_is_er_source(source: &str) -> bool {
     source
         .lines()
@@ -102,46 +125,8 @@ pub(crate) fn mermaid_build_er_packed_boxes(
         return Vec::new();
     }
 
-    #[derive(Default)]
-    struct AttrParts {
-        name_source_index: Option<usize>,
-        name_text: Option<String>,
-        type_source_index: Option<usize>,
-        type_text: Option<String>,
-    }
-
-    let mut source_indices_by_owner = HashMap::<String, Vec<usize>>::new();
-    for (source_index, line) in prepared.semantic_lines.iter().enumerate() {
-        source_indices_by_owner
-            .entry(line.owner_key.clone())
-            .or_default()
-            .push(source_index);
-    }
-
-    let mut ordered_nodes = prepared
-        .layout
-        .nodes
-        .values()
-        .filter(|node| {
-            !node.hidden
-                && node.anchor_subgraph.is_none()
-                && node
-                    .label
-                    .lines
-                    .iter()
-                    .any(|line| mermaid_is_divider_line(line))
-        })
-        .collect::<Vec<_>>();
-    ordered_nodes.sort_by(|left, right| {
-        left.y
-            .partial_cmp(&right.y)
-            .unwrap_or(std::cmp::Ordering::Equal)
-            .then_with(|| {
-                left.x
-                    .partial_cmp(&right.x)
-                    .unwrap_or(std::cmp::Ordering::Equal)
-            })
-    });
+    let source_indices_by_owner = mermaid_er_source_indices_by_owner(&prepared.semantic_lines);
+    let ordered_nodes = mermaid_er_ordered_layout_nodes(&prepared.layout);
 
     let mut out = Vec::new();
     for node in ordered_nodes {
@@ -150,80 +135,8 @@ pub(crate) fn mermaid_build_er_packed_boxes(
             continue;
         };
 
-        let mut summary_line = None;
-        let mut title_lines = Vec::<(usize, String)>::new();
-        let mut attr_parts = std::collections::BTreeMap::<i32, AttrParts>::new();
-        for source_index in source_indices {
-            let Some(line) = prepared.semantic_lines.get(*source_index) else {
-                continue;
-            };
-            match line.kind {
-                MermaidSemanticKind::NodeSummary => {
-                    summary_line = Some((*source_index, mermaid_fit_whole_words(&line.text, 18)));
-                }
-                MermaidSemanticKind::NodeTitle => {
-                    title_lines.push((*source_index, line.text.clone()));
-                }
-                MermaidSemanticKind::ErAttributeName => {
-                    let key = (line.diagram_y * 10.0).round() as i32;
-                    let entry = attr_parts.entry(key).or_default();
-                    entry.name_source_index = Some(*source_index);
-                    entry.name_text = Some(line.text.clone());
-                }
-                MermaidSemanticKind::ErAttributeType => {
-                    let key = (line.diagram_y * 10.0).round() as i32;
-                    let entry = attr_parts.entry(key).or_default();
-                    entry.type_source_index = Some(*source_index);
-                    entry.type_text = Some(line.text.clone());
-                }
-                MermaidSemanticKind::SubgraphSummary
-                | MermaidSemanticKind::SubgraphTitle
-                | MermaidSemanticKind::EdgeLabel
-                | MermaidSemanticKind::ClassMember => {}
-            }
-        }
-
-        title_lines.sort_by_key(|(source_index, _)| *source_index);
-        let attr_rows = attr_parts
-            .into_values()
-            .filter_map(|parts| {
-                let name_source_index = parts.name_source_index?;
-                let name_text = parts.name_text?;
-                Some(MermaidErPackedAttrRow {
-                    name_source_index,
-                    name_text,
-                    type_source_index: parts.type_source_index,
-                    type_text: parts.type_text,
-                })
-            })
-            .filter(|row| match view_state {
-                MermaidViewState::ErKeys => {
-                    row.name_text.contains(" PK") || row.name_text.contains(" FK")
-                }
-                MermaidViewState::ErColumns | MermaidViewState::ErSchema => true,
-                MermaidViewState::ErEntities
-                | MermaidViewState::Outline
-                | MermaidViewState::L1
-                | MermaidViewState::L2
-                | MermaidViewState::L3 => false,
-            })
-            .collect::<Vec<_>>();
-
-        let title_lines = match view_state {
-            MermaidViewState::ErEntities => summary_line
-                .into_iter()
-                .collect::<Vec<_>>()
-                .into_iter()
-                .take(1)
-                .collect(),
-            MermaidViewState::ErKeys | MermaidViewState::ErColumns | MermaidViewState::ErSchema => {
-                title_lines
-            }
-            MermaidViewState::Outline
-            | MermaidViewState::L1
-            | MermaidViewState::L2
-            | MermaidViewState::L3 => Vec::new(),
-        };
+        let (title_lines, attr_rows) =
+            mermaid_build_er_box_content(&prepared.semantic_lines, source_indices, view_state);
 
         if title_lines.is_empty() && attr_rows.is_empty() {
             continue;
@@ -239,6 +152,161 @@ pub(crate) fn mermaid_build_er_packed_boxes(
     }
 
     out
+}
+
+pub(crate) fn mermaid_er_source_indices_by_owner(
+    semantic_lines: &[MermaidSemanticLine],
+) -> HashMap<String, Vec<usize>> {
+    let mut source_indices_by_owner = HashMap::<String, Vec<usize>>::new();
+    for (source_index, line) in semantic_lines.iter().enumerate() {
+        source_indices_by_owner
+            .entry(line.owner_key.clone())
+            .or_default()
+            .push(source_index);
+    }
+    source_indices_by_owner
+}
+
+fn mermaid_er_ordered_layout_nodes(
+    layout: &MermaidLayout,
+) -> Vec<&mermaid_rs_renderer::NodeLayout> {
+    let mut ordered_nodes = layout
+        .nodes
+        .values()
+        .filter(|node| mermaid_is_er_entity_layout_node(node))
+        .collect::<Vec<_>>();
+    ordered_nodes.sort_by(|left, right| {
+        mermaid_cmp_f32(left.y, right.y).then_with(|| mermaid_cmp_f32(left.x, right.x))
+    });
+    ordered_nodes
+}
+
+fn mermaid_is_er_entity_layout_node(node: &mermaid_rs_renderer::NodeLayout) -> bool {
+    !node.hidden
+        && node.anchor_subgraph.is_none()
+        && node
+            .label
+            .lines
+            .iter()
+            .any(|line| mermaid_is_divider_line(line))
+}
+
+pub(crate) fn mermaid_build_er_box_content(
+    semantic_lines: &[MermaidSemanticLine],
+    source_indices: &[usize],
+    view_state: MermaidViewState,
+) -> (Vec<(usize, String)>, Vec<MermaidErPackedAttrRow>) {
+    let mut summary_line = None;
+    let mut title_lines = Vec::<(usize, String)>::new();
+    let mut attr_parts = std::collections::BTreeMap::<i32, MermaidErAttrParts>::new();
+    for source_index in source_indices {
+        let Some(line) = semantic_lines.get(*source_index) else {
+            continue;
+        };
+        mermaid_collect_er_box_line(
+            *source_index,
+            line,
+            &mut summary_line,
+            &mut title_lines,
+            &mut attr_parts,
+        );
+    }
+
+    title_lines.sort_by_key(|(source_index, _)| *source_index);
+    let attr_rows = mermaid_er_attr_rows_for_view(attr_parts, view_state);
+    let title_lines = mermaid_er_title_lines_for_view(summary_line, title_lines, view_state);
+    (title_lines, attr_rows)
+}
+
+fn mermaid_collect_er_box_line(
+    source_index: usize,
+    line: &MermaidSemanticLine,
+    summary_line: &mut Option<(usize, String)>,
+    title_lines: &mut Vec<(usize, String)>,
+    attr_parts: &mut std::collections::BTreeMap<i32, MermaidErAttrParts>,
+) {
+    match line.kind {
+        MermaidSemanticKind::NodeSummary => {
+            *summary_line = Some((source_index, mermaid_fit_whole_words(&line.text, 18)));
+        }
+        MermaidSemanticKind::NodeTitle => {
+            title_lines.push((source_index, line.text.clone()));
+        }
+        MermaidSemanticKind::ErAttributeName => {
+            let entry = attr_parts
+                .entry(mermaid_er_attr_row_key(line.diagram_y))
+                .or_default();
+            entry.name_source_index = Some(source_index);
+            entry.name_text = Some(line.text.clone());
+        }
+        MermaidSemanticKind::ErAttributeType => {
+            let entry = attr_parts
+                .entry(mermaid_er_attr_row_key(line.diagram_y))
+                .or_default();
+            entry.type_source_index = Some(source_index);
+            entry.type_text = Some(line.text.clone());
+        }
+        MermaidSemanticKind::SubgraphSummary
+        | MermaidSemanticKind::SubgraphTitle
+        | MermaidSemanticKind::EdgeLabel
+        | MermaidSemanticKind::ClassMember => {}
+    }
+}
+
+fn mermaid_er_attr_row_key(diagram_y: f32) -> i32 {
+    (diagram_y * 10.0).round() as i32
+}
+
+fn mermaid_er_attr_rows_for_view(
+    attr_parts: std::collections::BTreeMap<i32, MermaidErAttrParts>,
+    view_state: MermaidViewState,
+) -> Vec<MermaidErPackedAttrRow> {
+    attr_parts
+        .into_values()
+        .filter_map(mermaid_er_attr_parts_to_row)
+        .filter(|row| mermaid_er_attr_row_visible(row, view_state))
+        .collect()
+}
+
+fn mermaid_er_attr_parts_to_row(parts: MermaidErAttrParts) -> Option<MermaidErPackedAttrRow> {
+    Some(MermaidErPackedAttrRow {
+        name_source_index: parts.name_source_index?,
+        name_text: parts.name_text?,
+        type_source_index: parts.type_source_index,
+        type_text: parts.type_text,
+    })
+}
+
+pub(crate) fn mermaid_er_attr_row_visible(
+    row: &MermaidErPackedAttrRow,
+    view_state: MermaidViewState,
+) -> bool {
+    match view_state {
+        MermaidViewState::ErKeys => row.name_text.contains(" PK") || row.name_text.contains(" FK"),
+        MermaidViewState::ErColumns | MermaidViewState::ErSchema => true,
+        MermaidViewState::ErEntities
+        | MermaidViewState::Outline
+        | MermaidViewState::L1
+        | MermaidViewState::L2
+        | MermaidViewState::L3 => false,
+    }
+}
+
+fn mermaid_er_title_lines_for_view(
+    summary_line: Option<(usize, String)>,
+    title_lines: Vec<(usize, String)>,
+    view_state: MermaidViewState,
+) -> Vec<(usize, String)> {
+    match view_state {
+        MermaidViewState::ErEntities => summary_line.into_iter().take(1).collect(),
+        MermaidViewState::ErKeys | MermaidViewState::ErColumns | MermaidViewState::ErSchema => {
+            title_lines
+        }
+        MermaidViewState::Outline
+        | MermaidViewState::L1
+        | MermaidViewState::L2
+        | MermaidViewState::L3 => Vec::new(),
+    }
 }
 
 pub(crate) fn mermaid_er_box_inner_size(
@@ -386,11 +454,12 @@ fn mermaid_er_compare_component_candidates(
         .then_with(|| left.cmp(right))
 }
 
-pub(crate) fn mermaid_order_er_nodes(nodes: &[MermaidErOrderNode]) -> Vec<String> {
-    if nodes.is_empty() {
-        return Vec::new();
-    }
-
+fn mermaid_er_order_graph(
+    nodes: &[MermaidErOrderNode],
+) -> (
+    HashMap<String, (f32, f32)>,
+    HashMap<String, BTreeSet<String>>,
+) {
     let known_keys = nodes
         .iter()
         .map(|node| node.owner_key.clone())
@@ -420,16 +489,24 @@ pub(crate) fn mermaid_order_er_nodes(nodes: &[MermaidErOrderNode]) -> Vec<String
         }
     }
 
-    let centroid = {
-        let mut total_x = 0.0f32;
-        let mut total_y = 0.0f32;
-        for node in nodes {
-            total_x += node.x;
-            total_y += node.y;
-        }
-        (total_x / nodes.len() as f32, total_y / nodes.len() as f32)
-    };
+    (positions, adjacency)
+}
 
+fn mermaid_er_centroid_from_nodes(nodes: &[MermaidErOrderNode]) -> (f32, f32) {
+    let mut total_x = 0.0f32;
+    let mut total_y = 0.0f32;
+    for node in nodes {
+        total_x += node.x;
+        total_y += node.y;
+    }
+    (total_x / nodes.len() as f32, total_y / nodes.len() as f32)
+}
+
+fn mermaid_er_connected_components(
+    positions: &HashMap<String, (f32, f32)>,
+    adjacency: &HashMap<String, BTreeSet<String>>,
+    centroid: (f32, f32),
+) -> Vec<Vec<String>> {
     let mut unseen = positions.keys().cloned().collect::<BTreeSet<_>>();
     let mut components = Vec::<Vec<String>>::new();
     while let Some(start) = unseen.iter().next().cloned() {
@@ -450,7 +527,15 @@ pub(crate) fn mermaid_order_er_nodes(nodes: &[MermaidErOrderNode]) -> Vec<String
         });
         components.push(component);
     }
+    components
+}
 
+fn mermaid_er_sort_components(
+    components: &mut [Vec<String>],
+    positions: &HashMap<String, (f32, f32)>,
+    adjacency: &HashMap<String, BTreeSet<String>>,
+    centroid: (f32, f32),
+) {
     components.sort_by(|left, right| {
         let size_cmp = right.len().cmp(&left.len());
         match (left.first(), right.first()) {
@@ -464,68 +549,102 @@ pub(crate) fn mermaid_order_er_nodes(nodes: &[MermaidErOrderNode]) -> Vec<String
             (None, None) => size_cmp,
         }
     });
+}
+
+fn mermaid_er_component_centroid(
+    component: &[String],
+    positions: &HashMap<String, (f32, f32)>,
+) -> (f32, f32) {
+    let mut total_x = 0.0f32;
+    let mut total_y = 0.0f32;
+    for owner_key in component {
+        let position = mermaid_er_node_position(positions, owner_key);
+        total_x += position.0;
+        total_y += position.1;
+    }
+    (
+        total_x / component.len() as f32,
+        total_y / component.len() as f32,
+    )
+}
+
+fn mermaid_er_next_component_node(
+    remaining: &BTreeSet<String>,
+    placed: &HashSet<String>,
+    positions: &HashMap<String, (f32, f32)>,
+    adjacency: &HashMap<String, BTreeSet<String>>,
+    component_centroid: (f32, f32),
+) -> Option<String> {
+    remaining
+        .iter()
+        .min_by(|left, right| {
+            mermaid_er_compare_component_candidates(
+                left,
+                right,
+                placed,
+                positions,
+                adjacency,
+                component_centroid,
+            )
+        })
+        .cloned()
+}
+
+fn mermaid_order_er_component(
+    component: Vec<String>,
+    positions: &HashMap<String, (f32, f32)>,
+    adjacency: &HashMap<String, BTreeSet<String>>,
+) -> Vec<String> {
+    let component_centroid = mermaid_er_component_centroid(&component, positions);
+    let mut remaining = component.into_iter().collect::<BTreeSet<_>>();
+    let Some(seed) = remaining
+        .iter()
+        .min_by(|left, right| {
+            mermaid_er_compare_seed_nodes(left, right, positions, adjacency, component_centroid)
+        })
+        .cloned()
+    else {
+        tracing::warn!("Mermaid ER ordering skipped an empty component");
+        return Vec::new();
+    };
+    remaining.remove(&seed);
+
+    let mut ordered = vec![seed.clone()];
+    let mut placed = HashSet::from([seed]);
+    while !remaining.is_empty() {
+        let Some(next) = mermaid_er_next_component_node(
+            &remaining,
+            &placed,
+            positions,
+            adjacency,
+            component_centroid,
+        ) else {
+            tracing::warn!("Mermaid ER ordering lost remaining-node candidate");
+            break;
+        };
+        remaining.remove(&next);
+        placed.insert(next.clone());
+        ordered.push(next);
+    }
+    ordered
+}
+
+pub(crate) fn mermaid_order_er_nodes(nodes: &[MermaidErOrderNode]) -> Vec<String> {
+    if nodes.is_empty() {
+        return Vec::new();
+    }
+
+    let (positions, adjacency) = mermaid_er_order_graph(nodes);
+    let centroid = mermaid_er_centroid_from_nodes(nodes);
+    let mut components = mermaid_er_connected_components(&positions, &adjacency, centroid);
+    mermaid_er_sort_components(&mut components, &positions, &adjacency, centroid);
 
     let mut ordered = Vec::with_capacity(nodes.len());
     for component in components {
-        let component_centroid = {
-            let mut total_x = 0.0f32;
-            let mut total_y = 0.0f32;
-            for owner_key in &component {
-                let position = mermaid_er_node_position(&positions, owner_key);
-                total_x += position.0;
-                total_y += position.1;
-            }
-            (
-                total_x / component.len() as f32,
-                total_y / component.len() as f32,
-            )
-        };
-
-        let mut remaining = component.into_iter().collect::<BTreeSet<_>>();
-        let Some(seed) = remaining
-            .iter()
-            .min_by(|left, right| {
-                mermaid_er_compare_seed_nodes(
-                    left,
-                    right,
-                    &positions,
-                    &adjacency,
-                    component_centroid,
-                )
-            })
-            .cloned()
-        else {
-            tracing::warn!("Mermaid ER ordering skipped an empty component");
-            continue;
-        };
-        remaining.remove(&seed);
-        ordered.push(seed.clone());
-
-        let mut placed = HashSet::from([seed]);
-        while !remaining.is_empty() {
-            let Some(next) = remaining
-                .iter()
-                .min_by(|left, right| {
-                    mermaid_er_compare_component_candidates(
-                        left,
-                        right,
-                        &placed,
-                        &positions,
-                        &adjacency,
-                        component_centroid,
-                    )
-                })
-                .cloned()
-            else {
-                tracing::warn!("Mermaid ER ordering lost remaining-node candidate");
-                break;
-            };
-            remaining.remove(&next);
-            placed.insert(next.clone());
-            ordered.push(next);
-        }
+        ordered.extend(mermaid_order_er_component(
+            component, &positions, &adjacency,
+        ));
     }
-
     ordered
 }
 
@@ -533,14 +652,28 @@ pub(crate) fn mermaid_er_order_from_layout(
     layout: &MermaidLayout,
     boxes: &[MermaidErPackedBox],
 ) -> Vec<String> {
-    let owner_keys = boxes
-        .iter()
-        .map(|er_box| er_box.owner_key.clone())
-        .collect::<HashSet<_>>();
+    let owner_keys = mermaid_er_owner_keys_from_boxes(boxes);
     if owner_keys.is_empty() {
         return Vec::new();
     }
 
+    let (positions, owners_by_node_id) = mermaid_er_layout_owner_positions(layout, &owner_keys);
+    let mut neighbors = mermaid_er_layout_neighbors(layout, &owners_by_node_id);
+    let nodes = mermaid_er_order_nodes_from_layout_positions(positions, &mut neighbors);
+    mermaid_order_er_nodes(&nodes)
+}
+
+fn mermaid_er_owner_keys_from_boxes(boxes: &[MermaidErPackedBox]) -> HashSet<String> {
+    boxes
+        .iter()
+        .map(|er_box| er_box.owner_key.clone())
+        .collect()
+}
+
+fn mermaid_er_layout_owner_positions(
+    layout: &MermaidLayout,
+    owner_keys: &HashSet<String>,
+) -> (HashMap<String, (f32, f32)>, HashMap<String, String>) {
     let mut positions = HashMap::<String, (f32, f32)>::new();
     let mut owners_by_node_id = HashMap::<String, String>::new();
     for node in layout.nodes.values() {
@@ -554,18 +687,20 @@ pub(crate) fn mermaid_er_order_from_layout(
         positions.insert(owner_key.clone(), (node.x, node.y));
         owners_by_node_id.insert(node.id.clone(), owner_key);
     }
+    (positions, owners_by_node_id)
+}
 
+fn mermaid_er_layout_neighbors(
+    layout: &MermaidLayout,
+    owners_by_node_id: &HashMap<String, String>,
+) -> HashMap<String, BTreeSet<String>> {
     let mut neighbors = HashMap::<String, BTreeSet<String>>::new();
     for edge in &layout.edges {
-        let Some(from_key) = owners_by_node_id.get(&edge.from) else {
+        let Some((from_key, to_key)) =
+            mermaid_er_connected_owner_pair(&edge.from, &edge.to, owners_by_node_id)
+        else {
             continue;
         };
-        let Some(to_key) = owners_by_node_id.get(&edge.to) else {
-            continue;
-        };
-        if from_key == to_key {
-            continue;
-        }
         neighbors
             .entry(from_key.clone())
             .or_default()
@@ -575,7 +710,23 @@ pub(crate) fn mermaid_er_order_from_layout(
             .or_default()
             .insert(from_key.clone());
     }
+    neighbors
+}
 
+pub(crate) fn mermaid_er_connected_owner_pair<'a>(
+    from_node_id: &str,
+    to_node_id: &str,
+    owners_by_node_id: &'a HashMap<String, String>,
+) -> Option<(&'a String, &'a String)> {
+    let from_key = owners_by_node_id.get(from_node_id)?;
+    let to_key = owners_by_node_id.get(to_node_id)?;
+    (from_key != to_key).then_some((from_key, to_key))
+}
+
+fn mermaid_er_order_nodes_from_layout_positions(
+    positions: HashMap<String, (f32, f32)>,
+    neighbors: &mut HashMap<String, BTreeSet<String>>,
+) -> Vec<MermaidErOrderNode> {
     let mut nodes = positions
         .into_iter()
         .map(|(owner_key, (x, y))| MermaidErOrderNode {
@@ -594,7 +745,7 @@ pub(crate) fn mermaid_er_order_from_layout(
             .then_with(|| mermaid_cmp_f32(left.x, right.x))
             .then_with(|| left.owner_key.cmp(&right.owner_key))
     });
-    mermaid_order_er_nodes(&nodes)
+    nodes
 }
 
 pub(crate) fn mermaid_pack_er_box_rects(
@@ -602,25 +753,7 @@ pub(crate) fn mermaid_pack_er_box_rects(
     boxes: &[MermaidErPackedBox],
     view_state: MermaidViewState,
 ) -> HashMap<String, (MermaidOutlineLabelRect, u16)> {
-    #[derive(Clone, Copy)]
-    struct BoxSize {
-        outer_width: u16,
-        outer_height: u16,
-        type_col_width: u16,
-    }
-
-    let specs = boxes
-        .iter()
-        .map(|er_box| {
-            let (inner_width, inner_height, type_col_width) =
-                mermaid_er_box_inner_size(er_box, view_state);
-            BoxSize {
-                outer_width: inner_width.saturating_add(2),
-                outer_height: inner_height.saturating_add(2),
-                type_col_width,
-            }
-        })
-        .collect::<Vec<_>>();
+    let specs = mermaid_er_box_sizes(boxes, view_state);
     if specs.is_empty() {
         return HashMap::new();
     }
@@ -629,108 +762,17 @@ pub(crate) fn mermaid_pack_er_box_rects(
     let gap_y = 1u16;
     let viewport_width = content_rect.width.max(1);
     let viewport_height = content_rect.height.max(1);
-    let target_aspect = viewport_width as f32 / viewport_height as f32;
-
-    let mut best_layout = None::<(usize, Vec<u16>, Vec<u16>, u16, u16, f32)>;
-    for column_count in 1..=boxes.len() {
-        let mut row_widths = Vec::new();
-        let mut row_heights = Vec::new();
-        let mut row_start = 0usize;
-        let mut fits = true;
-        while row_start < specs.len() {
-            let row = &specs[row_start..(row_start + column_count).min(specs.len())];
-            let row_width = row
-                .iter()
-                .map(|spec| spec.outer_width)
-                .sum::<u16>()
-                .saturating_add(gap_x.saturating_mul(row.len().saturating_sub(1) as u16));
-            let row_height = row.iter().map(|spec| spec.outer_height).max().unwrap_or(0);
-            if row_width > viewport_width || row_height > viewport_height {
-                fits = false;
-                break;
-            }
-            row_widths.push(row_width);
-            row_heights.push(row_height);
-            row_start += column_count;
-        }
-        if !fits || row_widths.is_empty() {
-            continue;
-        }
-
-        let cluster_width = row_widths.iter().copied().max().unwrap_or(0);
-        let cluster_height = row_heights
-            .iter()
-            .copied()
-            .sum::<u16>()
-            .saturating_add(gap_y.saturating_mul(row_heights.len().saturating_sub(1) as u16));
-        if cluster_width > viewport_width || cluster_height > viewport_height {
-            continue;
-        }
-
-        let width_util = cluster_width as f32 / viewport_width as f32;
-        let height_util = cluster_height as f32 / viewport_height as f32;
-        let area_util = width_util * height_util;
-        let aspect = cluster_width as f32 / cluster_height.max(1) as f32;
-        let aspect_penalty = (aspect - target_aspect).abs();
-        let score =
-            width_util.min(height_util) * 1000.0 + area_util * 400.0 - aspect_penalty * 40.0;
-
-        match best_layout {
-            Some((_, _, _, _, _, best_score)) if best_score >= score => {}
-            _ => {
-                best_layout = Some((
-                    column_count,
-                    row_widths,
-                    row_heights,
-                    cluster_width,
-                    cluster_height,
-                    score,
-                ));
-            }
-        }
-    }
-
-    let (column_count, row_widths, row_heights, _cluster_width, cluster_height, _) = best_layout
-        .unwrap_or_else(|| {
-            let row_widths = specs
-                .iter()
-                .map(|spec| spec.outer_width)
-                .collect::<Vec<_>>();
-            let row_heights = specs
-                .iter()
-                .map(|spec| spec.outer_height)
-                .collect::<Vec<_>>();
-            let cluster_width = row_widths
-                .iter()
-                .copied()
-                .max()
-                .unwrap_or(0)
-                .min(viewport_width);
-            let cluster_height = row_heights
-                .iter()
-                .copied()
-                .sum::<u16>()
-                .saturating_add(gap_y.saturating_mul(row_heights.len().saturating_sub(1) as u16))
-                .min(viewport_height);
-            (
-                1,
-                row_widths,
-                row_heights,
-                cluster_width,
-                cluster_height,
-                0.0,
-            )
-        });
+    let plan = mermaid_plan_er_box_packing(&specs, viewport_width, viewport_height, gap_x, gap_y);
 
     let start_y = content_rect
         .y
-        .saturating_add(viewport_height.saturating_sub(cluster_height) / 2);
+        .saturating_add(viewport_height.saturating_sub(plan.cluster_height) / 2);
 
     let mut rects = HashMap::new();
     let mut row_top = start_y;
     let mut box_index = 0usize;
-    for (row_index, row_width) in row_widths.iter().enumerate() {
-        let row = &boxes[box_index..(box_index + column_count).min(boxes.len())];
+    for (row_index, row_width) in plan.row_widths.iter().enumerate() {
+        let row = &boxes[box_index..(box_index + plan.column_count).min(boxes.len())];
         let row_left = content_rect
             .x
             .saturating_add(viewport_width.saturating_sub(*row_width) / 2);
@@ -752,11 +794,165 @@ pub(crate) fn mermaid_pack_er_box_rects(
             box_index += 1;
         }
         row_top = row_top
-            .saturating_add(row_heights[row_index])
+            .saturating_add(plan.row_heights[row_index])
             .saturating_add(gap_y);
     }
 
     rects
+}
+
+pub(crate) fn mermaid_er_box_sizes(
+    boxes: &[MermaidErPackedBox],
+    view_state: MermaidViewState,
+) -> Vec<MermaidErBoxSize> {
+    boxes
+        .iter()
+        .map(|er_box| {
+            let (inner_width, inner_height, type_col_width) =
+                mermaid_er_box_inner_size(er_box, view_state);
+            MermaidErBoxSize {
+                outer_width: inner_width.saturating_add(2),
+                outer_height: inner_height.saturating_add(2),
+                type_col_width,
+            }
+        })
+        .collect()
+}
+
+fn mermaid_er_pack_row_metrics(
+    specs: &[MermaidErBoxSize],
+    row_start: usize,
+    column_count: usize,
+    gap_x: u16,
+) -> (u16, u16, usize) {
+    let row = &specs[row_start..(row_start + column_count).min(specs.len())];
+    let row_width = row
+        .iter()
+        .map(|spec| spec.outer_width)
+        .sum::<u16>()
+        .saturating_add(gap_x.saturating_mul(row.len().saturating_sub(1) as u16));
+    let row_height = row.iter().map(|spec| spec.outer_height).max().unwrap_or(0);
+    (row_width, row_height, row.len())
+}
+
+fn mermaid_try_er_pack_plan(
+    specs: &[MermaidErBoxSize],
+    column_count: usize,
+    viewport_width: u16,
+    viewport_height: u16,
+    gap_x: u16,
+    gap_y: u16,
+) -> Option<(MermaidErPackPlan, u16)> {
+    let mut row_widths = Vec::new();
+    let mut row_heights = Vec::new();
+    let mut row_start = 0usize;
+    while row_start < specs.len() {
+        let (row_width, row_height, row_len) =
+            mermaid_er_pack_row_metrics(specs, row_start, column_count, gap_x);
+        if row_width > viewport_width || row_height > viewport_height {
+            return None;
+        }
+        row_widths.push(row_width);
+        row_heights.push(row_height);
+        row_start += column_count;
+        debug_assert!(row_len > 0);
+    }
+    if row_widths.is_empty() {
+        return None;
+    }
+
+    let cluster_width = row_widths.iter().copied().max().unwrap_or(0);
+    let cluster_height = mermaid_er_pack_cluster_height(&row_heights, gap_y);
+    (cluster_width <= viewport_width && cluster_height <= viewport_height).then_some((
+        MermaidErPackPlan {
+            column_count,
+            row_widths,
+            row_heights,
+            cluster_height,
+        },
+        cluster_width,
+    ))
+}
+
+fn mermaid_er_pack_cluster_height(row_heights: &[u16], gap_y: u16) -> u16 {
+    row_heights
+        .iter()
+        .copied()
+        .sum::<u16>()
+        .saturating_add(gap_y.saturating_mul(row_heights.len().saturating_sub(1) as u16))
+}
+
+fn mermaid_er_pack_score(
+    cluster_width: u16,
+    cluster_height: u16,
+    viewport_width: u16,
+    viewport_height: u16,
+) -> f32 {
+    let target_aspect = viewport_width as f32 / viewport_height as f32;
+    let width_util = cluster_width as f32 / viewport_width as f32;
+    let height_util = cluster_height as f32 / viewport_height as f32;
+    let area_util = width_util * height_util;
+    let aspect = cluster_width as f32 / cluster_height.max(1) as f32;
+    let aspect_penalty = (aspect - target_aspect).abs();
+    width_util.min(height_util) * 1000.0 + area_util * 400.0 - aspect_penalty * 40.0
+}
+
+fn mermaid_er_fallback_pack_plan(
+    specs: &[MermaidErBoxSize],
+    viewport_height: u16,
+    gap_y: u16,
+) -> MermaidErPackPlan {
+    let row_widths = specs
+        .iter()
+        .map(|spec| spec.outer_width)
+        .collect::<Vec<_>>();
+    let row_heights = specs
+        .iter()
+        .map(|spec| spec.outer_height)
+        .collect::<Vec<_>>();
+    let cluster_height = mermaid_er_pack_cluster_height(&row_heights, gap_y).min(viewport_height);
+    MermaidErPackPlan {
+        column_count: 1,
+        row_widths,
+        row_heights,
+        cluster_height,
+    }
+}
+
+pub(crate) fn mermaid_plan_er_box_packing(
+    specs: &[MermaidErBoxSize],
+    viewport_width: u16,
+    viewport_height: u16,
+    gap_x: u16,
+    gap_y: u16,
+) -> MermaidErPackPlan {
+    let mut best_layout = None::<(MermaidErPackPlan, f32)>;
+    for column_count in 1..=specs.len() {
+        let Some((plan, cluster_width)) = mermaid_try_er_pack_plan(
+            specs,
+            column_count,
+            viewport_width,
+            viewport_height,
+            gap_x,
+            gap_y,
+        ) else {
+            continue;
+        };
+        let score = mermaid_er_pack_score(
+            cluster_width,
+            plan.cluster_height,
+            viewport_width,
+            viewport_height,
+        );
+        match best_layout {
+            Some((_, best_score)) if best_score >= score => {}
+            _ => best_layout = Some((plan, score)),
+        }
+    }
+
+    best_layout
+        .map(|(plan, _)| plan)
+        .unwrap_or_else(|| mermaid_er_fallback_pack_plan(specs, viewport_height, gap_y))
 }
 
 pub(crate) fn mermaid_project_er_packed_lines(
