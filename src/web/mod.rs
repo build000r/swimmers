@@ -1,4 +1,3 @@
-use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
@@ -27,56 +26,13 @@ use crate::session::actor::{
 use crate::session::supervisor::LifecycleEvent;
 use crate::types::{clamp_terminal_resize, opcodes, ControlEvent, SessionSummary};
 
-const APP_JS_ROUTE: &str = "/app.js";
-const API_CLIENT_JS_ROUTE: &str = "/api_client.js";
-const SESSION_PERSISTENCE_JS_ROUTE: &str = "/session_persistence.js";
-const APP_EVENT_BINDINGS_JS_ROUTE: &str = "/app_event_bindings.js";
-const TROGDOR_EVENT_BINDINGS_JS_ROUTE: &str = "/trogdor_event_bindings.js";
-const RENDERED_SURFACE_JS_ROUTE: &str = "/rendered_surface.js";
-const RENDERED_SURFACE_DRAW_JS_ROUTE: &str = "/rendered_surface_draw.js";
-const INPUT_SUPPORT_JS_ROUTE: &str = "/input_support.js";
-const SURFACE_ACTION_PLANS_JS_ROUTE: &str = "/surface_action_plans.js";
-const SEND_SHEET_JS_ROUTE: &str = "/send_sheet.js";
-const SEND_CONTROLLER_JS_ROUTE: &str = "/send_controller.js";
-const THOUGHT_CONFIG_SHEET_JS_ROUTE: &str = "/thought_config_sheet.js";
-const NATIVE_DESKTOP_SHEET_JS_ROUTE: &str = "/native_desktop_sheet.js";
-const TERMINAL_SURFACE_SETUP_JS_ROUTE: &str = "/terminal_surface_setup.js";
-const TERMINAL_ZOOM_INPUT_JS_ROUTE: &str = "/terminal_zoom_input.js";
-const TERMINAL_RESIZE_JS_ROUTE: &str = "/terminal_resize.js";
-const GLOBAL_SHORTCUT_DISPATCH_JS_ROUTE: &str = "/global_shortcut_dispatch.js";
-const SESSION_REFRESH_JS_ROUTE: &str = "/session_refresh.js";
-const AGENT_CONTEXT_REFRESH_JS_ROUTE: &str = "/agent_context_refresh.js";
-const MERMAID_ARTIFACT_JS_ROUTE: &str = "/mermaid_artifact.js";
-const MERMAID_ARTIFACT_CONTROLLER_JS_ROUTE: &str = "/mermaid_artifact_controller.js";
-const TERMINAL_SAFETY_JS_ROUTE: &str = "/terminal_safety.js";
-const TERMINAL_SEARCH_LINKS_JS_ROUTE: &str = "/terminal_search_links.js";
-const TERMINAL_STATUS_JS_ROUTE: &str = "/terminal_status.js";
-const TERMINAL_PROTOCOL_JS_ROUTE: &str = "/terminal_protocol.js";
-const SESSION_SOCKET_CONTROLLER_JS_ROUTE: &str = "/session_socket_controller.js";
-const DIR_BROWSER_JS_ROUTE: &str = "/dir_browser.js";
-const DIR_BROWSER_CONTROLLER_JS_ROUTE: &str = "/dir_browser_controller.js";
-const COMMAND_PALETTE_JS_ROUTE: &str = "/command_palette.js";
-const COMMAND_PALETTE_CONTROLLER_JS_ROUTE: &str = "/command_palette_controller.js";
-const TROGDOR_LOGIC_JS_ROUTE: &str = "/trogdor_logic.js";
-const TROGDOR_DOM_LOGIC_JS_ROUTE: &str = "/trogdor_dom_logic.js";
-const TROGDOR_RENDER_JS_ROUTE: &str = "/trogdor_render.js";
-const WORKBENCH_DOM_JS_ROUTE: &str = "/workbench_dom.js";
-const WORKBENCH_RENDER_JS_ROUTE: &str = "/workbench_render.js";
-const WORKBENCH_LOG_LENS_JS_ROUTE: &str = "/workbench_log_lens.js";
-const WORKBENCH_REFRESH_JS_ROUTE: &str = "/workbench_refresh.js";
-const WORKBENCH_RECORDS_JS_ROUTE: &str = "/workbench_records.js";
-const TERMINAL_WORKBENCH_CONTROLLER_JS_ROUTE: &str = "/terminal_workbench_controller.js";
-const APP_CSS_ROUTE: &str = "/app.css";
-const FRANKENTERM_JS_ROUTE: &str = "/assets/frankenterm/FrankenTerm.js";
-const FRANKENTERM_WASM_ROUTE: &str = "/assets/frankenterm/FrankenTerm_bg.wasm";
-const FRANKENTERM_FONT_ROUTE: &str = "/assets/frankenterm/pragmasevka-nf-subset.woff2";
-const TROGDOR_DRAGON_ASSET_ROUTE: &str = "/assets/dragon/{pose}/{frame}";
+mod assets;
+
 const PUBLISHED_VIEW_ROUTE: &str = "/selected";
 const REPLY_TIMEOUT: Duration = Duration::from_secs(2);
 const WS_AUTH_TIMEOUT: Duration = Duration::from_secs(5);
 const MAX_WS_INPUT_BYTES: usize = 786_432;
 const MAX_BROWSER_WS_CONNECTIONS: usize = 64;
-const DEFAULT_FRANKENTUI_PKG_CANDIDATES: &[&str] = &[];
 
 static NEXT_WS_CLIENT_ID: AtomicU64 = AtomicU64::new(1);
 static ACTIVE_WS_CONNECTIONS: AtomicUsize = AtomicUsize::new(0);
@@ -107,83 +63,7 @@ pub fn routes() -> Router<Arc<AppState>> {
     Router::new()
         .route("/", get(index))
         .route(PUBLISHED_VIEW_ROUTE, get(selected_index))
-        .route(APP_JS_ROUTE, get(app_js))
-        .route(API_CLIENT_JS_ROUTE, get(api_client_js))
-        .route(SESSION_PERSISTENCE_JS_ROUTE, get(session_persistence_js))
-        .route(APP_EVENT_BINDINGS_JS_ROUTE, get(app_event_bindings_js))
-        .route(
-            TROGDOR_EVENT_BINDINGS_JS_ROUTE,
-            get(trogdor_event_bindings_js),
-        )
-        .route(RENDERED_SURFACE_JS_ROUTE, get(rendered_surface_js))
-        .route(
-            RENDERED_SURFACE_DRAW_JS_ROUTE,
-            get(rendered_surface_draw_js),
-        )
-        .route(INPUT_SUPPORT_JS_ROUTE, get(input_support_js))
-        .route(SURFACE_ACTION_PLANS_JS_ROUTE, get(surface_action_plans_js))
-        .route(SEND_SHEET_JS_ROUTE, get(send_sheet_js))
-        .route(SEND_CONTROLLER_JS_ROUTE, get(send_controller_js))
-        .route(THOUGHT_CONFIG_SHEET_JS_ROUTE, get(thought_config_sheet_js))
-        .route(NATIVE_DESKTOP_SHEET_JS_ROUTE, get(native_desktop_sheet_js))
-        .route(
-            TERMINAL_SURFACE_SETUP_JS_ROUTE,
-            get(terminal_surface_setup_js),
-        )
-        .route(TERMINAL_ZOOM_INPUT_JS_ROUTE, get(terminal_zoom_input_js))
-        .route(TERMINAL_RESIZE_JS_ROUTE, get(terminal_resize_js))
-        .route(
-            GLOBAL_SHORTCUT_DISPATCH_JS_ROUTE,
-            get(global_shortcut_dispatch_js),
-        )
-        .route(SESSION_REFRESH_JS_ROUTE, get(session_refresh_js))
-        .route(
-            AGENT_CONTEXT_REFRESH_JS_ROUTE,
-            get(agent_context_refresh_js),
-        )
-        .route(MERMAID_ARTIFACT_JS_ROUTE, get(mermaid_artifact_js))
-        .route(
-            MERMAID_ARTIFACT_CONTROLLER_JS_ROUTE,
-            get(mermaid_artifact_controller_js),
-        )
-        .route(TERMINAL_SAFETY_JS_ROUTE, get(terminal_safety_js))
-        .route(
-            TERMINAL_SEARCH_LINKS_JS_ROUTE,
-            get(terminal_search_links_js),
-        )
-        .route(TERMINAL_STATUS_JS_ROUTE, get(terminal_status_js))
-        .route(TERMINAL_PROTOCOL_JS_ROUTE, get(terminal_protocol_js))
-        .route(
-            SESSION_SOCKET_CONTROLLER_JS_ROUTE,
-            get(session_socket_controller_js),
-        )
-        .route(DIR_BROWSER_JS_ROUTE, get(dir_browser_js))
-        .route(
-            DIR_BROWSER_CONTROLLER_JS_ROUTE,
-            get(dir_browser_controller_js),
-        )
-        .route(COMMAND_PALETTE_JS_ROUTE, get(command_palette_js))
-        .route(
-            COMMAND_PALETTE_CONTROLLER_JS_ROUTE,
-            get(command_palette_controller_js),
-        )
-        .route(TROGDOR_LOGIC_JS_ROUTE, get(trogdor_logic_js))
-        .route(TROGDOR_DOM_LOGIC_JS_ROUTE, get(trogdor_dom_logic_js))
-        .route(TROGDOR_RENDER_JS_ROUTE, get(trogdor_render_js))
-        .route(WORKBENCH_DOM_JS_ROUTE, get(workbench_dom_js))
-        .route(WORKBENCH_RENDER_JS_ROUTE, get(workbench_render_js))
-        .route(WORKBENCH_LOG_LENS_JS_ROUTE, get(workbench_log_lens_js))
-        .route(WORKBENCH_REFRESH_JS_ROUTE, get(workbench_refresh_js))
-        .route(WORKBENCH_RECORDS_JS_ROUTE, get(workbench_records_js))
-        .route(
-            TERMINAL_WORKBENCH_CONTROLLER_JS_ROUTE,
-            get(terminal_workbench_controller_js),
-        )
-        .route(APP_CSS_ROUTE, get(app_css))
-        .route(FRANKENTERM_JS_ROUTE, get(franken_term_js))
-        .route(FRANKENTERM_WASM_ROUTE, get(franken_term_wasm))
-        .route(FRANKENTERM_FONT_ROUTE, get(franken_term_font))
-        .route(TROGDOR_DRAGON_ASSET_ROUTE, get(trogdor_dragon_asset))
+        .merge(assets::routes())
         .route("/ws/sessions/{session_id}", get(session_ws))
 }
 
@@ -193,23 +73,9 @@ struct BootPayload {
     franken_term_js_url: &'static str,
     franken_term_wasm_url: &'static str,
     franken_term_font_url: &'static str,
-    franken_term_asset_info: Option<FrankenTermAssetInfo>,
+    franken_term_asset_info: Option<assets::FrankenTermAssetInfo>,
     follow_published_selection: bool,
     focus_layout: bool,
-}
-
-#[derive(Debug, Serialize)]
-struct FrankenTermAssetInfo {
-    js: FrankenTermAssetFileInfo,
-    wasm: FrankenTermAssetFileInfo,
-    font: Option<FrankenTermAssetFileInfo>,
-}
-
-#[derive(Debug, Serialize)]
-struct FrankenTermAssetFileInfo {
-    route: &'static str,
-    size_bytes: u64,
-    checksum: String,
 }
 
 async fn index() -> impl IntoResponse {
@@ -222,11 +88,11 @@ async fn selected_index() -> impl IntoResponse {
 
 async fn render_index(focus_layout: bool) -> impl IntoResponse {
     let boot = BootPayload {
-        franken_term_available: resolve_frankentui_pkg_dir().is_some(),
-        franken_term_js_url: FRANKENTERM_JS_ROUTE,
-        franken_term_wasm_url: FRANKENTERM_WASM_ROUTE,
-        franken_term_font_url: FRANKENTERM_FONT_ROUTE,
-        franken_term_asset_info: franken_term_asset_info().await,
+        franken_term_available: assets::resolve_frankentui_pkg_dir().is_some(),
+        franken_term_js_url: assets::FRANKENTERM_JS_ROUTE,
+        franken_term_wasm_url: assets::FRANKENTERM_WASM_ROUTE,
+        franken_term_font_url: assets::FRANKENTERM_FONT_ROUTE,
+        franken_term_asset_info: assets::franken_term_asset_info().await,
         follow_published_selection: focus_layout,
         focus_layout,
     };
@@ -236,6 +102,9 @@ async fn render_index(focus_layout: bool) -> impl IntoResponse {
     } else {
         "app-body"
     };
+    let app_css_route = assets::APP_CSS_ROUTE;
+    let app_js_route = assets::APP_JS_ROUTE;
+    let franken_term_font_route = assets::FRANKENTERM_FONT_ROUTE;
 
     let html = format!(
         r#"<!doctype html>
@@ -244,8 +113,8 @@ async fn render_index(focus_layout: bool) -> impl IntoResponse {
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>swimmers</title>
-    <link rel="preload" href="{FRANKENTERM_FONT_ROUTE}" as="font" type="font/woff2" crossorigin />
-    <link rel="stylesheet" href="{APP_CSS_ROUTE}" />
+    <link rel="preload" href="{franken_term_font_route}" as="font" type="font/woff2" crossorigin />
+    <link rel="stylesheet" href="{app_css_route}" />
   </head>
   <body class="{body_class}">
     <div class="shell">
@@ -626,586 +495,12 @@ async fn render_index(focus_layout: bool) -> impl IntoResponse {
     </div>
 
     <script>window.__SWIMMERS_BOOT__ = {boot_json};</script>
-    <script type="module" src="{APP_JS_ROUTE}"></script>
+    <script type="module" src="{app_js_route}"></script>
   </body>
 </html>"#
     );
 
     ([(header::CACHE_CONTROL, "no-store")], Html(html))
-}
-
-/// In debug builds, serve a web asset from its on-disk source so CSS/JS edits
-/// show up on a plain browser refresh (no rebuild). Falls back to the baked-in
-/// copy if the file can't be read. Release builds always use the embedded copy,
-/// at zero cost. `relative` is the path from the crate root (where Cargo.toml
-/// lives); `baked` is the matching `include_str!` constant. Note: the page HTML
-/// is templated in Rust, so markup changes in this file still need a rebuild.
-#[cfg(debug_assertions)]
-fn dev_asset(relative: &str, baked: &'static str) -> String {
-    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(relative);
-    std::fs::read_to_string(&path).unwrap_or_else(|_| baked.to_string())
-}
-
-#[cfg(not(debug_assertions))]
-fn dev_asset(_relative: &str, baked: &'static str) -> &'static str {
-    baked
-}
-
-struct CssAssetPart {
-    relative: &'static str,
-    baked: &'static str,
-}
-
-const APP_CSS_PARTS: &[CssAssetPart] = &[
-    CssAssetPart {
-        relative: "src/web/app.css",
-        baked: include_str!("app.css"),
-    },
-    CssAssetPart {
-        relative: "src/web/app_trogdor.css",
-        baked: include_str!("app_trogdor.css"),
-    },
-    CssAssetPart {
-        relative: "src/web/app_sheets.css",
-        baked: include_str!("app_sheets.css"),
-    },
-    CssAssetPart {
-        relative: "src/web/app_create_console.css",
-        baked: include_str!("app_create_console.css"),
-    },
-    CssAssetPart {
-        relative: "src/web/app_sheet_results.css",
-        baked: include_str!("app_sheet_results.css"),
-    },
-    CssAssetPart {
-        relative: "src/web/app_mobile.css",
-        baked: include_str!("app_mobile.css"),
-    },
-    CssAssetPart {
-        relative: "src/web/app_reduced_motion.css",
-        baked: include_str!("app_reduced_motion.css"),
-    },
-    CssAssetPart {
-        relative: "src/web/app_scrollbar.css",
-        baked: include_str!("app_scrollbar.css"),
-    },
-];
-
-fn app_css_body() -> String {
-    let mut body = String::new();
-    for part in APP_CSS_PARTS {
-        let chunk = dev_asset(part.relative, part.baked);
-        body.push_str(chunk.as_ref());
-    }
-    body
-}
-
-fn javascript_asset(relative: &str, baked: &'static str) -> Response {
-    (
-        [
-            (
-                header::CONTENT_TYPE,
-                "application/javascript; charset=utf-8",
-            ),
-            (header::CACHE_CONTROL, "no-store"),
-        ],
-        dev_asset(relative, baked),
-    )
-        .into_response()
-}
-
-async fn app_js() -> Response {
-    javascript_asset("src/web/app.js", include_str!("app.js"))
-}
-
-async fn api_client_js() -> Response {
-    javascript_asset("src/web/api_client.js", include_str!("api_client.js"))
-}
-
-async fn session_persistence_js() -> Response {
-    javascript_asset(
-        "src/web/session_persistence.js",
-        include_str!("session_persistence.js"),
-    )
-}
-
-async fn app_event_bindings_js() -> Response {
-    javascript_asset(
-        "src/web/app_event_bindings.js",
-        include_str!("app_event_bindings.js"),
-    )
-}
-
-async fn trogdor_event_bindings_js() -> Response {
-    javascript_asset(
-        "src/web/trogdor_event_bindings.js",
-        include_str!("trogdor_event_bindings.js"),
-    )
-}
-
-async fn rendered_surface_js() -> Response {
-    javascript_asset(
-        "src/web/rendered_surface.js",
-        include_str!("rendered_surface.js"),
-    )
-}
-
-async fn rendered_surface_draw_js() -> Response {
-    javascript_asset(
-        "src/web/rendered_surface_draw.js",
-        include_str!("rendered_surface_draw.js"),
-    )
-}
-
-async fn input_support_js() -> Response {
-    javascript_asset("src/web/input_support.js", include_str!("input_support.js"))
-}
-
-async fn surface_action_plans_js() -> Response {
-    javascript_asset(
-        "src/web/surface_action_plans.js",
-        include_str!("surface_action_plans.js"),
-    )
-}
-
-async fn send_sheet_js() -> Response {
-    javascript_asset("src/web/send_sheet.js", include_str!("send_sheet.js"))
-}
-
-async fn send_controller_js() -> Response {
-    javascript_asset(
-        "src/web/send_controller.js",
-        include_str!("send_controller.js"),
-    )
-}
-
-async fn thought_config_sheet_js() -> Response {
-    javascript_asset(
-        "src/web/thought_config_sheet.js",
-        include_str!("thought_config_sheet.js"),
-    )
-}
-
-async fn native_desktop_sheet_js() -> Response {
-    javascript_asset(
-        "src/web/native_desktop_sheet.js",
-        include_str!("native_desktop_sheet.js"),
-    )
-}
-
-async fn terminal_surface_setup_js() -> Response {
-    javascript_asset(
-        "src/web/terminal_surface_setup.js",
-        include_str!("terminal_surface_setup.js"),
-    )
-}
-
-async fn terminal_zoom_input_js() -> Response {
-    javascript_asset(
-        "src/web/terminal_zoom_input.js",
-        include_str!("terminal_zoom_input.js"),
-    )
-}
-
-async fn terminal_resize_js() -> Response {
-    javascript_asset(
-        "src/web/terminal_resize.js",
-        include_str!("terminal_resize.js"),
-    )
-}
-
-async fn global_shortcut_dispatch_js() -> Response {
-    javascript_asset(
-        "src/web/global_shortcut_dispatch.js",
-        include_str!("global_shortcut_dispatch.js"),
-    )
-}
-
-async fn session_refresh_js() -> Response {
-    javascript_asset(
-        "src/web/session_refresh.js",
-        include_str!("session_refresh.js"),
-    )
-}
-
-async fn agent_context_refresh_js() -> Response {
-    javascript_asset(
-        "src/web/agent_context_refresh.js",
-        include_str!("agent_context_refresh.js"),
-    )
-}
-
-async fn mermaid_artifact_js() -> Response {
-    javascript_asset(
-        "src/web/mermaid_artifact.js",
-        include_str!("mermaid_artifact.js"),
-    )
-}
-
-async fn mermaid_artifact_controller_js() -> Response {
-    javascript_asset(
-        "src/web/mermaid_artifact_controller.js",
-        include_str!("mermaid_artifact_controller.js"),
-    )
-}
-
-async fn terminal_safety_js() -> Response {
-    javascript_asset(
-        "src/web/terminal_safety.js",
-        include_str!("terminal_safety.js"),
-    )
-}
-
-async fn terminal_search_links_js() -> Response {
-    javascript_asset(
-        "src/web/terminal_search_links.js",
-        include_str!("terminal_search_links.js"),
-    )
-}
-
-async fn terminal_status_js() -> Response {
-    javascript_asset(
-        "src/web/terminal_status.js",
-        include_str!("terminal_status.js"),
-    )
-}
-
-async fn terminal_protocol_js() -> Response {
-    javascript_asset(
-        "src/web/terminal_protocol.js",
-        include_str!("terminal_protocol.js"),
-    )
-}
-
-async fn session_socket_controller_js() -> Response {
-    javascript_asset(
-        "src/web/session_socket_controller.js",
-        include_str!("session_socket_controller.js"),
-    )
-}
-
-async fn dir_browser_js() -> Response {
-    javascript_asset("src/web/dir_browser.js", include_str!("dir_browser.js"))
-}
-
-async fn dir_browser_controller_js() -> Response {
-    javascript_asset(
-        "src/web/dir_browser_controller.js",
-        include_str!("dir_browser_controller.js"),
-    )
-}
-
-async fn command_palette_js() -> Response {
-    javascript_asset(
-        "src/web/command_palette.js",
-        include_str!("command_palette.js"),
-    )
-}
-
-async fn command_palette_controller_js() -> Response {
-    javascript_asset(
-        "src/web/command_palette_controller.js",
-        include_str!("command_palette_controller.js"),
-    )
-}
-
-async fn trogdor_logic_js() -> Response {
-    javascript_asset("src/web/trogdor_logic.js", include_str!("trogdor_logic.js"))
-}
-
-async fn trogdor_dom_logic_js() -> Response {
-    javascript_asset(
-        "src/web/trogdor_dom_logic.js",
-        include_str!("trogdor_dom_logic.js"),
-    )
-}
-
-async fn trogdor_render_js() -> Response {
-    javascript_asset(
-        "src/web/trogdor_render.js",
-        include_str!("trogdor_render.js"),
-    )
-}
-
-async fn workbench_dom_js() -> Response {
-    javascript_asset("src/web/workbench_dom.js", include_str!("workbench_dom.js"))
-}
-
-async fn workbench_render_js() -> Response {
-    javascript_asset(
-        "src/web/workbench_render.js",
-        include_str!("workbench_render.js"),
-    )
-}
-
-async fn workbench_log_lens_js() -> Response {
-    javascript_asset(
-        "src/web/workbench_log_lens.js",
-        include_str!("workbench_log_lens.js"),
-    )
-}
-
-async fn workbench_refresh_js() -> Response {
-    javascript_asset(
-        "src/web/workbench_refresh.js",
-        include_str!("workbench_refresh.js"),
-    )
-}
-
-async fn workbench_records_js() -> Response {
-    javascript_asset(
-        "src/web/workbench_records.js",
-        include_str!("workbench_records.js"),
-    )
-}
-
-async fn terminal_workbench_controller_js() -> Response {
-    javascript_asset(
-        "src/web/terminal_workbench_controller.js",
-        include_str!("terminal_workbench_controller.js"),
-    )
-}
-
-async fn app_css() -> impl IntoResponse {
-    (
-        [
-            (header::CONTENT_TYPE, "text/css; charset=utf-8"),
-            (header::CACHE_CONTROL, "no-store"),
-        ],
-        app_css_body(),
-    )
-}
-
-async fn trogdor_dragon_asset(AxumPath((pose, frame)): AxumPath<(String, String)>) -> Response {
-    let Some(bytes) = trogdor_dragon_asset_bytes(&pose, &frame) else {
-        return json_error(
-            StatusCode::NOT_FOUND,
-            "TROGDOR_DRAGON_ASSET_NOT_FOUND",
-            "The requested Trogdor dragon sprite frame is not available",
-        );
-    };
-
-    (
-        [
-            (header::CONTENT_TYPE, "image/png"),
-            (header::CACHE_CONTROL, "public, max-age=31536000, immutable"),
-        ],
-        bytes,
-    )
-        .into_response()
-}
-
-fn trogdor_dragon_asset_bytes(pose: &str, frame: &str) -> Option<&'static [u8]> {
-    // All eight body frames (8-way directional) shipped for every pose. Names
-    // match the on-disk filenames: cardinal directions plus 3/4 views.
-    macro_rules! frames_for {
-        ($pose:literal) => {
-            match frame {
-                "left.png" => {
-                    Some(&include_bytes!(concat!("../../assets/dragon/", $pose, "/left.png"))[..])
-                }
-                "right.png" => {
-                    Some(&include_bytes!(concat!("../../assets/dragon/", $pose, "/right.png"))[..])
-                }
-                "front.png" => {
-                    Some(&include_bytes!(concat!("../../assets/dragon/", $pose, "/front.png"))[..])
-                }
-                "back.png" => {
-                    Some(&include_bytes!(concat!("../../assets/dragon/", $pose, "/back.png"))[..])
-                }
-                "3q-left.png" => Some(
-                    &include_bytes!(concat!("../../assets/dragon/", $pose, "/3q-left.png"))[..],
-                ),
-                "3q-right.png" => Some(
-                    &include_bytes!(concat!("../../assets/dragon/", $pose, "/3q-right.png"))[..],
-                ),
-                "back-left.png" => Some(
-                    &include_bytes!(concat!("../../assets/dragon/", $pose, "/back-left.png"))[..],
-                ),
-                "back-right.png" => Some(
-                    &include_bytes!(concat!("../../assets/dragon/", $pose, "/back-right.png"))[..],
-                ),
-                _ => None,
-            }
-        };
-    }
-    match pose {
-        "mouth-closed" => frames_for!("mouth-closed"),
-        "mouth-open" => frames_for!("mouth-open"),
-        "fire-left-short" => frames_for!("fire-left-short"),
-        "fire-left-mid" => frames_for!("fire-left-mid"),
-        "fire-left-full" => frames_for!("fire-left-full"),
-        "fire-right-short" => frames_for!("fire-right-short"),
-        "fire-right-mid" => frames_for!("fire-right-mid"),
-        "fire-right-full" => frames_for!("fire-right-full"),
-        _ => None,
-    }
-}
-
-async fn franken_term_js() -> Response {
-    serve_frankentui_asset("FrankenTerm.js", "application/javascript; charset=utf-8").await
-}
-
-async fn franken_term_wasm() -> Response {
-    serve_frankentui_asset("FrankenTerm_bg.wasm", "application/wasm").await
-}
-
-async fn franken_term_font() -> Response {
-    serve_franken_term_font(franken_term_font_path(resolve_frankentui_pkg_dir())).await
-}
-
-#[derive(Debug)]
-enum FrankenTermFontPath {
-    Available(PathBuf),
-    AssetsUnavailable,
-    RootUnavailable,
-}
-
-fn franken_term_font_path(pkg_dir: Option<PathBuf>) -> FrankenTermFontPath {
-    let Some(pkg_dir) = pkg_dir else {
-        return FrankenTermFontPath::AssetsUnavailable;
-    };
-
-    let Some(root_dir) = pkg_dir.parent() else {
-        return FrankenTermFontPath::RootUnavailable;
-    };
-
-    FrankenTermFontPath::Available(root_dir.join("fonts").join("pragmasevka-nf-subset.woff2"))
-}
-
-async fn serve_franken_term_font(font_path: FrankenTermFontPath) -> Response {
-    let FrankenTermFontPath::Available(path) = font_path else {
-        return franken_term_font_path_error(font_path);
-    };
-
-    match tokio::fs::read(&path).await {
-        Ok(bytes) => (
-            [
-                (header::CONTENT_TYPE, "font/woff2"),
-                (header::CACHE_CONTROL, "no-store"),
-            ],
-            bytes,
-        )
-            .into_response(),
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => json_error(
-            StatusCode::NOT_FOUND,
-            "FRANKENTERM_FONT_UNAVAILABLE",
-            &format!("font asset was not found in {}", path.display()),
-        ),
-        Err(err) => json_error(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "FRANKENTERM_FONT_READ_FAILED",
-            &format!("failed to read font asset: {err}"),
-        ),
-    }
-}
-
-fn franken_term_font_path_error(font_path: FrankenTermFontPath) -> Response {
-    match font_path {
-        FrankenTermFontPath::AssetsUnavailable => json_error(
-            StatusCode::NOT_FOUND,
-            "FRANKENTERM_ASSET_UNAVAILABLE",
-            "FrankenTerm package assets are not available on this host",
-        ),
-        FrankenTermFontPath::RootUnavailable => json_error(
-            StatusCode::NOT_FOUND,
-            "FRANKENTERM_FONT_UNAVAILABLE",
-            "FrankenTerm root directory could not be resolved",
-        ),
-        FrankenTermFontPath::Available(_) => unreachable!("available font paths are served first"),
-    }
-}
-
-async fn serve_frankentui_asset(file_name: &str, content_type: &'static str) -> Response {
-    let Some(pkg_dir) = resolve_frankentui_pkg_dir() else {
-        return frankentui_asset_unavailable_response();
-    };
-
-    read_frankentui_asset_response(file_name, content_type, &pkg_dir).await
-}
-
-async fn read_frankentui_asset_response(
-    file_name: &str,
-    content_type: &'static str,
-    pkg_dir: &Path,
-) -> Response {
-    let path = pkg_dir.join(file_name);
-    match tokio::fs::read(&path).await {
-        Ok(bytes) => frankentui_asset_response(content_type, bytes),
-        Err(err) => frankentui_asset_read_error_response(file_name, pkg_dir, err),
-    }
-}
-
-fn frankentui_asset_unavailable_response() -> Response {
-    json_error(
-        StatusCode::NOT_FOUND,
-        "FRANKENTERM_ASSET_UNAVAILABLE",
-        "FrankenTerm package assets are not available on this host",
-    )
-}
-
-fn frankentui_asset_response(content_type: &'static str, bytes: Vec<u8>) -> Response {
-    (
-        [
-            (header::CONTENT_TYPE, content_type),
-            (header::CACHE_CONTROL, "no-store"),
-        ],
-        bytes,
-    )
-        .into_response()
-}
-
-fn frankentui_asset_read_error_response(
-    file_name: &str,
-    pkg_dir: &Path,
-    err: std::io::Error,
-) -> Response {
-    match err.kind() {
-        std::io::ErrorKind::NotFound => json_error(
-            StatusCode::NOT_FOUND,
-            "FRANKENTERM_ASSET_MISSING",
-            &format!("{file_name} was not found in {}", pkg_dir.display()),
-        ),
-        _ => json_error(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "FRANKENTERM_ASSET_READ_FAILED",
-            &format!("failed to read {file_name}: {err}"),
-        ),
-    }
-}
-
-async fn franken_term_asset_info() -> Option<FrankenTermAssetInfo> {
-    let pkg_dir = resolve_frankentui_pkg_dir()?;
-    let js_path = pkg_dir.join("FrankenTerm.js");
-    let wasm_path = pkg_dir.join("FrankenTerm_bg.wasm");
-    let js = franken_term_asset_file_info(&js_path, FRANKENTERM_JS_ROUTE).await?;
-    let wasm = franken_term_asset_file_info(&wasm_path, FRANKENTERM_WASM_ROUTE).await?;
-    let font = pkg_dir
-        .parent()
-        .map(|root| root.join("fonts").join("pragmasevka-nf-subset.woff2"))
-        .and_then(|path| {
-            std::fs::metadata(&path)
-                .ok()
-                .filter(|meta| meta.is_file())
-                .map(|_| path)
-        });
-    let font = match font {
-        Some(path) => franken_term_asset_file_info(&path, FRANKENTERM_FONT_ROUTE).await,
-        None => None,
-    };
-    Some(FrankenTermAssetInfo { js, wasm, font })
-}
-
-async fn franken_term_asset_file_info(
-    path: &Path,
-    route: &'static str,
-) -> Option<FrankenTermAssetFileInfo> {
-    let bytes = tokio::fs::read(path).await.ok()?;
-    Some(FrankenTermAssetFileInfo {
-        route,
-        size_bytes: bytes.len() as u64,
-        checksum: format!("crc32:{:08x}", crc32fast::hash(&bytes)),
-    })
 }
 
 #[derive(Debug, Deserialize)]
@@ -2511,39 +1806,18 @@ fn bearer_tokens_eq(provided: &str, expected: &str) -> bool {
     provided.as_bytes().ct_eq(expected.as_bytes()).into()
 }
 
-fn resolve_frankentui_pkg_dir() -> Option<PathBuf> {
-    for key in ["SWIMMERS_FRANKENTUI_PKG_DIR", "FRANKENTUI_PKG_DIR"] {
-        if let Some(path) = std::env::var(key)
-            .ok()
-            .filter(|value| !value.trim().is_empty())
-        {
-            let candidate = PathBuf::from(path);
-            if valid_frankentui_pkg_dir(&candidate) {
-                return Some(candidate);
-            }
-        }
-    }
-
-    DEFAULT_FRANKENTUI_PKG_CANDIDATES
-        .iter()
-        .map(PathBuf::from)
-        .find(|candidate| valid_frankentui_pkg_dir(candidate))
-}
-
-fn valid_frankentui_pkg_dir(path: &Path) -> bool {
-    path.join("FrankenTerm.js").is_file() && path.join("FrankenTerm_bg.wasm").is_file()
-}
-
 fn json_error(status: StatusCode, code: &str, message: &str) -> Response {
     (status, Json(error_body_msg(code, message))).into_response()
 }
 
 #[cfg(test)]
 mod tests {
+    use super::assets::*;
     use super::*;
     use crate::types::{KnownControlEventPayload, SessionTitlePayload};
     use axum::body::to_bytes;
     use axum::response::IntoResponse;
+    use std::path::PathBuf;
     use tempfile::tempdir;
 
     async fn html_string(response: impl IntoResponse) -> String {
@@ -3676,7 +2950,7 @@ mod tests {
     async fn spawn_session_ws_test_server(
         state: Arc<AppState>,
     ) -> (std::net::SocketAddr, tokio::task::JoinHandle<()>) {
-        let app = routes().with_state(state);
+        let app = super::routes().with_state(state);
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
             .expect("bind ws test server");
