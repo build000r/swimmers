@@ -8,6 +8,7 @@
     "src/web/api_client.test.mjs",
     "src/web/app_behavior.test.mjs",
     "src/web/app_event_bindings.test.mjs",
+    "src/web/auth_sheet_island.test.mjs",
     "src/web/command_palette.test.mjs",
     "src/web/command_palette_controller.test.mjs",
     "src/web/command_palette_island.test.mjs",

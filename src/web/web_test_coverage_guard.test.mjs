@@ -100,6 +100,13 @@ test("focused helper suites keep migration-critical behavior coverage topics", a
       ],
     ],
     [
+      "src/web/auth_sheet_island.test.mjs",
+      [
+        "auth sheet island preserves sheet host and child DOM contract",
+        "auth sheet island mounts, rerenders, and guards stable nodes",
+      ],
+    ],
+    [
       "src/web/command_palette.test.mjs",
       [
         "command palette state helper combines built-in commands, sessions, and scores",
@@ -183,6 +190,26 @@ test("Vite transforms the React shell path that owns React imports", async (t) =
   assert.ok(transformed?.code, "Vite did not transform react_shell.js");
   assert.match(transformed.code, /react/);
   assert.match(transformed.code, /react-dom/);
+});
+
+test("Vite transforms the auth sheet React island path", async (t) => {
+  const appSource = await readRepoFile("src/web/app.js");
+  const source = await readRepoFile("src/web/auth_sheet_island.js");
+  assert.match(appSource, /import\("\.\/auth_sheet_island\.js"\)/);
+  assert.match(source, /from "react"/);
+  assert.match(source, /from "react-dom\/client"/);
+
+  const server = await createServer({
+    configFile: path.join(repoRoot, "vite.config.js"),
+    logLevel: "silent",
+    server: { middlewareMode: true },
+  });
+  t.after(() => server.close());
+
+  const transformed = await server.transformRequest("/src/web/auth_sheet_island.js");
+
+  assert.ok(transformed?.code, "Vite did not transform auth_sheet_island.js");
+  assert.match(transformed.code, /AuthSheet/);
 });
 
 test("Vite transforms the command palette React island path", async (t) => {
