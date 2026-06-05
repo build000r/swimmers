@@ -330,6 +330,7 @@ let authSheetIsland = null;
 let thoughtConfigSheetIsland = null;
 let nativeDesktopSheetIsland = null;
 let createSheetIsland = null;
+let dirBrowserViewIsland = null;
 let mermaidSheetIsland = null;
 let terminalZoomInputController;
 let clearPendingTerminalBytes;
@@ -1219,6 +1220,10 @@ function setDirStatus(message, isError = false) {
   }
 }
 
+function renderDirBrowserReactView(view) {
+  return dirBrowserViewIsland?.render?.(view) === true;
+}
+
 const dirBrowserController = createDirBrowserController({
   state,
   el,
@@ -1239,6 +1244,7 @@ const dirBrowserController = createDirBrowserController({
   ElementClass: Element,
   pathStorageKey: DIR_BROWSER_PATH_KEY,
   managedOnlyStorageKey: DIR_BROWSER_MANAGED_ONLY_KEY,
+  renderDirBrowserView: renderDirBrowserReactView,
 });
 
 const {
@@ -2056,6 +2062,26 @@ async function mountCreateSheetReactIsland() {
   }
 }
 
+async function mountDirBrowserViewReactIsland() {
+  if (!reactRootShellEnabled()) {
+    return null;
+  }
+  if (!el.dirsGroups || !el.dirsList) {
+    return null;
+  }
+  try {
+    const { mountDirBrowserViewIsland } = await import("./dir_browser_view_island.js");
+    return mountDirBrowserViewIsland({
+      dirsGroups: el.dirsGroups,
+      dirsList: el.dirsList,
+      documentRef: document,
+    });
+  } catch (error) {
+    console.warn("[swimmers-web] directory browser React view island mount skipped", error);
+    return null;
+  }
+}
+
 async function mountMermaidSheetReactIsland() {
   if (!reactRootShellEnabled()) {
     return null;
@@ -2084,6 +2110,7 @@ async function init() {
   thoughtConfigSheetIsland = await mountThoughtConfigSheetReactIsland();
   nativeDesktopSheetIsland = await mountNativeDesktopSheetReactIsland();
   createSheetIsland = await mountCreateSheetReactIsland();
+  dirBrowserViewIsland = await mountDirBrowserViewReactIsland();
   mermaidSheetIsland = await mountMermaidSheetReactIsland();
   loadInitialState();
   bindEvents();
@@ -2186,6 +2213,7 @@ export const __swimmersWebTest = {
   mountThoughtConfigSheetReactIsland,
   mountNativeDesktopSheetReactIsland,
   mountCreateSheetReactIsland,
+  mountDirBrowserViewReactIsland,
   mountMermaidSheetReactIsland,
   reactShell: () => reactShell,
   commandPaletteIsland: () => commandPaletteIsland,
@@ -2195,6 +2223,7 @@ export const __swimmersWebTest = {
   thoughtConfigSheetIsland: () => thoughtConfigSheetIsland,
   nativeDesktopSheetIsland: () => nativeDesktopSheetIsland,
   createSheetIsland: () => createSheetIsland,
+  dirBrowserViewIsland: () => dirBrowserViewIsland,
   mermaidSheetIsland: () => mermaidSheetIsland,
 };
 

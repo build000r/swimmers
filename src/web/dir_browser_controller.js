@@ -56,6 +56,7 @@ export function createDirBrowserController(runtime) {
     ElementClass = globalThis.Element,
     pathStorageKey = "swimmers.web.dirs.path",
     managedOnlyStorageKey = "swimmers.web.dirs.managed",
+    renderDirBrowserView = null,
   } = runtime;
 
   function eventElement(event, target = event?.target) {
@@ -148,6 +149,7 @@ export function createDirBrowserController(runtime) {
       managedOnlyStorageKey,
       setDirStatus,
       syncSheetActionAvailability,
+      renderDirBrowserView,
     });
   }
 

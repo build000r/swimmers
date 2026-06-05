@@ -70,29 +70,46 @@ export function dirEntryGroups(entry) {
   return normalized;
 }
 
-function renderDirGroupActions(entry, entryPath, allGroups, activeGroup, readOnly = false) {
+export function renderDirGroupActionPlan(entry, entryPath, allGroups, activeGroup) {
   const availableGroups = Array.isArray(allGroups) ? allGroups.map((group) => String(group || "").trim()).filter(Boolean) : [];
   if (!entryPath || !availableGroups.length) {
-    return null;
+    return [];
   }
   const memberships = new Set(dirEntryGroups(entry));
+  return availableGroups.map((groupName) => {
+    const isMember = memberships.has(groupName);
+    const action = isMember ? "remove" : activeGroup && memberships.has(activeGroup) ? "move" : "add";
+    return {
+      groupName,
+      isMember,
+      action,
+      removeGroup: action === "move" ? activeGroup : "",
+      label: isMember ? `remove ${groupName}` : action === "move" ? `move to ${groupName}` : `add ${groupName}`,
+    };
+  });
+}
+
+function renderDirGroupActions(entry, entryPath, allGroups, activeGroup, readOnly = false) {
+  const actions = renderDirGroupActionPlan(entry, entryPath, allGroups, activeGroup);
+  if (!actions.length) {
+    return null;
+  }
   const wrap = document.createElement("div");
   wrap.className = "dir-row-group-actions";
   wrap.setAttribute("aria-label", `Group actions for ${entry?.name || entryPath}`);
 
-  for (const groupName of availableGroups) {
-    const isMember = memberships.has(groupName);
+  for (const { groupName, isMember, action, removeGroup, label } of actions) {
     const button = document.createElement("button");
     button.type = "button";
     button.className = `ghost-button dir-entry-group-action${isMember ? " is-member" : ""}`;
     button.dataset.path = entryPath;
     button.dataset.group = groupName;
-    button.dataset.action = isMember ? "remove" : activeGroup && memberships.has(activeGroup) ? "move" : "add";
-    if (button.dataset.action === "move") {
-      button.dataset.removeGroup = activeGroup;
+    button.dataset.action = action;
+    if (action === "move") {
+      button.dataset.removeGroup = removeGroup;
     }
     button.disabled = readOnly;
-    button.textContent = isMember ? `remove ${groupName}` : button.dataset.action === "move" ? `move to ${groupName}` : `add ${groupName}`;
+    button.textContent = label;
     wrap.appendChild(button);
   }
 
@@ -266,54 +283,30 @@ export function clearCreateBatchSelection({ el, dirBrowser, syncSheetActionAvail
   syncSheetActionAvailability();
 }
 
-export function renderDirEntries(
-  response,
-  {
-    el,
-    dirBrowser,
-    readOnly = false,
-    storage = localStorage,
-    pathStorageKey,
-    managedOnlyStorageKey,
-    setDirStatus,
-    syncSheetActionAvailability,
-  },
-) {
-  const rawEntries = Array.isArray(response?.entries) ? response.entries : [];
-  const groups = Array.isArray(response?.groups) ? response.groups : [];
-  const activeGroup = String(dirBrowser.group || "").trim();
-  const selected = ensureDirBrowserBatchSelection(dirBrowser);
-  const selectablePaths = new Set();
+function dirBrowserSelectablePathSet(entries, path) {
+  return new Set(
+    entries
+      .map((entry) => [entry, dirEntryResolvedPath(path, entry)])
+      .filter(([entry, entryPath]) => dirEntryBatchSelectable(entry, entryPath))
+      .map(([, entryPath]) => entryPath),
+  );
+}
 
-  dirBrowser.entries = rawEntries;
-  dirBrowser.groups = groups;
-  dirBrowser.overlayLabel = String(response?.overlay_label || "");
-  const path = String(response?.path || el.createCwd.value || "").trim();
-  dirBrowser.path = path;
-  storage.setItem(pathStorageKey, path);
-  storage.setItem(managedOnlyStorageKey, String(Boolean(el.dirsManagedOnly.checked)));
-  el.dirsPath.value = path;
-  if (!el.createCwd.value.trim() || !selected.size) {
-    el.createCwd.value = path;
-  }
-  renderLaunchTargetOptions(response, { el, dirBrowser });
+function renderLegacyDirBrowserView(view, { el }) {
   const chipHost = el.dirsGroups || el.dirsList;
   if (el.dirsGroups) {
     el.dirsGroups.innerHTML = "";
   }
   el.dirsList.innerHTML = "";
 
-  if (groups.length && chipHost) {
-    const managed = Boolean(el.dirsManagedOnly.checked);
-    const overlayLabel = String(response?.overlay_label || "managed").trim().toLowerCase();
-
+  if (view.groups.length && chipHost) {
     const managedButton = document.createElement("button");
     managedButton.type = "button";
     managedButton.className = "ghost-button dir-group-chip";
     managedButton.dataset.filter = "managed";
     managedButton.dataset.group = "";
-    managedButton.textContent = overlayLabel || "managed";
-    managedButton.classList.toggle("is-active", managed && !activeGroup);
+    managedButton.textContent = view.overlayLabel || "managed";
+    managedButton.classList.toggle("is-active", view.managed && !view.activeGroup);
     chipHost.appendChild(managedButton);
 
     const allButton = document.createElement("button");
@@ -322,31 +315,29 @@ export function renderDirEntries(
     allButton.dataset.filter = "all";
     allButton.dataset.group = "";
     allButton.textContent = "all folders";
-    allButton.classList.toggle("is-active", !managed && !activeGroup);
+    allButton.classList.toggle("is-active", !view.managed && !view.activeGroup);
     chipHost.appendChild(allButton);
 
-    for (const groupName of groups) {
+    for (const groupName of view.groups) {
       const chip = document.createElement("button");
       chip.type = "button";
       chip.className = "ghost-button dir-group-chip";
       chip.dataset.filter = "group";
       chip.dataset.group = String(groupName || "");
       chip.textContent = String(groupName || "");
-      chip.classList.toggle("is-active", chip.dataset.group === activeGroup);
+      chip.classList.toggle("is-active", chip.dataset.group === view.activeGroup);
       chipHost.appendChild(chip);
     }
   }
 
-  const entries = visibleDirEntries(rawEntries, path, normalizedDirSearch(dirBrowser));
-
-  if (!entries.length) {
+  if (!view.entries.length) {
     const empty = document.createElement("div");
     empty.className = "console-empty";
-    empty.textContent = normalizedDirSearch(dirBrowser) ? "No directory matches." : "No child directories found.";
+    empty.textContent = view.search ? "No directory matches." : "No child directories found.";
     el.dirsList.appendChild(empty);
   } else {
-    for (const entry of entries) {
-      const entryPath = dirEntryResolvedPath(path, entry);
+    for (const entry of view.entries) {
+      const entryPath = dirEntryResolvedPath(view.path, entry);
       const selectable = dirEntryBatchSelectable(entry, entryPath);
       const row = document.createElement("div");
       row.className = "console-row dir-row";
@@ -356,9 +347,6 @@ export function renderDirEntries(
       row.dataset.disabled = String(!selectable);
       if (entry?.group) {
         row.dataset.group = String(entry.group);
-      }
-      if (selectable) {
-        selectablePaths.add(entryPath);
       }
 
       const running = Boolean(entry?.is_running);
@@ -373,8 +361,8 @@ export function renderDirEntries(
       checkbox.type = "checkbox";
       checkbox.className = "dir-row-check";
       checkbox.dataset.path = entryPath;
-      checkbox.disabled = readOnly || !selectable;
-      checkbox.checked = selectable && selected.has(entryPath);
+      checkbox.disabled = view.readOnly || !selectable;
+      checkbox.checked = selectable && view.selectedPaths.has(entryPath);
       checkbox.setAttribute("aria-label", `Include ${entry.name} in batch send`);
       selectCell.appendChild(checkbox);
       row.appendChild(selectCell);
@@ -437,13 +425,67 @@ export function renderDirEntries(
         openLink.textContent = "open url";
         groupsCell.appendChild(openLink);
       }
-      const groupActions = renderDirGroupActions(entry, entryPath, groups, activeGroup, readOnly);
+      const groupActions = renderDirGroupActions(entry, entryPath, view.groups, view.activeGroup, view.readOnly);
       if (groupActions) {
         groupsCell.appendChild(groupActions);
       }
       row.appendChild(groupsCell);
       el.dirsList.appendChild(row);
     }
+  }
+}
+
+export function renderDirEntries(
+  response,
+  {
+    el,
+    dirBrowser,
+    readOnly = false,
+    storage = localStorage,
+    pathStorageKey,
+    managedOnlyStorageKey,
+    setDirStatus,
+    syncSheetActionAvailability,
+    renderDirBrowserView = null,
+  },
+) {
+  const rawEntries = Array.isArray(response?.entries) ? response.entries : [];
+  const groups = Array.isArray(response?.groups) ? response.groups : [];
+  const activeGroup = String(dirBrowser.group || "").trim();
+  const selected = ensureDirBrowserBatchSelection(dirBrowser);
+
+  dirBrowser.entries = rawEntries;
+  dirBrowser.groups = groups;
+  dirBrowser.overlayLabel = String(response?.overlay_label || "");
+  const path = String(response?.path || el.createCwd.value || "").trim();
+  dirBrowser.path = path;
+  storage.setItem(pathStorageKey, path);
+  storage.setItem(managedOnlyStorageKey, String(Boolean(el.dirsManagedOnly.checked)));
+  el.dirsPath.value = path;
+  if (!el.createCwd.value.trim() || !selected.size) {
+    el.createCwd.value = path;
+  }
+  renderLaunchTargetOptions(response, { el, dirBrowser });
+
+  const entries = visibleDirEntries(rawEntries, path, normalizedDirSearch(dirBrowser));
+  const selectablePaths = dirBrowserSelectablePathSet(entries, path);
+  const managed = Boolean(el.dirsManagedOnly.checked);
+  const view = {
+    groups,
+    entries,
+    path,
+    activeGroup,
+    selectedPaths: selected,
+    readOnly,
+    managed,
+    overlayLabel: String(response?.overlay_label || "managed").trim().toLowerCase(),
+    search: normalizedDirSearch(dirBrowser),
+  };
+
+  const renderedByIsland = typeof renderDirBrowserView === "function"
+    && renderDirBrowserView(view) === true;
+  if (!renderedByIsland) {
+    renderLegacyDirBrowserView(view, { el });
   }
 
   for (const selectedPath of Array.from(selected)) {
@@ -452,10 +494,9 @@ export function renderDirEntries(
     }
   }
 
-  const managed = Boolean(el.dirsManagedOnly.checked);
   const shownCount = entries.length;
   const totalCount = rawEntries.length;
-  const searchSuffix = normalizedDirSearch(dirBrowser) ? ` · ${shownCount}/${totalCount} search matches` : "";
+  const searchSuffix = view.search ? ` · ${shownCount}/${totalCount} search matches` : "";
   const targetSuffix = selectedLaunchTarget(el, dirBrowser) !== "local" ? ` · target ${selectedLaunchTarget(el, dirBrowser)}` : "";
   const summary = response?.path
     ? `${shownCount} entries at ${response.path}${managed ? " (managed only)" : ""}${activeGroup ? ` · group ${activeGroup}` : ""}${searchSuffix}${targetSuffix}`

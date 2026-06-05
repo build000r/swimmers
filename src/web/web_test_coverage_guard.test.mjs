@@ -100,6 +100,20 @@ test("focused helper suites keep migration-critical behavior coverage topics", a
       ],
     ],
     [
+      "src/web/dir_browser_controller.test.mjs",
+      [
+        "directory browser controller delegates dynamic view rendering while preserving state ownership",
+      ],
+    ],
+    [
+      "src/web/dir_browser_view_island.test.mjs",
+      [
+        "directory browser view island preserves group chip DOM contract",
+        "directory browser view island preserves row, action, badge, and link contract",
+        "directory browser view island mounts, rerenders, and guards stable nodes",
+      ],
+    ],
+    [
       "src/web/auth_sheet_island.test.mjs",
       [
         "auth sheet island preserves sheet host and child DOM contract",
@@ -371,4 +385,25 @@ test("Vite transforms the create sheet React island path", async (t) => {
 
   assert.ok(transformed?.code, "Vite did not transform create_sheet_island.js");
   assert.match(transformed.code, /CreateSheet/);
+});
+
+test("Vite transforms the directory browser React view island path", async (t) => {
+  const appSource = await readRepoFile("src/web/app.js");
+  const source = await readRepoFile("src/web/dir_browser_view_island.js");
+  assert.match(appSource, /import\("\.\/dir_browser_view_island\.js"\)/);
+  assert.match(source, /from "react"/);
+  assert.match(source, /from "react-dom"/);
+  assert.match(source, /from "react-dom\/client"/);
+
+  const server = await createServer({
+    configFile: path.join(repoRoot, "vite.config.js"),
+    logLevel: "silent",
+    server: { middlewareMode: true },
+  });
+  t.after(() => server.close());
+
+  const transformed = await server.transformRequest("/src/web/dir_browser_view_island.js");
+
+  assert.ok(transformed?.code, "Vite did not transform dir_browser_view_island.js");
+  assert.match(transformed.code, /DirBrowserList/);
 });
