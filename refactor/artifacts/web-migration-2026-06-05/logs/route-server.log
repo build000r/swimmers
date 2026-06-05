@@ -1,0 +1,26 @@
+2026-06-05T03:04:15.331465Z  INFO swimmers::startup: startup phase begin phase="clawgs_defaults"
+2026-06-05T03:04:15.331924Z  INFO swimmers::thought::emitter_client: running clawgs defaults phase="clawgs_defaults_command" bin=clawgs
+2026-06-05T03:04:15.385458Z  INFO swimmers::thought::emitter_client: clawgs defaults completed phase="clawgs_defaults_command" bin=clawgs elapsed_ms=53 status=exit status: 0
+2026-06-05T03:04:15.385815Z  INFO swimmers::startup: startup phase completed phase="clawgs_defaults" elapsed_ms=54
+2026-06-05T03:04:15.385846Z  INFO swimmers::startup: loaded daemon defaults from clawgs
+2026-06-05T03:04:15.386119Z  INFO swimmers::startup: startup phase begin phase="persistence_init"
+2026-06-05T03:04:15.386154Z  INFO swimmers::startup: using data dir data_dir=<temp-data-dir>
+2026-06-05T03:04:15.389122Z  INFO swimmers::persistence::file_store: persistence store initialized dir=<temp-data-dir> sessions=0 thoughts=0
+2026-06-05T03:04:15.389793Z  INFO swimmers::startup: persistence store initialized
+2026-06-05T03:04:15.389863Z  INFO swimmers::startup: startup phase completed phase="persistence_init" elapsed_ms=3
+2026-06-05T03:04:15.389888Z  INFO swimmers::startup: startup phase begin phase="tmux_startup_discovery"
+2026-06-05T03:04:15.389933Z  INFO swimmers::session::supervisor::discovery: running tmux list-sessions reason="startup_discovery" phase="tmux_list_sessions"
+2026-06-05T03:04:15.396853Z  INFO swimmers::session::supervisor::discovery: tmux list-sessions completed reason="startup_discovery" phase="tmux_list_sessions" elapsed_ms=6 listed_sessions=1
+2026-06-05T03:04:15.397198Z  INFO swimmers::session::supervisor::discovery: discovered existing tmux session session_id=sess_0 tmux_name=<local-tmux-session>
+2026-06-05T03:04:15.397925Z  WARN swimmers::session::actor::spawn: missing/unsupported TERM for tmux client; applied fallback session_id="sess_0" tmux_name="devbox-1" inherited_term=Some("dumb") applied_term=xterm-256color
+2026-06-05T03:04:15.443136Z  INFO swimmers::session::actor: session actor started session_id=sess_0 tmux=devbox-1
+2026-06-05T03:04:15.443304Z  INFO swimmers::session::supervisor::discovery: tmux session discovery complete count=1
+2026-06-05T03:04:15.512354Z  INFO swimmers::startup: tmux session discovery complete
+2026-06-05T03:04:15.512448Z  INFO swimmers::startup: startup phase completed phase="tmux_startup_discovery" elapsed_ms=122
+2026-06-05T03:04:15.512608Z  INFO swimmers::startup: thought backend=daemon: starting thought bridge runner
+2026-06-05T03:04:15.512871Z  INFO swimmers::thought::bridge_runner: thought bridge runner started tick_ms=15000 sync_timeout_ms=30000
+2026-06-05T03:04:15.517010Z  INFO swimmers: startup complete; listener ready elapsed_ms=185
+2026-06-05T03:04:15.517087Z  INFO swimmers: Swimmers running on http://127.0.0.1:3332
+2026-06-05T03:04:15.666310Z  WARN swimmers::thought::bridge_runner: clawgs emit daemon sync reported backend error error=openrouter: OPENROUTER_API_KEY not set
+2026-06-05T03:04:16.036130Z  INFO swimmers: received shutdown signal signal="SIGTERM"
+2026-06-05T03:04:16.036383Z  INFO swimmers: received shutdown signal; draining

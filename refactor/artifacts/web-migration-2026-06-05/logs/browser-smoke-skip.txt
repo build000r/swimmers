@@ -1,0 +1,16 @@
+Chrome-dependent browser smoke and screenshots skipped.
+
+Reason: no Chrome/Chromium executable found in PATH, and macOS Google Chrome path is absent in this Linux environment.
+
+Checks:
+$ command -v google-chrome || command -v chromium || command -v chromium-browser || command -v chrome
+NO_MATCHES
+$ test -x /Applications/Google Chrome.app/Contents/MacOS/Google Chrome
+absent
+
+Affected repo smoke scripts:
+- make web-smoke: scripts/test-web-visible-terminal.sh requires CHROME_BIN or /Applications/Google Chrome.app/... after live-terminal smoke.
+- make web-workbench-smoke: scripts/test-web-workbench.sh requires CHROME_BIN or /Applications/Google Chrome.app/... and is the screenshot-producing path.
+
+Partial smoke run instead:
+- PORT=3322 SWIMMERS_DATA_DIR=<temp> SWIMMERS_PERSONAL_WORKFLOWS=0 bash ./scripts/test-web-live-terminal.sh: passed; see logs/web-live-terminal-smoke.log.

@@ -1,0 +1,959 @@
+{
+  "captured_at_utc": "2026-06-05T03:04:15.956Z",
+  "base_url": "http://127.0.0.1:<ephemeral-baseline-port>",
+  "auth_mode": "local_trust",
+  "token_logging": "none; no token mode and no query tokens used",
+  "franken_term_assets": "available through SWIMMERS_FRANKENTUI_PKG_DIR during capture; path intentionally omitted from this contract",
+  "route_count": 56,
+  "status_counts": {
+    "200": 53,
+    "400": 1,
+    "404": 2
+  },
+  "source_manifest": "route-source-manifest.json",
+  "routes": [
+    {
+      "group": "document",
+      "route": "/",
+      "kind": "html_document",
+      "status": 200,
+      "content_type": "text/html; charset=utf-8",
+      "cache_control": "no-store",
+      "content_length_header": "21420",
+      "byte_length": 21420,
+      "sha256": "84b85a425db5a6f7e13ffab20fcdb6572eb1cff0376732f4e035c9e5d166a3db",
+      "html_markers": {
+        "title_swimmers": true,
+        "app_css_ref": true,
+        "app_js_module_ref": true,
+        "terminal_stage": true,
+        "trogdor_surface": true,
+        "workbench": true,
+        "send_sheet": true,
+        "thought_config_sheet": true,
+        "native_sheet": true,
+        "auth_sheet_password_input": true,
+        "published_focus_body": false
+      },
+      "boot_payload": {
+        "franken_term_available": true,
+        "franken_term_js_url": "/assets/frankenterm/FrankenTerm.js",
+        "franken_term_wasm_url": "/assets/frankenterm/FrankenTerm_bg.wasm",
+        "franken_term_font_url": "/assets/frankenterm/pragmasevka-nf-subset.woff2",
+        "follow_published_selection": false,
+        "focus_layout": false,
+        "franken_term_asset_info": {
+          "js": {
+            "route": "/assets/frankenterm/FrankenTerm.js",
+            "size_bytes": 85668,
+            "checksum": "crc32:342f71c2"
+          },
+          "wasm": {
+            "route": "/assets/frankenterm/FrankenTerm_bg.wasm",
+            "size_bytes": 394920,
+            "checksum": "crc32:f49edb2c"
+          },
+          "font": null
+        }
+      }
+    },
+    {
+      "group": "document",
+      "route": "/selected",
+      "kind": "html_document",
+      "status": 200,
+      "content_type": "text/html; charset=utf-8",
+      "cache_control": "no-store",
+      "content_length_header": "21434",
+      "byte_length": 21434,
+      "sha256": "8864012f678fe49f3c171e0e56042b974e1c99c5f07c2bfaf19de89e22ea97ef",
+      "html_markers": {
+        "title_swimmers": true,
+        "app_css_ref": true,
+        "app_js_module_ref": true,
+        "terminal_stage": true,
+        "trogdor_surface": true,
+        "workbench": true,
+        "send_sheet": true,
+        "thought_config_sheet": true,
+        "native_sheet": true,
+        "auth_sheet_password_input": true,
+        "published_focus_body": true
+      },
+      "boot_payload": {
+        "franken_term_available": true,
+        "franken_term_js_url": "/assets/frankenterm/FrankenTerm.js",
+        "franken_term_wasm_url": "/assets/frankenterm/FrankenTerm_bg.wasm",
+        "franken_term_font_url": "/assets/frankenterm/pragmasevka-nf-subset.woff2",
+        "follow_published_selection": true,
+        "focus_layout": true,
+        "franken_term_asset_info": {
+          "js": {
+            "route": "/assets/frankenterm/FrankenTerm.js",
+            "size_bytes": 85668,
+            "checksum": "crc32:342f71c2"
+          },
+          "wasm": {
+            "route": "/assets/frankenterm/FrankenTerm_bg.wasm",
+            "size_bytes": 394920,
+            "checksum": "crc32:f49edb2c"
+          },
+          "font": null
+        }
+      }
+    },
+    {
+      "group": "core_asset",
+      "route": "/app.js",
+      "kind": "javascript",
+      "status": 200,
+      "content_type": "application/javascript; charset=utf-8",
+      "cache_control": "no-store",
+      "content_length_header": "63749",
+      "byte_length": 63749,
+      "sha256": "e01a3d6db3f8d0bb20a828e2a57051d9d34d3fcbf8685e12db5d0722d0eec853",
+      "text_markers": {
+        "imports_count": 32,
+        "exports_count": 1,
+        "has_source_map_ref": false
+      }
+    },
+    {
+      "group": "core_asset",
+      "route": "/app.css",
+      "kind": "css",
+      "status": 200,
+      "content_type": "text/css; charset=utf-8",
+      "cache_control": "no-store",
+      "content_length_header": "69241",
+      "byte_length": 69241,
+      "sha256": "98d77844879d27bc0b78a8dcee887bf9754000217c1f2127abfdb83d483ae05b",
+      "text_markers": {
+        "imports_count": 0,
+        "exports_count": 0,
+        "has_source_map_ref": false
+      }
+    },
+    {
+      "group": "js_module",
+      "route": "/api_client.js",
+      "kind": "javascript",
+      "status": 200,
+      "content_type": "application/javascript; charset=utf-8",
+      "cache_control": "no-store",
+      "content_length_header": "1620",
+      "byte_length": 1620,
+      "sha256": "af83813232e72a9a6a78b947095a3b9b779b9c30980e0aca9e1216ec9b7f7ebc",
+      "text_markers": {
+        "imports_count": 0,
+        "exports_count": 5,
+        "has_source_map_ref": false
+      }
+    },
+    {
+      "group": "js_module",
+      "route": "/session_persistence.js",
+      "kind": "javascript",
+      "status": 200,
+      "content_type": "application/javascript; charset=utf-8",
+      "cache_control": "no-store",
+      "content_length_header": "2607",
+      "byte_length": 2607,
+      "sha256": "4f56cfa24fadb7677303e5081d1771eb86ff49c5f57077866136b0250889d701",
+      "text_markers": {
+        "imports_count": 0,
+        "exports_count": 2,
+        "has_source_map_ref": false
+      }
+    },
+    {
+      "group": "js_module",
+      "route": "/app_event_handlers.js",
+      "kind": "javascript",
+      "status": 200,
+      "content_type": "application/javascript; charset=utf-8",
+      "cache_control": "no-store",
+      "content_length_header": "13652",
+      "byte_length": 13652,
+      "sha256": "6ae1d7af7392f5e2a8a0e0ced44e05689b4f60881158ce9b54531350d43620c3",
+      "text_markers": {
+        "imports_count": 5,
+        "exports_count": 1,
+        "has_source_map_ref": false
+      }
+    },
+    {
+      "group": "js_module",
+      "route": "/app_event_bindings.js",
+      "kind": "javascript",
+      "status": 200,
+      "content_type": "application/javascript; charset=utf-8",
+      "cache_control": "no-store",
+      "content_length_header": "1977",
+      "byte_length": 1977,
+      "sha256": "234390805b6aea3d32eaaffdc304cd009cf3c3b8fb457369ab73dc45f0d36bc0",
+      "text_markers": {
+        "imports_count": 0,
+        "exports_count": 5,
+        "has_source_map_ref": false
+      }
+    },
+    {
+      "group": "js_module",
+      "route": "/trogdor_event_bindings.js",
+      "kind": "javascript",
+      "status": 200,
+      "content_type": "application/javascript; charset=utf-8",
+      "cache_control": "no-store",
+      "content_length_header": "4511",
+      "byte_length": 4511,
+      "sha256": "1d89601956878524df0ab38452b3d8604bdef5866f7c53dd15b869bf78904e6e",
+      "text_markers": {
+        "imports_count": 1,
+        "exports_count": 2,
+        "has_source_map_ref": false
+      }
+    },
+    {
+      "group": "js_module",
+      "route": "/rendered_surface.js",
+      "kind": "javascript",
+      "status": 200,
+      "content_type": "application/javascript; charset=utf-8",
+      "cache_control": "no-store",
+      "content_length_header": "33803",
+      "byte_length": 33803,
+      "sha256": "b1a482b1f472b5ee5f8cce3d94f8bf9ab89270b578ed7e1749214e1fc373aa62",
+      "text_markers": {
+        "imports_count": 1,
+        "exports_count": 3,
+        "has_source_map_ref": false
+      }
+    },
+    {
+      "group": "js_module",
+      "route": "/rendered_surface_draw.js",
+      "kind": "javascript",
+      "status": 200,
+      "content_type": "application/javascript; charset=utf-8",
+      "cache_control": "no-store",
+      "content_length_header": "10364",
+      "byte_length": 10364,
+      "sha256": "cd0f59758c9f22d3a52c3d59af272c6659b48605ec88c6cfd431c827752e144c",
+      "text_markers": {
+        "imports_count": 0,
+        "exports_count": 31,
+        "has_source_map_ref": false
+      }
+    },
+    {
+      "group": "js_module",
+      "route": "/input_support.js",
+      "kind": "javascript",
+      "status": 200,
+      "content_type": "application/javascript; charset=utf-8",
+      "cache_control": "no-store",
+      "content_length_header": "44616",
+      "byte_length": 44616,
+      "sha256": "169466fee8f14263ca6babdeba4bb02254af16603a04f6cd50524bf82e13e001",
+      "text_markers": {
+        "imports_count": 0,
+        "exports_count": 58,
+        "has_source_map_ref": false
+      }
+    },
+    {
+      "group": "js_module",
+      "route": "/surface_action_plans.js",
+      "kind": "javascript",
+      "status": 200,
+      "content_type": "application/javascript; charset=utf-8",
+      "cache_control": "no-store",
+      "content_length_header": "5714",
+      "byte_length": 5714,
+      "sha256": "d487095a45cc9b01892a9d42906b794d08b0495df52ba1c0db5c3f15f55887f6",
+      "text_markers": {
+        "imports_count": 0,
+        "exports_count": 6,
+        "has_source_map_ref": false
+      }
+    },
+    {
+      "group": "js_module",
+      "route": "/terminal_stage_controller.js",
+      "kind": "javascript",
+      "status": 200,
+      "content_type": "application/javascript; charset=utf-8",
+      "cache_control": "no-store",
+      "content_length_header": "9932",
+      "byte_length": 9932,
+      "sha256": "ceabee9259cf4e1dd1c8a60dc87d412bbca1b74d9a456523185c7eb88e465616",
+      "text_markers": {
+        "imports_count": 3,
+        "exports_count": 1,
+        "has_source_map_ref": false
+      }
+    },
+    {
+      "group": "js_module",
+      "route": "/send_sheet.js",
+      "kind": "javascript",
+      "status": 200,
+      "content_type": "application/javascript; charset=utf-8",
+      "cache_control": "no-store",
+      "content_length_header": "1886",
+      "byte_length": 1886,
+      "sha256": "73a01e6e5efe6f56901026c68f2fe93d6cd8be5abd0ef0ba8f50b5143cfdd949",
+      "text_markers": {
+        "imports_count": 0,
+        "exports_count": 4,
+        "has_source_map_ref": false
+      }
+    },
+    {
+      "group": "js_module",
+      "route": "/send_controller.js",
+      "kind": "javascript",
+      "status": 200,
+      "content_type": "application/javascript; charset=utf-8",
+      "cache_control": "no-store",
+      "content_length_header": "10001",
+      "byte_length": 10001,
+      "sha256": "cab59f07d53f49cde2522ae6ffde136b52c05a280f016b8547ec9815b73e7662",
+      "text_markers": {
+        "imports_count": 1,
+        "exports_count": 9,
+        "has_source_map_ref": false
+      }
+    },
+    {
+      "group": "js_module",
+      "route": "/thought_config_sheet.js",
+      "kind": "javascript",
+      "status": 200,
+      "content_type": "application/javascript; charset=utf-8",
+      "cache_control": "no-store",
+      "content_length_header": "8303",
+      "byte_length": 8303,
+      "sha256": "628127f868e3c51d296eaae3e11a7a0d96efaf18d8530e381088624fe6a917ae",
+      "text_markers": {
+        "imports_count": 0,
+        "exports_count": 6,
+        "has_source_map_ref": false
+      }
+    },
+    {
+      "group": "js_module",
+      "route": "/native_desktop_sheet.js",
+      "kind": "javascript",
+      "status": 200,
+      "content_type": "application/javascript; charset=utf-8",
+      "cache_control": "no-store",
+      "content_length_header": "5534",
+      "byte_length": 5534,
+      "sha256": "a70e2ddcedc72200ca29ef99958f04bc62d44ceaaf7a604a27c820718ab5f395",
+      "text_markers": {
+        "imports_count": 0,
+        "exports_count": 3,
+        "has_source_map_ref": false
+      }
+    },
+    {
+      "group": "js_module",
+      "route": "/terminal_surface_setup.js",
+      "kind": "javascript",
+      "status": 200,
+      "content_type": "application/javascript; charset=utf-8",
+      "cache_control": "no-store",
+      "content_length_header": "9684",
+      "byte_length": 9684,
+      "sha256": "1fa56620a9138cddcd78de38f97d44c1b6f291b6b72af965d50f7d7d5c9855e0",
+      "text_markers": {
+        "imports_count": 1,
+        "exports_count": 4,
+        "has_source_map_ref": false
+      }
+    },
+    {
+      "group": "js_module",
+      "route": "/terminal_surface_controller.js",
+      "kind": "javascript",
+      "status": 200,
+      "content_type": "application/javascript; charset=utf-8",
+      "cache_control": "no-store",
+      "content_length_header": "14049",
+      "byte_length": 14049,
+      "sha256": "40f165029db232c67e38cfc5c97312cbd807a130581493d40e4a57906bca8078",
+      "text_markers": {
+        "imports_count": 0,
+        "exports_count": 1,
+        "has_source_map_ref": false
+      }
+    },
+    {
+      "group": "js_module",
+      "route": "/terminal_focus.js",
+      "kind": "javascript",
+      "status": 200,
+      "content_type": "application/javascript; charset=utf-8",
+      "cache_control": "no-store",
+      "content_length_header": "6955",
+      "byte_length": 6955,
+      "sha256": "d0233509cd80238a72774417871d13cc4afb6941eb1cdea600b302735a5177e0",
+      "text_markers": {
+        "imports_count": 1,
+        "exports_count": 1,
+        "has_source_map_ref": false
+      }
+    },
+    {
+      "group": "js_module",
+      "route": "/terminal_zoom_input.js",
+      "kind": "javascript",
+      "status": 200,
+      "content_type": "application/javascript; charset=utf-8",
+      "cache_control": "no-store",
+      "content_length_header": "8375",
+      "byte_length": 8375,
+      "sha256": "3dbb86c45d2962412fce3808cff887efcc08f9f205e65bad40df7a581aef0736",
+      "text_markers": {
+        "imports_count": 1,
+        "exports_count": 2,
+        "has_source_map_ref": false
+      }
+    },
+    {
+      "group": "js_module",
+      "route": "/terminal_resize.js",
+      "kind": "javascript",
+      "status": 200,
+      "content_type": "application/javascript; charset=utf-8",
+      "cache_control": "no-store",
+      "content_length_header": "2334",
+      "byte_length": 2334,
+      "sha256": "6fb9e41f1f59a85d0c3a7a9e21a8a1bc2f7c51169e9868549adf3684ef25c1f3",
+      "text_markers": {
+        "imports_count": 1,
+        "exports_count": 2,
+        "has_source_map_ref": false
+      }
+    },
+    {
+      "group": "js_module",
+      "route": "/global_shortcut_dispatch.js",
+      "kind": "javascript",
+      "status": 200,
+      "content_type": "application/javascript; charset=utf-8",
+      "cache_control": "no-store",
+      "content_length_header": "1586",
+      "byte_length": 1586,
+      "sha256": "8f533ffe6191fbe373cea069c2504e6f50a50a3f139ab21650d301cafdf9420a",
+      "text_markers": {
+        "imports_count": 0,
+        "exports_count": 1,
+        "has_source_map_ref": false
+      }
+    },
+    {
+      "group": "js_module",
+      "route": "/session_refresh.js",
+      "kind": "javascript",
+      "status": 200,
+      "content_type": "application/javascript; charset=utf-8",
+      "cache_control": "no-store",
+      "content_length_header": "6657",
+      "byte_length": 6657,
+      "sha256": "5784fd8da3923e0e323c22a0b928a12066e6a797ee431d1c43e28660acb94e02",
+      "text_markers": {
+        "imports_count": 0,
+        "exports_count": 8,
+        "has_source_map_ref": false
+      }
+    },
+    {
+      "group": "js_module",
+      "route": "/agent_context_refresh.js",
+      "kind": "javascript",
+      "status": 200,
+      "content_type": "application/javascript; charset=utf-8",
+      "cache_control": "no-store",
+      "content_length_header": "3207",
+      "byte_length": 3207,
+      "sha256": "3c69d38331f9bae90b06c8b6b61e27377af634c44f5be3edc465b898afa02b5d",
+      "text_markers": {
+        "imports_count": 0,
+        "exports_count": 4,
+        "has_source_map_ref": false
+      }
+    },
+    {
+      "group": "js_module",
+      "route": "/mermaid_artifact.js",
+      "kind": "javascript",
+      "status": 200,
+      "content_type": "application/javascript; charset=utf-8",
+      "cache_control": "no-store",
+      "content_length_header": "5884",
+      "byte_length": 5884,
+      "sha256": "6840c50f8987fde02614858b66fa62c461555e176d3560b058bfc4f956d4439f",
+      "text_markers": {
+        "imports_count": 0,
+        "exports_count": 10,
+        "has_source_map_ref": false
+      }
+    },
+    {
+      "group": "js_module",
+      "route": "/mermaid_artifact_controller.js",
+      "kind": "javascript",
+      "status": 200,
+      "content_type": "application/javascript; charset=utf-8",
+      "cache_control": "no-store",
+      "content_length_header": "5599",
+      "byte_length": 5599,
+      "sha256": "0d0d6358d44e9028438971029c5c0eb230d6ca30aa7e6cd5f8098ee49c56c14d",
+      "text_markers": {
+        "imports_count": 1,
+        "exports_count": 1,
+        "has_source_map_ref": false
+      }
+    },
+    {
+      "group": "js_module",
+      "route": "/terminal_safety.js",
+      "kind": "javascript",
+      "status": 200,
+      "content_type": "application/javascript; charset=utf-8",
+      "cache_control": "no-store",
+      "content_length_header": "1504",
+      "byte_length": 1504,
+      "sha256": "95dd850593317a1b8c199314f07b5b710d2bde6a5366c726e80f948fc43d42e9",
+      "text_markers": {
+        "imports_count": 0,
+        "exports_count": 6,
+        "has_source_map_ref": false
+      }
+    },
+    {
+      "group": "js_module",
+      "route": "/terminal_search_links.js",
+      "kind": "javascript",
+      "status": 200,
+      "content_type": "application/javascript; charset=utf-8",
+      "cache_control": "no-store",
+      "content_length_header": "8908",
+      "byte_length": 8908,
+      "sha256": "f9d394dbb8a13233c5d8d2c4c6dea17fcd83376c249972239ef4f0440bab15bd",
+      "text_markers": {
+        "imports_count": 0,
+        "exports_count": 1,
+        "has_source_map_ref": false
+      }
+    },
+    {
+      "group": "js_module",
+      "route": "/terminal_status.js",
+      "kind": "javascript",
+      "status": 200,
+      "content_type": "application/javascript; charset=utf-8",
+      "cache_control": "no-store",
+      "content_length_header": "3981",
+      "byte_length": 3981,
+      "sha256": "81fbfe3c15a6cb9864078656118ea7b63c1a319e0d2f22f00a7a6022e6dc2b08",
+      "text_markers": {
+        "imports_count": 0,
+        "exports_count": 1,
+        "has_source_map_ref": false
+      }
+    },
+    {
+      "group": "js_module",
+      "route": "/terminal_protocol.js",
+      "kind": "javascript",
+      "status": 200,
+      "content_type": "application/javascript; charset=utf-8",
+      "cache_control": "no-store",
+      "content_length_header": "7608",
+      "byte_length": 7608,
+      "sha256": "8942120ea657ab939a3ba269abd55ad9f891ae07c1e0ac1d58b94480bc30bc7f",
+      "text_markers": {
+        "imports_count": 0,
+        "exports_count": 22,
+        "has_source_map_ref": false
+      }
+    },
+    {
+      "group": "js_module",
+      "route": "/terminal_input.js",
+      "kind": "javascript",
+      "status": 200,
+      "content_type": "application/javascript; charset=utf-8",
+      "cache_control": "no-store",
+      "content_length_header": "5936",
+      "byte_length": 5936,
+      "sha256": "eca31c829ac31c1f3c300ff9435e94277d36a4f37426e3ec66290f388847f0f3",
+      "text_markers": {
+        "imports_count": 2,
+        "exports_count": 1,
+        "has_source_map_ref": false
+      }
+    },
+    {
+      "group": "js_module",
+      "route": "/session_socket_controller.js",
+      "kind": "javascript",
+      "status": 200,
+      "content_type": "application/javascript; charset=utf-8",
+      "cache_control": "no-store",
+      "content_length_header": "7410",
+      "byte_length": 7410,
+      "sha256": "b7d6ec92d5c1bc34eaec2186661b8ebb7040061b562ec9b67980f55fb1d12e92",
+      "text_markers": {
+        "imports_count": 1,
+        "exports_count": 1,
+        "has_source_map_ref": false
+      }
+    },
+    {
+      "group": "js_module",
+      "route": "/dir_browser.js",
+      "kind": "javascript",
+      "status": 200,
+      "content_type": "application/javascript; charset=utf-8",
+      "cache_control": "no-store",
+      "content_length_header": "17096",
+      "byte_length": 17096,
+      "sha256": "aba320e8c9ed5e643b7336c1c43fdcaaa51cdfca34d84d3e41bbf6fc145e9ee7",
+      "text_markers": {
+        "imports_count": 1,
+        "exports_count": 20,
+        "has_source_map_ref": false
+      }
+    },
+    {
+      "group": "js_module",
+      "route": "/dir_browser_controller.js",
+      "kind": "javascript",
+      "status": 200,
+      "content_type": "application/javascript; charset=utf-8",
+      "cache_control": "no-store",
+      "content_length_header": "16452",
+      "byte_length": 16452,
+      "sha256": "ec70b887028a0666f06ca9223e303ab986a90202705dae266cb80f82782dfa16",
+      "text_markers": {
+        "imports_count": 1,
+        "exports_count": 3,
+        "has_source_map_ref": false
+      }
+    },
+    {
+      "group": "js_module",
+      "route": "/command_palette.js",
+      "kind": "javascript",
+      "status": 200,
+      "content_type": "application/javascript; charset=utf-8",
+      "cache_control": "no-store",
+      "content_length_header": "6047",
+      "byte_length": 6047,
+      "sha256": "ff2a0b089aff41ca82a9161dd60c6281c26e1dd6df7099fc50c97b895924b389",
+      "text_markers": {
+        "imports_count": 0,
+        "exports_count": 9,
+        "has_source_map_ref": false
+      }
+    },
+    {
+      "group": "js_module",
+      "route": "/command_palette_controller.js",
+      "kind": "javascript",
+      "status": 200,
+      "content_type": "application/javascript; charset=utf-8",
+      "cache_control": "no-store",
+      "content_length_header": "5274",
+      "byte_length": 5274,
+      "sha256": "126d39871b396437424559073c9b1e56d842563f34a0f2e158f2d76309e548d9",
+      "text_markers": {
+        "imports_count": 1,
+        "exports_count": 1,
+        "has_source_map_ref": false
+      }
+    },
+    {
+      "group": "js_module",
+      "route": "/trogdor_logic.js",
+      "kind": "javascript",
+      "status": 200,
+      "content_type": "application/javascript; charset=utf-8",
+      "cache_control": "no-store",
+      "content_length_header": "22629",
+      "byte_length": 22629,
+      "sha256": "34ff592c41d00e49fb77de11c8b64270fb8e660b5d7ff4a8f2e228ad26cb92cd",
+      "text_markers": {
+        "imports_count": 1,
+        "exports_count": 57,
+        "has_source_map_ref": false
+      }
+    },
+    {
+      "group": "js_module",
+      "route": "/trogdor_state.js",
+      "kind": "javascript",
+      "status": 200,
+      "content_type": "application/javascript; charset=utf-8",
+      "cache_control": "no-store",
+      "content_length_header": "7821",
+      "byte_length": 7821,
+      "sha256": "637fb3cd9352c33cf0e018de29a01228f59b10540194ca806f1b61404184cfa9",
+      "text_markers": {
+        "imports_count": 1,
+        "exports_count": 1,
+        "has_source_map_ref": false
+      }
+    },
+    {
+      "group": "js_module",
+      "route": "/trogdor_dom_logic.js",
+      "kind": "javascript",
+      "status": 200,
+      "content_type": "application/javascript; charset=utf-8",
+      "cache_control": "no-store",
+      "content_length_header": "6560",
+      "byte_length": 6560,
+      "sha256": "6508b7446cc3786cb3ee48cc00a81256b10923982bf48d48e830741e40a51812",
+      "text_markers": {
+        "imports_count": 0,
+        "exports_count": 13,
+        "has_source_map_ref": false
+      }
+    },
+    {
+      "group": "js_module",
+      "route": "/trogdor_render.js",
+      "kind": "javascript",
+      "status": 200,
+      "content_type": "application/javascript; charset=utf-8",
+      "cache_control": "no-store",
+      "content_length_header": "21151",
+      "byte_length": 21151,
+      "sha256": "318c2b87ae7e52b7870d121f70b6a2b81361e35d08722c5535fa27ef11fa44e7",
+      "text_markers": {
+        "imports_count": 1,
+        "exports_count": 12,
+        "has_source_map_ref": false
+      }
+    },
+    {
+      "group": "js_module",
+      "route": "/trogdor_surface_controller.js",
+      "kind": "javascript",
+      "status": 200,
+      "content_type": "application/javascript; charset=utf-8",
+      "cache_control": "no-store",
+      "content_length_header": "6289",
+      "byte_length": 6289,
+      "sha256": "53ba998dc9f1088e7e7a39e3999d750f3d5ed26c2133aa4c292cb24b90e4ab03",
+      "text_markers": {
+        "imports_count": 2,
+        "exports_count": 1,
+        "has_source_map_ref": false
+      }
+    },
+    {
+      "group": "js_module",
+      "route": "/workbench_dom.js",
+      "kind": "javascript",
+      "status": 200,
+      "content_type": "application/javascript; charset=utf-8",
+      "cache_control": "no-store",
+      "content_length_header": "1843",
+      "byte_length": 1843,
+      "sha256": "4cd99ac3916e94fc307f20595393b653a54848da55dab2382b5e837c28371f53",
+      "text_markers": {
+        "imports_count": 0,
+        "exports_count": 4,
+        "has_source_map_ref": false
+      }
+    },
+    {
+      "group": "js_module",
+      "route": "/workbench_render.js",
+      "kind": "javascript",
+      "status": 200,
+      "content_type": "application/javascript; charset=utf-8",
+      "cache_control": "no-store",
+      "content_length_header": "22491",
+      "byte_length": 22491,
+      "sha256": "d23397b6ac9071eb1f0842581f3dd7959129428dea5b259c68a7c9f37e51663f",
+      "text_markers": {
+        "imports_count": 1,
+        "exports_count": 16,
+        "has_source_map_ref": false
+      }
+    },
+    {
+      "group": "js_module",
+      "route": "/workbench_log_lens.js",
+      "kind": "javascript",
+      "status": 200,
+      "content_type": "application/javascript; charset=utf-8",
+      "cache_control": "no-store",
+      "content_length_header": "17771",
+      "byte_length": 17771,
+      "sha256": "79900367956e9fb3c549ae156126414a1875e659b200c85e87cabf843dcf3674",
+      "text_markers": {
+        "imports_count": 1,
+        "exports_count": 5,
+        "has_source_map_ref": false
+      }
+    },
+    {
+      "group": "js_module",
+      "route": "/workbench_refresh.js",
+      "kind": "javascript",
+      "status": 200,
+      "content_type": "application/javascript; charset=utf-8",
+      "cache_control": "no-store",
+      "content_length_header": "3673",
+      "byte_length": 3673,
+      "sha256": "a8891c70f038e7ecaed86cad9b773242ea8c8daeeb149ecb240fdde8f69f0f16",
+      "text_markers": {
+        "imports_count": 1,
+        "exports_count": 3,
+        "has_source_map_ref": false
+      }
+    },
+    {
+      "group": "js_module",
+      "route": "/workbench_records.js",
+      "kind": "javascript",
+      "status": 200,
+      "content_type": "application/javascript; charset=utf-8",
+      "cache_control": "no-store",
+      "content_length_header": "10097",
+      "byte_length": 10097,
+      "sha256": "2629fd9a58113ad5393e9e25d065fb4a215385c2fd7863af3e1aeb87a3b59891",
+      "text_markers": {
+        "imports_count": 0,
+        "exports_count": 2,
+        "has_source_map_ref": false
+      }
+    },
+    {
+      "group": "js_module",
+      "route": "/terminal_workbench_controller.js",
+      "kind": "javascript",
+      "status": 200,
+      "content_type": "application/javascript; charset=utf-8",
+      "cache_control": "no-store",
+      "content_length_header": "7999",
+      "byte_length": 7999,
+      "sha256": "d0f493393276889368aaa9fb4d075b94544db93ba589aafaa39bb5015e72c13a",
+      "text_markers": {
+        "imports_count": 4,
+        "exports_count": 1,
+        "has_source_map_ref": false
+      }
+    },
+    {
+      "group": "frankenterm_asset",
+      "route": "/assets/frankenterm/FrankenTerm.js",
+      "kind": "javascript",
+      "status": 200,
+      "content_type": "application/javascript; charset=utf-8",
+      "cache_control": "no-store",
+      "content_length_header": "85668",
+      "byte_length": 85668,
+      "sha256": "4cff5619ece81c0a2e6c25aa460c742451ef6a7892aecb081da5afb011f5e33b",
+      "text_markers": {
+        "imports_count": 0,
+        "exports_count": 2,
+        "has_source_map_ref": false
+      }
+    },
+    {
+      "group": "frankenterm_asset",
+      "route": "/assets/frankenterm/FrankenTerm_bg.wasm",
+      "kind": "wasm",
+      "status": 200,
+      "content_type": "application/wasm",
+      "cache_control": "no-store",
+      "content_length_header": "394920",
+      "byte_length": 394920,
+      "sha256": "26b84220acb8e192480480b40d64bbc30a3d760ce800f97659a37e92136fd64b"
+    },
+    {
+      "group": "frankenterm_asset",
+      "route": "/assets/frankenterm/pragmasevka-nf-subset.woff2",
+      "kind": "font",
+      "status": 404,
+      "content_type": "application/json",
+      "cache_control": null,
+      "content_length_header": "135",
+      "byte_length": 135,
+      "sha256": "f02d0e1b3f1d9e599df0c619cc0c18d1ebee0b44611447a0bccf7c72813ebad9",
+      "text_markers": {
+        "imports_count": 0,
+        "exports_count": 0,
+        "has_source_map_ref": false
+      },
+      "body_preview": "{\"code\":\"FRANKENTERM_FONT_UNAVAILABLE\",\"message\":\"font asset was not found in <frankentui-root>/fonts/pragmasevka-nf-subset.woff2\"}"
+    },
+    {
+      "group": "trogdor_asset",
+      "route": "/assets/dragon/mouth-closed/right.png",
+      "kind": "png",
+      "status": 200,
+      "content_type": "image/png",
+      "cache_control": "public, max-age=31536000, immutable",
+      "content_length_header": "17638",
+      "byte_length": 17638,
+      "sha256": "631d71e4bbf206da3f584710141d8da7884ecbdaaf8df314e7bb4471208ed33e"
+    },
+    {
+      "group": "trogdor_asset",
+      "route": "/assets/dragon/fire-left-full/back-left.png",
+      "kind": "png",
+      "status": 200,
+      "content_type": "image/png",
+      "cache_control": "public, max-age=31536000, immutable",
+      "content_length_header": "13387",
+      "byte_length": 13387,
+      "sha256": "65a8971f4559195c85f64e45c12983031a3ecf181528e380c1571877e4c29da3"
+    },
+    {
+      "group": "negative_asset",
+      "route": "/assets/dragon/mouth-closed/diagonal.png",
+      "kind": "png",
+      "status": 404,
+      "content_type": "application/json",
+      "cache_control": null,
+      "content_length_header": "112",
+      "byte_length": 112,
+      "sha256": "0d2406d7819da458adf6459f1442e75bd65cc84fe28276acc24093104f7a1fa8",
+      "text_markers": {
+        "imports_count": 0,
+        "exports_count": 0,
+        "has_source_map_ref": false
+      },
+      "body_preview": "{\"code\":\"TROGDOR_DRAGON_ASSET_NOT_FOUND\",\"message\":\"The requested Trogdor dragon sprite frame is not available\"}"
+    },
+    {
+      "group": "websocket_expectation",
+      "route": "/ws/sessions/baseline-route-probe",
+      "note": "Plain HTTP GET without WebSocket upgrade; expected non-2xx upgrade response.",
+      "kind": "websocket",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "cache_control": null,
+      "content_length_header": "43",
+      "byte_length": 43,
+      "sha256": "a9bf0fc3ed0e6294f9a1b4f95a58400de5d96c55fdf3059c61eb05a7b62d68e4",
+      "text_markers": {
+        "imports_count": 0,
+        "exports_count": 0,
+        "has_source_map_ref": false
+      },
+      "body_preview": "Connection header did not include 'upgrade'"
+    }
+  ]
+}

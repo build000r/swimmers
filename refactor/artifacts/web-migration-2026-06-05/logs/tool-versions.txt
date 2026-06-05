@@ -1,0 +1,8 @@
+git_head=b34160b7ddb686c3ce188a86fa412f20b919a0d6
+git_branch=main
+rustc 1.96.0 (ac68faa20 2026-05-25)
+cargo 1.96.0 (30a34c682 2026-05-25)
+v22.22.2
+tmux=/usr/bin/tmux
+chrome=UNAVAILABLE
+frankentui_pkg=available (path omitted)

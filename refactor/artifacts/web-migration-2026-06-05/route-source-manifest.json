@@ -1,0 +1,617 @@
+{
+  "captured_at_utc": "2026-06-05T03:02:11.544Z",
+  "top_level_web_routes": [
+    {
+      "route_expr": "\"/\"",
+      "handler": "index"
+    },
+    {
+      "route_expr": "PUBLISHED_VIEW_ROUTE",
+      "handler": "selected_index"
+    },
+    {
+      "route_expr": "\"/ws/sessions/{session_id}\"",
+      "handler": "session_ws"
+    }
+  ],
+  "asset_route_constants": [
+    {
+      "name": "APP_JS_ROUTE",
+      "route": "/app.js"
+    },
+    {
+      "name": "API_CLIENT_JS_ROUTE",
+      "route": "/api_client.js"
+    },
+    {
+      "name": "SESSION_PERSISTENCE_JS_ROUTE",
+      "route": "/session_persistence.js"
+    },
+    {
+      "name": "APP_EVENT_HANDLERS_JS_ROUTE",
+      "route": "/app_event_handlers.js"
+    },
+    {
+      "name": "APP_EVENT_BINDINGS_JS_ROUTE",
+      "route": "/app_event_bindings.js"
+    },
+    {
+      "name": "TROGDOR_EVENT_BINDINGS_JS_ROUTE",
+      "route": "/trogdor_event_bindings.js"
+    },
+    {
+      "name": "RENDERED_SURFACE_JS_ROUTE",
+      "route": "/rendered_surface.js"
+    },
+    {
+      "name": "RENDERED_SURFACE_DRAW_JS_ROUTE",
+      "route": "/rendered_surface_draw.js"
+    },
+    {
+      "name": "INPUT_SUPPORT_JS_ROUTE",
+      "route": "/input_support.js"
+    },
+    {
+      "name": "SURFACE_ACTION_PLANS_JS_ROUTE",
+      "route": "/surface_action_plans.js"
+    },
+    {
+      "name": "TERMINAL_STAGE_CONTROLLER_JS_ROUTE",
+      "route": "/terminal_stage_controller.js"
+    },
+    {
+      "name": "SEND_SHEET_JS_ROUTE",
+      "route": "/send_sheet.js"
+    },
+    {
+      "name": "SEND_CONTROLLER_JS_ROUTE",
+      "route": "/send_controller.js"
+    },
+    {
+      "name": "THOUGHT_CONFIG_SHEET_JS_ROUTE",
+      "route": "/thought_config_sheet.js"
+    },
+    {
+      "name": "NATIVE_DESKTOP_SHEET_JS_ROUTE",
+      "route": "/native_desktop_sheet.js"
+    },
+    {
+      "name": "TERMINAL_SURFACE_SETUP_JS_ROUTE",
+      "route": "/terminal_surface_setup.js"
+    },
+    {
+      "name": "TERMINAL_SURFACE_CONTROLLER_JS_ROUTE",
+      "route": "/terminal_surface_controller.js"
+    },
+    {
+      "name": "TERMINAL_FOCUS_JS_ROUTE",
+      "route": "/terminal_focus.js"
+    },
+    {
+      "name": "TERMINAL_ZOOM_INPUT_JS_ROUTE",
+      "route": "/terminal_zoom_input.js"
+    },
+    {
+      "name": "TERMINAL_RESIZE_JS_ROUTE",
+      "route": "/terminal_resize.js"
+    },
+    {
+      "name": "GLOBAL_SHORTCUT_DISPATCH_JS_ROUTE",
+      "route": "/global_shortcut_dispatch.js"
+    },
+    {
+      "name": "SESSION_REFRESH_JS_ROUTE",
+      "route": "/session_refresh.js"
+    },
+    {
+      "name": "AGENT_CONTEXT_REFRESH_JS_ROUTE",
+      "route": "/agent_context_refresh.js"
+    },
+    {
+      "name": "MERMAID_ARTIFACT_JS_ROUTE",
+      "route": "/mermaid_artifact.js"
+    },
+    {
+      "name": "MERMAID_ARTIFACT_CONTROLLER_JS_ROUTE",
+      "route": "/mermaid_artifact_controller.js"
+    },
+    {
+      "name": "TERMINAL_SAFETY_JS_ROUTE",
+      "route": "/terminal_safety.js"
+    },
+    {
+      "name": "TERMINAL_SEARCH_LINKS_JS_ROUTE",
+      "route": "/terminal_search_links.js"
+    },
+    {
+      "name": "TERMINAL_STATUS_JS_ROUTE",
+      "route": "/terminal_status.js"
+    },
+    {
+      "name": "TERMINAL_PROTOCOL_JS_ROUTE",
+      "route": "/terminal_protocol.js"
+    },
+    {
+      "name": "TERMINAL_INPUT_JS_ROUTE",
+      "route": "/terminal_input.js"
+    },
+    {
+      "name": "SESSION_SOCKET_CONTROLLER_JS_ROUTE",
+      "route": "/session_socket_controller.js"
+    },
+    {
+      "name": "DIR_BROWSER_JS_ROUTE",
+      "route": "/dir_browser.js"
+    },
+    {
+      "name": "DIR_BROWSER_CONTROLLER_JS_ROUTE",
+      "route": "/dir_browser_controller.js"
+    },
+    {
+      "name": "COMMAND_PALETTE_JS_ROUTE",
+      "route": "/command_palette.js"
+    },
+    {
+      "name": "COMMAND_PALETTE_CONTROLLER_JS_ROUTE",
+      "route": "/command_palette_controller.js"
+    },
+    {
+      "name": "TROGDOR_LOGIC_JS_ROUTE",
+      "route": "/trogdor_logic.js"
+    },
+    {
+      "name": "TROGDOR_STATE_JS_ROUTE",
+      "route": "/trogdor_state.js"
+    },
+    {
+      "name": "TROGDOR_DOM_LOGIC_JS_ROUTE",
+      "route": "/trogdor_dom_logic.js"
+    },
+    {
+      "name": "TROGDOR_RENDER_JS_ROUTE",
+      "route": "/trogdor_render.js"
+    },
+    {
+      "name": "TROGDOR_SURFACE_CONTROLLER_JS_ROUTE",
+      "route": "/trogdor_surface_controller.js"
+    },
+    {
+      "name": "WORKBENCH_DOM_JS_ROUTE",
+      "route": "/workbench_dom.js"
+    },
+    {
+      "name": "WORKBENCH_RENDER_JS_ROUTE",
+      "route": "/workbench_render.js"
+    },
+    {
+      "name": "WORKBENCH_LOG_LENS_JS_ROUTE",
+      "route": "/workbench_log_lens.js"
+    },
+    {
+      "name": "WORKBENCH_REFRESH_JS_ROUTE",
+      "route": "/workbench_refresh.js"
+    },
+    {
+      "name": "WORKBENCH_RECORDS_JS_ROUTE",
+      "route": "/workbench_records.js"
+    },
+    {
+      "name": "TERMINAL_WORKBENCH_CONTROLLER_JS_ROUTE",
+      "route": "/terminal_workbench_controller.js"
+    },
+    {
+      "name": "APP_CSS_ROUTE",
+      "route": "/app.css"
+    },
+    {
+      "name": "FRANKENTERM_JS_ROUTE",
+      "route": "/assets/frankenterm/FrankenTerm.js"
+    },
+    {
+      "name": "FRANKENTERM_WASM_ROUTE",
+      "route": "/assets/frankenterm/FrankenTerm_bg.wasm"
+    },
+    {
+      "name": "FRANKENTERM_FONT_ROUTE",
+      "route": "/assets/frankenterm/pragmasevka-nf-subset.woff2"
+    },
+    {
+      "name": "TROGDOR_DRAGON_ASSET_ROUTE",
+      "route": "/assets/dragon/{pose}/{frame}"
+    }
+  ],
+  "asset_router_entries": [
+    {
+      "route_expr": "APP_JS_ROUTE",
+      "handler": "app_js"
+    },
+    {
+      "route_expr": "API_CLIENT_JS_ROUTE",
+      "handler": "api_client_js"
+    },
+    {
+      "route_expr": "SESSION_PERSISTENCE_JS_ROUTE",
+      "handler": "session_persistence_js"
+    },
+    {
+      "route_expr": "APP_EVENT_HANDLERS_JS_ROUTE",
+      "handler": "app_event_handlers_js"
+    },
+    {
+      "route_expr": "APP_EVENT_BINDINGS_JS_ROUTE",
+      "handler": "app_event_bindings_js"
+    },
+    {
+      "route_expr": "RENDERED_SURFACE_JS_ROUTE",
+      "handler": "rendered_surface_js"
+    },
+    {
+      "route_expr": "INPUT_SUPPORT_JS_ROUTE",
+      "handler": "input_support_js"
+    },
+    {
+      "route_expr": "SURFACE_ACTION_PLANS_JS_ROUTE",
+      "handler": "surface_action_plans_js"
+    },
+    {
+      "route_expr": "SEND_SHEET_JS_ROUTE",
+      "handler": "send_sheet_js"
+    },
+    {
+      "route_expr": "SEND_CONTROLLER_JS_ROUTE",
+      "handler": "send_controller_js"
+    },
+    {
+      "route_expr": "THOUGHT_CONFIG_SHEET_JS_ROUTE",
+      "handler": "thought_config_sheet_js"
+    },
+    {
+      "route_expr": "NATIVE_DESKTOP_SHEET_JS_ROUTE",
+      "handler": "native_desktop_sheet_js"
+    },
+    {
+      "route_expr": "TERMINAL_FOCUS_JS_ROUTE",
+      "handler": "terminal_focus_js"
+    },
+    {
+      "route_expr": "TERMINAL_ZOOM_INPUT_JS_ROUTE",
+      "handler": "terminal_zoom_input_js"
+    },
+    {
+      "route_expr": "TERMINAL_RESIZE_JS_ROUTE",
+      "handler": "terminal_resize_js"
+    },
+    {
+      "route_expr": "SESSION_REFRESH_JS_ROUTE",
+      "handler": "session_refresh_js"
+    },
+    {
+      "route_expr": "MERMAID_ARTIFACT_JS_ROUTE",
+      "handler": "mermaid_artifact_js"
+    },
+    {
+      "route_expr": "TERMINAL_SAFETY_JS_ROUTE",
+      "handler": "terminal_safety_js"
+    },
+    {
+      "route_expr": "TERMINAL_STATUS_JS_ROUTE",
+      "handler": "terminal_status_js"
+    },
+    {
+      "route_expr": "TERMINAL_PROTOCOL_JS_ROUTE",
+      "handler": "terminal_protocol_js"
+    },
+    {
+      "route_expr": "TERMINAL_INPUT_JS_ROUTE",
+      "handler": "terminal_input_js"
+    },
+    {
+      "route_expr": "DIR_BROWSER_JS_ROUTE",
+      "handler": "dir_browser_js"
+    },
+    {
+      "route_expr": "COMMAND_PALETTE_JS_ROUTE",
+      "handler": "command_palette_js"
+    },
+    {
+      "route_expr": "TROGDOR_LOGIC_JS_ROUTE",
+      "handler": "trogdor_logic_js"
+    },
+    {
+      "route_expr": "TROGDOR_STATE_JS_ROUTE",
+      "handler": "trogdor_state_js"
+    },
+    {
+      "route_expr": "TROGDOR_DOM_LOGIC_JS_ROUTE",
+      "handler": "trogdor_dom_logic_js"
+    },
+    {
+      "route_expr": "TROGDOR_RENDER_JS_ROUTE",
+      "handler": "trogdor_render_js"
+    },
+    {
+      "route_expr": "WORKBENCH_DOM_JS_ROUTE",
+      "handler": "workbench_dom_js"
+    },
+    {
+      "route_expr": "WORKBENCH_RENDER_JS_ROUTE",
+      "handler": "workbench_render_js"
+    },
+    {
+      "route_expr": "WORKBENCH_LOG_LENS_JS_ROUTE",
+      "handler": "workbench_log_lens_js"
+    },
+    {
+      "route_expr": "WORKBENCH_REFRESH_JS_ROUTE",
+      "handler": "workbench_refresh_js"
+    },
+    {
+      "route_expr": "WORKBENCH_RECORDS_JS_ROUTE",
+      "handler": "workbench_records_js"
+    },
+    {
+      "route_expr": "APP_CSS_ROUTE",
+      "handler": "app_css"
+    },
+    {
+      "route_expr": "FRANKENTERM_JS_ROUTE",
+      "handler": "franken_term_js"
+    },
+    {
+      "route_expr": "FRANKENTERM_WASM_ROUTE",
+      "handler": "franken_term_wasm"
+    },
+    {
+      "route_expr": "FRANKENTERM_FONT_ROUTE",
+      "handler": "franken_term_font"
+    },
+    {
+      "route_expr": "TROGDOR_DRAGON_ASSET_ROUTE",
+      "handler": "trogdor_dragon_asset"
+    }
+  ],
+  "javascript_routes": [
+    {
+      "handler": "app_js",
+      "source": "src/web/app.js",
+      "baked": "app.js"
+    },
+    {
+      "handler": "api_client_js",
+      "source": "src/web/api_client.js",
+      "baked": "api_client.js"
+    },
+    {
+      "handler": "session_persistence_js",
+      "source": "src/web/session_persistence.js",
+      "baked": "session_persistence.js"
+    },
+    {
+      "handler": "app_event_handlers_js",
+      "source": "src/web/app_event_handlers.js",
+      "baked": "app_event_handlers.js"
+    },
+    {
+      "handler": "app_event_bindings_js",
+      "source": "src/web/app_event_bindings.js",
+      "baked": "app_event_bindings.js"
+    },
+    {
+      "handler": "trogdor_event_bindings_js",
+      "source": "src/web/trogdor_event_bindings.js",
+      "baked": "trogdor_event_bindings.js"
+    },
+    {
+      "handler": "rendered_surface_js",
+      "source": "src/web/rendered_surface.js",
+      "baked": "rendered_surface.js"
+    },
+    {
+      "handler": "rendered_surface_draw_js",
+      "source": "src/web/rendered_surface_draw.js",
+      "baked": "rendered_surface_draw.js"
+    },
+    {
+      "handler": "input_support_js",
+      "source": "src/web/input_support.js",
+      "baked": "input_support.js"
+    },
+    {
+      "handler": "surface_action_plans_js",
+      "source": "src/web/surface_action_plans.js",
+      "baked": "surface_action_plans.js"
+    },
+    {
+      "handler": "terminal_stage_controller_js",
+      "source": "src/web/terminal_stage_controller.js",
+      "baked": "terminal_stage_controller.js"
+    },
+    {
+      "handler": "send_sheet_js",
+      "source": "src/web/send_sheet.js",
+      "baked": "send_sheet.js"
+    },
+    {
+      "handler": "send_controller_js",
+      "source": "src/web/send_controller.js",
+      "baked": "send_controller.js"
+    },
+    {
+      "handler": "thought_config_sheet_js",
+      "source": "src/web/thought_config_sheet.js",
+      "baked": "thought_config_sheet.js"
+    },
+    {
+      "handler": "native_desktop_sheet_js",
+      "source": "src/web/native_desktop_sheet.js",
+      "baked": "native_desktop_sheet.js"
+    },
+    {
+      "handler": "terminal_surface_setup_js",
+      "source": "src/web/terminal_surface_setup.js",
+      "baked": "terminal_surface_setup.js"
+    },
+    {
+      "handler": "terminal_surface_controller_js",
+      "source": "src/web/terminal_surface_controller.js",
+      "baked": "terminal_surface_controller.js"
+    },
+    {
+      "handler": "terminal_focus_js",
+      "source": "src/web/terminal_focus.js",
+      "baked": "terminal_focus.js"
+    },
+    {
+      "handler": "terminal_zoom_input_js",
+      "source": "src/web/terminal_zoom_input.js",
+      "baked": "terminal_zoom_input.js"
+    },
+    {
+      "handler": "terminal_resize_js",
+      "source": "src/web/terminal_resize.js",
+      "baked": "terminal_resize.js"
+    },
+    {
+      "handler": "global_shortcut_dispatch_js",
+      "source": "src/web/global_shortcut_dispatch.js",
+      "baked": "global_shortcut_dispatch.js"
+    },
+    {
+      "handler": "session_refresh_js",
+      "source": "src/web/session_refresh.js",
+      "baked": "session_refresh.js"
+    },
+    {
+      "handler": "agent_context_refresh_js",
+      "source": "src/web/agent_context_refresh.js",
+      "baked": "agent_context_refresh.js"
+    },
+    {
+      "handler": "mermaid_artifact_js",
+      "source": "src/web/mermaid_artifact.js",
+      "baked": "mermaid_artifact.js"
+    },
+    {
+      "handler": "mermaid_artifact_controller_js",
+      "source": "src/web/mermaid_artifact_controller.js",
+      "baked": "mermaid_artifact_controller.js"
+    },
+    {
+      "handler": "terminal_safety_js",
+      "source": "src/web/terminal_safety.js",
+      "baked": "terminal_safety.js"
+    },
+    {
+      "handler": "terminal_search_links_js",
+      "source": "src/web/terminal_search_links.js",
+      "baked": "terminal_search_links.js"
+    },
+    {
+      "handler": "terminal_status_js",
+      "source": "src/web/terminal_status.js",
+      "baked": "terminal_status.js"
+    },
+    {
+      "handler": "terminal_protocol_js",
+      "source": "src/web/terminal_protocol.js",
+      "baked": "terminal_protocol.js"
+    },
+    {
+      "handler": "terminal_input_js",
+      "source": "src/web/terminal_input.js",
+      "baked": "terminal_input.js"
+    },
+    {
+      "handler": "session_socket_controller_js",
+      "source": "src/web/session_socket_controller.js",
+      "baked": "session_socket_controller.js"
+    },
+    {
+      "handler": "dir_browser_js",
+      "source": "src/web/dir_browser.js",
+      "baked": "dir_browser.js"
+    },
+    {
+      "handler": "dir_browser_controller_js",
+      "source": "src/web/dir_browser_controller.js",
+      "baked": "dir_browser_controller.js"
+    },
+    {
+      "handler": "command_palette_js",
+      "source": "src/web/command_palette.js",
+      "baked": "command_palette.js"
+    },
+    {
+      "handler": "command_palette_controller_js",
+      "source": "src/web/command_palette_controller.js",
+      "baked": "command_palette_controller.js"
+    },
+    {
+      "handler": "trogdor_logic_js",
+      "source": "src/web/trogdor_logic.js",
+      "baked": "trogdor_logic.js"
+    },
+    {
+      "handler": "trogdor_state_js",
+      "source": "src/web/trogdor_state.js",
+      "baked": "trogdor_state.js"
+    },
+    {
+      "handler": "trogdor_dom_logic_js",
+      "source": "src/web/trogdor_dom_logic.js",
+      "baked": "trogdor_dom_logic.js"
+    },
+    {
+      "handler": "trogdor_render_js",
+      "source": "src/web/trogdor_render.js",
+      "baked": "trogdor_render.js"
+    },
+    {
+      "handler": "trogdor_surface_controller_js",
+      "source": "src/web/trogdor_surface_controller.js",
+      "baked": "trogdor_surface_controller.js"
+    },
+    {
+      "handler": "workbench_dom_js",
+      "source": "src/web/workbench_dom.js",
+      "baked": "workbench_dom.js"
+    },
+    {
+      "handler": "workbench_render_js",
+      "source": "src/web/workbench_render.js",
+      "baked": "workbench_render.js"
+    },
+    {
+      "handler": "workbench_log_lens_js",
+      "source": "src/web/workbench_log_lens.js",
+      "baked": "workbench_log_lens.js"
+    },
+    {
+      "handler": "workbench_refresh_js",
+      "source": "src/web/workbench_refresh.js",
+      "baked": "workbench_refresh.js"
+    },
+    {
+      "handler": "workbench_records_js",
+      "source": "src/web/workbench_records.js",
+      "baked": "workbench_records.js"
+    },
+    {
+      "handler": "terminal_workbench_controller_js",
+      "source": "src/web/terminal_workbench_controller.js",
+      "baked": "terminal_workbench_controller.js"
+    }
+  ],
+  "app_css_parts": [
+    "src/web/app.css",
+    "src/web/app_trogdor.css",
+    "src/web/app_sheets.css",
+    "src/web/app_create_console.css",
+    "src/web/app_sheet_results.css",
+    "src/web/app_mobile.css",
+    "src/web/app_reduced_motion.css",
+    "src/web/app_scrollbar.css"
+  ],
+  "ws_route": "/ws/sessions/{session_id}",
+  "note": "Source manifest only; runtime checksums are in served-route-contract.json."
+}

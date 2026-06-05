@@ -1,0 +1,2206 @@
+TAP version 13
+# Subtest: agent context plans preserve request path, start gates, and stale guards
+ok 1 - agent context plans preserve request path, start gates, and stale guards
+  ---
+  duration_ms: 10.153213
+  type: 'test'
+  ...
+# Subtest: runAgentContextRefresh preserves no-session reset behavior
+ok 2 - runAgentContextRefresh preserves no-session reset behavior
+  ---
+  duration_ms: 4.777739
+  type: 'test'
+  ...
+# Subtest: runAgentContextRefresh preserves Atlas unsupported reset behavior
+ok 3 - runAgentContextRefresh preserves Atlas unsupported reset behavior
+  ---
+  duration_ms: 5.141196
+  type: 'test'
+  ...
+# Subtest: runAgentContextRefresh preserves successful payload and loading transitions
+ok 4 - runAgentContextRefresh preserves successful payload and loading transitions
+  ---
+  duration_ms: 1.106791
+  type: 'test'
+  ...
+# Subtest: runAgentContextRefresh preserves throttle no-op behavior
+ok 5 - runAgentContextRefresh preserves throttle no-op behavior
+  ---
+  duration_ms: 0.737715
+  type: 'test'
+  ...
+# Subtest: runAgentContextRefresh preserves stale selected-session guard
+ok 6 - runAgentContextRefresh preserves stale selected-session guard
+  ---
+  duration_ms: 3.998374
+  type: 'test'
+  ...
+# Subtest: runAgentContextRefresh preserves fetch error handling
+ok 7 - runAgentContextRefresh preserves fetch error handling
+  ---
+  duration_ms: 0.793812
+  type: 'test'
+  ...
+# Subtest: apiHeaders preserves extra headers and applies bearer token when present
+ok 8 - apiHeaders preserves extra headers and applies bearer token when present
+  ---
+  duration_ms: 2.961107
+  type: 'test'
+  ...
+# Subtest: createApiClient apiFetch adds late-bound auth headers and preserves init fields
+ok 9 - createApiClient apiFetch adds late-bound auth headers and preserves init fields
+  ---
+  duration_ms: 1.151197
+  type: 'test'
+  ...
+# Subtest: apiFetch reports JSON message, code, or HTTP fallback and preserves status
+ok 10 - apiFetch reports JSON message, code, or HTTP fallback and preserves status
+  ---
+  duration_ms: 4.900213
+  type: 'test'
+  ...
+# Subtest: apiMaybeFetch maps 404 to null and leaves other failures intact
+ok 11 - apiMaybeFetch maps 404 to null and leaves other failures intact
+  ---
+  duration_ms: 0.810974
+  type: 'test'
+  ...
+# Subtest: responseJsonOrNull returns null for empty responses and parses present responses
+ok 12 - responseJsonOrNull returns null for empty responses and parses present responses
+  ---
+  duration_ms: 0.677759
+  type: 'test'
+  ...
+# Subtest: selecting a Trogdor swordsman forces the terminal view, not just URL state
+ok 13 - selecting a Trogdor swordsman forces the terminal view, not just URL state
+  ---
+  duration_ms: 10.608335
+  type: 'test'
+  ...
+# Subtest: Trogdor atlas renders dragon sprite assets and flames burnt swordsmen
+ok 14 - Trogdor atlas renders dragon sprite assets and flames burnt swordsmen
+  ---
+  duration_ms: 7.568429
+  type: 'test'
+  ...
+# Subtest: Trogdor atlas keeps deep sleep swordsmen visible and hoverable
+ok 15 - Trogdor atlas keeps deep sleep swordsmen visible and hoverable
+  ---
+  duration_ms: 6.085356
+  type: 'test'
+  ...
+# Subtest: live terminal presentation hides the HUD canvas with class and inline state
+ok 16 - live terminal presentation hides the HUD canvas with class and inline state
+  ---
+  duration_ms: 0.815664
+  type: 'test'
+  ...
+# Subtest: replayed terminal bytes flush protocol replies back to tmux
+ok 17 - replayed terminal bytes flush protocol replies back to tmux
+  ---
+  duration_ms: 5.838403
+  type: 'test'
+  ...
+# Subtest: framed terminal output records sequence and returns payload
+ok 18 - framed terminal output records sequence and returns payload
+  ---
+  duration_ms: 3.975341
+  type: 'test'
+  ...
+# Subtest: raw terminal output remains unchanged without framed opt-in
+ok 19 - raw terminal output remains unchanged without framed opt-in
+  ---
+  duration_ms: 0.46897
+  type: 'test'
+  ...
+# Subtest: session websocket URL opts into framed resume protocol without bearer token
+ok 20 - session websocket URL opts into framed resume protocol without bearer token
+  ---
+  duration_ms: 0.956283
+  type: 'test'
+  ...
+# Subtest: session websocket auth message is omitted without a token
+ok 21 - session websocket auth message is omitted without a token
+  ---
+  duration_ms: 3.325815
+  type: 'test'
+  ...
+# Subtest: terminal text fallback keeps send input wired to the live websocket
+ok 22 - terminal text fallback keeps send input wired to the live websocket
+  ---
+  duration_ms: 10.407992
+  type: 'test'
+  ...
+# Subtest: terminal paste budget rejects oversized live paste
+ok 23 - terminal paste budget rejects oversized live paste
+  ---
+  duration_ms: 12.828352
+  type: 'test'
+  ...
+# Subtest: FrankenTerm link policy only allows HTTP on loopback hosts
+ok 24 - FrankenTerm link policy only allows HTTP on loopback hosts
+  ---
+  duration_ms: 1.011308
+  type: 'test'
+  ...
+# Subtest: safe anchor href rejects active-content directory URLs
+ok 25 - safe anchor href rejects active-content directory URLs
+  ---
+  duration_ms: 0.402871
+  type: 'test'
+  ...
+# Subtest: FrankenTerm surface validation reports missing methods
+ok 26 - FrankenTerm surface validation reports missing methods
+  ---
+  duration_ms: 0.754146
+  type: 'test'
+  ...
+# Subtest: FrankenTerm resize waits while another surface operation is active
+ok 27 - FrankenTerm resize waits while another surface operation is active
+  ---
+  duration_ms: 63.048174
+  type: 'test'
+  ...
+# Subtest: FrankenTerm recursive borrow errors are retried instead of escaping resize
+ok 28 - FrankenTerm recursive borrow errors are retried instead of escaping resize
+  ---
+  duration_ms: 4.98177
+  type: 'test'
+  ...
+# Subtest: renderer diagnostic stores JSONL line when supported
+ok 29 - renderer diagnostic stores JSONL line when supported
+  ---
+  duration_ms: 1.461772
+  type: 'test'
+  ...
+# Subtest: terminal text fallback becomes the keyboard focus target
+ok 30 - terminal text fallback becomes the keyboard focus target
+  ---
+  duration_ms: 1.4451
+  type: 'test'
+  ...
+# Subtest: terminal text fallback keydown sends live websocket input once
+ok 31 - terminal text fallback keydown sends live websocket input once
+  ---
+  duration_ms: 2.923183
+  type: 'test'
+  ...
+# Subtest: terminal text fallback paste sends live websocket input
+ok 32 - terminal text fallback paste sends live websocket input
+  ---
+  duration_ms: 1.793749
+  type: 'test'
+  ...
+# Subtest: terminal status strip shows live input when renderer fallback is active
+ok 33 - terminal status strip shows live input when renderer fallback is active
+  ---
+  duration_ms: 4.301006
+  type: 'test'
+  ...
+# Subtest: terminal status strip renders backend health degradation and recovery
+ok 34 - terminal status strip renders backend health degradation and recovery
+  ---
+  duration_ms: 2.437833
+  type: 'test'
+  ...
+# Subtest: terminal status strip renders thought bridge degradation
+ok 35 - terminal status strip renders thought bridge degradation
+  ---
+  duration_ms: 1.117281
+  type: 'test'
+  ...
+# Subtest: terminal text fallback refreshes from live terminal frames
+ok 36 - terminal text fallback refreshes from live terminal frames
+  ---
+  duration_ms: 4.488634
+  type: 'test'
+  ...
+# Subtest: terminal bytes are buffered until FrankenTerm accepts input
+ok 37 - terminal bytes are buffered until FrankenTerm accepts input
+  ---
+  duration_ms: 2.424187
+  type: 'test'
+  ...
+# Subtest: terminal text fallback does not replace a useful snapshot with blank live frames
+ok 38 - terminal text fallback does not replace a useful snapshot with blank live frames
+  ---
+  duration_ms: 1.40803
+  type: 'test'
+  ...
+# Subtest: terminal input dock appears in terminal mode and disables empty sends
+ok 39 - terminal input dock appears in terminal mode and disables empty sends
+  ---
+  duration_ms: 0.595541
+  type: 'test'
+  ...
+# Subtest: terminal input dock sends a line to tmux and keeps a local echo
+ok 40 - terminal input dock sends a line to tmux and keeps a local echo
+  ---
+  duration_ms: 13.851794
+  type: 'test'
+  ...
+# Subtest: terminal key strip sends Ctrl-C and navigation bytes from the dock
+ok 41 - terminal key strip sends Ctrl-C and navigation bytes from the dock
+  ---
+  duration_ms: 4.194461
+  type: 'test'
+  ...
+# Subtest: terminal composer turns empty-field Ctrl-C and arrows into terminal controls
+ok 42 - terminal composer turns empty-field Ctrl-C and arrows into terminal controls
+  ---
+  duration_ms: 0.643493
+  type: 'test'
+  ...
+# Subtest: terminal composer keydown handler preserves control sends and propagation
+ok 43 - terminal composer keydown handler preserves control sends and propagation
+  ---
+  duration_ms: 1.026167
+  type: 'test'
+  ...
+# Subtest: input ack updates pending terminal dock delivery status
+ok 44 - input ack updates pending terminal dock delivery status
+  ---
+  duration_ms: 10.993744
+  type: 'test'
+  ...
+# Subtest: input ack cleanup preserves sent echo without keeping Node alive
+ok 45 - input ack cleanup preserves sent echo without keeping Node alive
+  ---
+  duration_ms: 2.569396
+  type: 'test'
+  ...
+# Subtest: input ack failure keeps failed delivery visible
+ok 46 - input ack failure keeps failed delivery visible
+  ---
+  duration_ms: 6.154288
+  type: 'test'
+  ...
+# Subtest: websocket control events patch live session state
+ok 47 - websocket control events patch live session state
+  ---
+  duration_ms: 70.139418
+  type: 'test'
+  ...
+# Subtest: session refresh backs off while selected event stream is open
+ok 48 - session refresh backs off while selected event stream is open
+  ---
+  duration_ms: 0.465432
+  type: 'test'
+  ...
+# Subtest: websocket control events refresh selected workbench sidecars
+ok 49 - websocket control events refresh selected workbench sidecars
+  ---
+  duration_ms: 45.991506
+  type: 'test'
+  ...
+# Subtest: websocket lifecycle events create and stale sessions
+ok 50 - websocket lifecycle events create and stale sessions
+  ---
+  duration_ms: 11.663048
+  type: 'test'
+  ...
+# Subtest: terminal workbench fetches and renders selected agent context
+ok 51 - terminal workbench fetches and renders selected agent context
+  ---
+  duration_ms: 2.334836
+  type: 'test'
+  ...
+# Subtest: terminal workbench toggle controls the single-terminal panel
+ok 52 - terminal workbench toggle controls the single-terminal panel
+  ---
+  duration_ms: 0.508695
+  type: 'test'
+  ...
+# Subtest: terminal Trogdor back control returns to the atlas from the workbench
+ok 53 - terminal Trogdor back control returns to the atlas from the workbench
+  ---
+  duration_ms: 1.377691
+  type: 'test'
+  ...
+# Subtest: terminal workbench pinned widgets render pane output and artifacts from session APIs
+ok 54 - terminal workbench pinned widgets render pane output and artifacts from session APIs
+  ---
+  duration_ms: 6.191348
+  type: 'test'
+  ...
+# Subtest: terminal workbench widget event handlers preserve selection, filters, and sheets
+ok 55 - terminal workbench widget event handlers preserve selection, filters, and sheets
+  ---
+  duration_ms: 6.472188
+  type: 'test'
+  ...
+# Subtest: Mermaid artifact renderer bounds source and advertised plan tabs
+ok 56 - Mermaid artifact renderer bounds source and advertised plan tabs
+  ---
+  duration_ms: 2.260494
+  type: 'test'
+  ...
+# Subtest: Mermaid artifact preview uses image URL instead of injected SVG markup
+ok 57 - Mermaid artifact preview uses image URL instead of injected SVG markup
+  ---
+  duration_ms: 0.627142
+  type: 'test'
+  ...
+# Subtest: Mermaid plan loader rejects path-ish names and bounds huge content
+ok 58 - Mermaid plan loader rejects path-ish names and bounds huge content
+  ---
+  duration_ms: 1.986187
+  type: 'test'
+  ...
+# Subtest: workbench rerender preserves parent scrollTop and skips identical writes
+ok 59 - workbench rerender preserves parent scrollTop and skips identical writes
+  ---
+  duration_ms: 5.072494
+  type: 'test'
+  ...
+# Subtest: workbench rerender restores details open state by title
+ok 60 - workbench rerender restores details open state by title
+  ---
+  duration_ms: 0.993174
+  type: 'test'
+  ...
+# Subtest: workbench transcript lens classifies, filters, searches, and preserves raw logs
+ok 61 - workbench transcript lens classifies, filters, searches, and preserves raw logs
+  ---
+  duration_ms: 1.940159
+  type: 'test'
+  ...
+# Subtest: workbench Turns panel is user-only and logs follow selected post-turn JSONL
+ok 62 - workbench Turns panel is user-only and logs follow selected post-turn JSONL
+  ---
+  duration_ms: 1.593024
+  type: 'test'
+  ...
+# Subtest: workbench JSONL records render parsed event fields
+ok 63 - workbench JSONL records render parsed event fields
+  ---
+  duration_ms: 2.756143
+  type: 'test'
+  ...
+# Subtest: workbench Claude JSONL messages render readable content instead of raw envelopes
+ok 64 - workbench Claude JSONL messages render readable content instead of raw envelopes
+  ---
+  duration_ms: 3.683873
+  type: 'test'
+  ...
+# Subtest: terminal text fallback follows the tail unless the user scrolled up
+ok 65 - terminal text fallback follows the tail unless the user scrolled up
+  ---
+  duration_ms: 0.606873
+  type: 'test'
+  ...
+# Subtest: command palette filters existing actions without touching terminal input
+ok 66 - command palette filters existing actions without touching terminal input
+  ---
+  duration_ms: 1.650625
+  type: 'test'
+  ...
+# Subtest: command palette run path preserves disabled no-op, actions, and actionId dispatch
+ok 67 - command palette run path preserves disabled no-op, actions, and actionId dispatch
+  ---
+  duration_ms: 7.965039
+  type: 'test'
+  ...
+# Subtest: command palette event handlers preserve navigation and result dispatch
+ok 68 - command palette event handlers preserve navigation and result dispatch
+  ---
+  duration_ms: 1.902938
+  type: 'test'
+  ...
+# Subtest: global shortcut handler preserves side effects and handled no-ops
+ok 69 - global shortcut handler preserves side effects and handled no-ops
+  ---
+  duration_ms: 4.084339
+  type: 'test'
+  ...
+# Subtest: mobile keyboard key handler preserves shortcut precedence, close, and forwarding
+ok 70 - mobile keyboard key handler preserves shortcut precedence, close, and forwarding
+  ---
+  duration_ms: 2.077642
+  type: 'test'
+  ...
+# Subtest: mobile keyboard input handler preserves clears, control events, and text sends
+ok 71 - mobile keyboard input handler preserves clears, control events, and text sends
+  ---
+  duration_ms: 1.935049
+  type: 'test'
+  ...
+# Subtest: send history stores multiline prompts for recall chips
+ok 72 - send history stores multiline prompts for recall chips
+  ---
+  duration_ms: 0.43285
+  type: 'test'
+  ...
+# Subtest: auth token button action preserves save, clear, and refresh side effects
+ok 73 - auth token button action preserves save, clear, and refresh side effects
+  ---
+  duration_ms: 9.91642
+  type: 'test'
+  ...
+# Subtest: visible directory batch action preserves selection, cwd fallback, and status
+ok 74 - visible directory batch action preserves selection, cwd fallback, and status
+  ---
+  duration_ms: 2.830576
+  type: 'test'
+  ...
+# Subtest: directory checkbox change action preserves add, remove, reset, and ignore paths
+ok 75 - directory checkbox change action preserves add, remove, reset, and ignore paths
+  ---
+  duration_ms: 0.762062
+  type: 'test'
+  ...
+# Subtest: directory group chip click action preserves filters, storage, and load path
+ok 76 - directory group chip click action preserves filters, storage, and load path
+  ---
+  duration_ms: 1.403359
+  type: 'test'
+  ...
+# Subtest: send form submit handler preserves line send side effects and cleanup
+ok 77 - send form submit handler preserves line send side effects and cleanup
+  ---
+  duration_ms: 4.086484
+  type: 'test'
+  ...
+# Subtest: batch send burns only successful group-input results
+ok 78 - batch send burns only successful group-input results
+  ---
+  duration_ms: 3.283043
+  type: 'test'
+  ...
+# Subtest: paste-only HTTP sends stage text without burning Trogdor response state
+ok 79 - paste-only HTTP sends stage text without burning Trogdor response state
+  ---
+  duration_ms: 0.721384
+  type: 'test'
+  ...
+# Subtest: accessibility mirror syncs FrankenTerm screen-reader text and announcements
+ok 80 - accessibility mirror syncs FrankenTerm screen-reader text and announcements
+  ---
+  duration_ms: 0.36477
+  type: 'test'
+  ...
+# Subtest: terminal status strip marks attention sessions in the browser chrome
+ok 81 - terminal status strip marks attention sessions in the browser chrome
+  ---
+  duration_ms: 0.286329
+  type: 'test'
+  ...
+# Subtest: hovered terminal links expose open and copy affordances
+ok 82 - hovered terminal links expose open and copy affordances
+  ---
+  duration_ms: 0.274576
+  type: 'test'
+  ...
+# Subtest: installEventListenerBinding preserves required target and document binding behavior
+ok 83 - installEventListenerBinding preserves required target and document binding behavior
+  ---
+  duration_ms: 8.462804
+  type: 'test'
+  ...
+# Subtest: installEventListenerBinding preserves optional target and optional listener behavior
+ok 84 - installEventListenerBinding preserves optional target and optional listener behavior
+  ---
+  duration_ms: 1.15292
+  type: 'test'
+  ...
+# Subtest: installEventListenerBinding preserves handler missing-error semantics
+ok 85 - installEventListenerBinding preserves handler missing-error semantics
+  ---
+  duration_ms: 0.593128
+  type: 'test'
+  ...
+# Subtest: bindAppEvents preserves terminal stage capture ordering and resize installation
+ok 86 - bindAppEvents preserves terminal stage capture ordering and resize installation
+  ---
+  duration_ms: 4.187458
+  type: 'test'
+  ...
+# Subtest: installTerminalStageResizeObserver observes terminal stage and queues forced measurement
+ok 87 - installTerminalStageResizeObserver observes terminal stage and queues forced measurement
+  ---
+  duration_ms: 0.802369
+  type: 'test'
+  ...
+# Subtest: command palette item helpers preserve disabled states and session labels
+ok 88 - command palette item helpers preserve disabled states and session labels
+  ---
+  duration_ms: 3.529095
+  type: 'test'
+  ...
+# Subtest: command palette scoring and filtering preserve search ordering and limits
+ok 89 - command palette scoring and filtering preserve search ordering and limits
+  ---
+  duration_ms: 15.747387
+  type: 'test'
+  ...
+# Subtest: command palette state helper combines built-in commands, sessions, and scores
+ok 90 - command palette state helper combines built-in commands, sessions, and scores
+  ---
+  duration_ms: 3.758756
+  type: 'test'
+  ...
+# Subtest: command palette result markup helper preserves escaping, active state, and disabled copy
+ok 91 - command palette result markup helper preserves escaping, active state, and disabled copy
+  ---
+  duration_ms: 1.007522
+  type: 'test'
+  ...
+# Subtest: command palette execution plan helper preserves no-ops and dispatch ordering
+ok 92 - command palette execution plan helper preserves no-ops and dispatch ordering
+  ---
+  duration_ms: 0.817567
+  type: 'test'
+  ...
+# Subtest: command palette event helpers preserve keyboard and result index decisions
+ok 93 - command palette event helpers preserve keyboard and result index decisions
+  ---
+  duration_ms: 0.785647
+  type: 'test'
+  ...
+# Subtest: openCommandPalette resets search, renders filtered items, toggles modal classes, and schedules focus
+ok 94 - openCommandPalette resets search, renders filtered items, toggles modal classes, and schedules focus
+  ---
+  duration_ms: 52.806491
+  type: 'test'
+  ...
+# Subtest: openSheet runs sheet-specific side effects and focus targets
+ok 95 - openSheet runs sheet-specific side effects and focus targets
+  ---
+  duration_ms: 4.065142
+  type: 'test'
+  ...
+# Subtest: closeSheets clears send and create state, hides modal, and refocuses terminal immediately
+ok 96 - closeSheets clears send and create state, hides modal, and refocuses terminal immediately
+  ---
+  duration_ms: 0.909714
+  type: 'test'
+  ...
+# Subtest: runCommandPaletteItem preserves disabled no-op, action, actionId, and session selection paths
+ok 97 - runCommandPaletteItem preserves disabled no-op, action, actionId, and session selection paths
+  ---
+  duration_ms: 0.976834
+  type: 'test'
+  ...
+# Subtest: directory path helpers preserve legacy root joining and explicit paths
+ok 98 - directory path helpers preserve legacy root joining and explicit paths
+  ---
+  duration_ms: 2.563413
+  type: 'test'
+  ...
+# Subtest: directory group and search helpers keep membership and repo status searchable
+ok 99 - directory group and search helpers keep membership and repo status searchable
+  ---
+  duration_ms: 2.054209
+  type: 'test'
+  ...
+# Subtest: directory batch selectability rejects virtual group rows without a full path
+ok 100 - directory batch selectability rejects virtual group rows without a full path
+  ---
+  duration_ms: 0.999245
+  type: 'test'
+  ...
+# Subtest: visible selectable paths respects search and virtual group rows
+ok 101 - visible selectable paths respects search and virtual group rows
+  ---
+  duration_ms: 0.685995
+  type: 'test'
+  ...
+# Subtest: visibleDirBatchPlan preserves paths, fallbacks, and status copy
+ok 102 - visibleDirBatchPlan preserves paths, fallbacks, and status copy
+  ---
+  duration_ms: 0.735811
+  type: 'test'
+  ...
+# Subtest: dirCheckboxChangePlan preserves ignored, reset, add, and remove decisions
+ok 103 - dirCheckboxChangePlan preserves ignored, reset, add, and remove decisions
+  ---
+  duration_ms: 0.63082
+  type: 'test'
+  ...
+# Subtest: dirGroupChipClickPlan preserves managed, all, group, blank, and ignored decisions
+ok 104 - dirGroupChipClickPlan preserves managed, all, group, blank, and ignored decisions
+  ---
+  duration_ms: 0.863065
+  type: 'test'
+  ...
+# Subtest: dirGroupMembershipClickPlan preserves action dataset forwarding and ignores
+ok 105 - dirGroupMembershipClickPlan preserves action dataset forwarding and ignores
+  ---
+  duration_ms: 0.645978
+  type: 'test'
+  ...
+# Subtest: dirRowClickPlan preserves row path trimming, child detection, and ignores
+ok 106 - dirRowClickPlan preserves row path trimming, child detection, and ignores
+  ---
+  duration_ms: 1.092725
+  type: 'test'
+  ...
+# Subtest: launch target and batch bar helpers preserve payload and label semantics
+ok 107 - launch target and batch bar helpers preserve payload and label semantics
+  ---
+  duration_ms: 1.468045
+  type: 'test'
+  ...
+# Subtest: directory browser controller helpers preserve retry gate and batch failure copy
+ok 108 - directory browser controller helpers preserve retry gate and batch failure copy
+  ---
+  duration_ms: 0.625589
+  type: 'test'
+  ...
+# Subtest: runGlobalShortcutAction dispatches palette, zoom, sheet, and noop actions
+ok 109 - runGlobalShortcutAction dispatches palette, zoom, sheet, and noop actions
+  ---
+  duration_ms: 3.733076
+  type: 'test'
+  ...
+# Subtest: runGlobalShortcutAction dispatches escape and ctrl-shift side effects
+ok 110 - runGlobalShortcutAction dispatches escape and ctrl-shift side effects
+  ---
+  duration_ms: 1.178198
+  type: 'test'
+  ...
+# Subtest: eventClientPoint uses direct pointer coordinates when present
+ok 111 - eventClientPoint uses direct pointer coordinates when present
+  ---
+  duration_ms: 4.326384
+  type: 'test'
+  ...
+# Subtest: eventClientPoint falls back to changedTouches for mobile taps
+ok 112 - eventClientPoint falls back to changedTouches for mobile taps
+  ---
+  duration_ms: 0.502985
+  type: 'test'
+  ...
+# Subtest: eventCell maps touch coordinates into the rendered grid
+ok 113 - eventCell maps touch coordinates into the rendered grid
+  ---
+  duration_ms: 0.452216
+  type: 'test'
+  ...
+# Subtest: shouldIgnoreSyntheticClick suppresses the follow-up click after a handled press
+ok 114 - shouldIgnoreSyntheticClick suppresses the follow-up click after a handled press
+  ---
+  duration_ms: 0.293622
+  type: 'test'
+  ...
+# Subtest: authTokenButtonPlan preserves save, clear, and ignored actions
+ok 115 - authTokenButtonPlan preserves save, clear, and ignored actions
+  ---
+  duration_ms: 0.509096
+  type: 'test'
+  ...
+# Subtest: globalShortcutPlan preserves modifier precedence and escape ordering
+ok 116 - globalShortcutPlan preserves modifier precedence and escape ordering
+  ---
+  duration_ms: 0.731583
+  type: 'test'
+  ...
+# Subtest: globalShortcutPlan preserves ctrl-shift commands and gated handled no-ops
+ok 117 - globalShortcutPlan preserves ctrl-shift commands and gated handled no-ops
+  ---
+  duration_ms: 0.665927
+  type: 'test'
+  ...
+# Subtest: surfaceActionDispatchPlan preserves ignored and direct zone routes
+ok 118 - surfaceActionDispatchPlan preserves ignored and direct zone routes
+  ---
+  duration_ms: 0.656649
+  type: 'test'
+  ...
+# Subtest: surfaceActionDispatchPlan preserves Trogdor reader and atlas action routes
+ok 119 - surfaceActionDispatchPlan preserves Trogdor reader and atlas action routes
+  ---
+  duration_ms: 0.733868
+  type: 'test'
+  ...
+# Subtest: surfaceActionDispatchPlan preserves Trogdor surface action routes
+ok 120 - surfaceActionDispatchPlan preserves Trogdor surface action routes
+  ---
+  duration_ms: 0.809753
+  type: 'test'
+  ...
+# Subtest: surfaceActionDispatchPlan preserves sheet, utility, and refresh routes
+ok 121 - surfaceActionDispatchPlan preserves sheet, utility, and refresh routes
+  ---
+  duration_ms: 0.486803
+  type: 'test'
+  ...
+# Subtest: surfaceActionDispatchPlan preserves open_send and open_create gates
+ok 122 - surfaceActionDispatchPlan preserves open_send and open_create gates
+  ---
+  duration_ms: 0.469871
+  type: 'test'
+  ...
+# Subtest: surfaceActionDispatchContextPlan preserves direct-zone and sheet context gates
+ok 123 - surfaceActionDispatchContextPlan preserves direct-zone and sheet context gates
+  ---
+  duration_ms: 0.364579
+  type: 'test'
+  ...
+# Subtest: surfaceActionTrogdorReaderExecutionPlan preserves toggle side-effect decisions
+ok 124 - surfaceActionTrogdorReaderExecutionPlan preserves toggle side-effect decisions
+  ---
+  duration_ms: 0.402521
+  type: 'test'
+  ...
+# Subtest: surfaceActionTrogdorReaderExecutionPlan preserves WPM and ignore decisions
+ok 125 - surfaceActionTrogdorReaderExecutionPlan preserves WPM and ignore decisions
+  ---
+  duration_ms: 0.22931
+  type: 'test'
+  ...
+# Subtest: surfaceActionExecutionContextPlan requests zone payloads only for zone-derived actions
+ok 126 - surfaceActionExecutionContextPlan requests zone payloads only for zone-derived actions
+  ---
+  duration_ms: 3.459842
+  type: 'test'
+  ...
+# Subtest: surfaceActionExecutionPlan preserves zone payload execution decisions
+ok 127 - surfaceActionExecutionPlan preserves zone payload execution decisions
+  ---
+  duration_ms: 0.43784
+  type: 'test'
+  ...
+# Subtest: surfaceActionExecutionPlan preserves simple sheet, utility, and refresh decisions
+ok 128 - surfaceActionExecutionPlan preserves simple sheet, utility, and refresh decisions
+  ---
+  duration_ms: 2.74338
+  type: 'test'
+  ...
+# Subtest: surfaceActionFocusTerminalExecutionPlan preserves focus side-effect data
+ok 129 - surfaceActionFocusTerminalExecutionPlan preserves focus side-effect data
+  ---
+  duration_ms: 0.334442
+  type: 'test'
+  ...
+# Subtest: mobileKeyboardKeyPlan preserves special-key forwarding and no-op gates
+ok 130 - mobileKeyboardKeyPlan preserves special-key forwarding and no-op gates
+  ---
+  duration_ms: 0.398564
+  type: 'test'
+  ...
+# Subtest: mobileKeyboardKeydownPlan preserves shortcut, ignore, close, and forward decisions
+ok 131 - mobileKeyboardKeydownPlan preserves shortcut, ignore, close, and forward decisions
+  ---
+  duration_ms: 0.372865
+  type: 'test'
+  ...
+# Subtest: mobileKeyboardInputPlan preserves clear, control, and inserted text decisions
+ok 132 - mobileKeyboardInputPlan preserves clear, control, and inserted text decisions
+  ---
+  duration_ms: 0.461635
+  type: 'test'
+  ...
+# Subtest: mobileKeyboardInputExecutorPlan preserves clear, forward, send, and unknown decisions
+ok 133 - mobileKeyboardInputExecutorPlan preserves clear, forward, send, and unknown decisions
+  ---
+  duration_ms: 0.338318
+  type: 'test'
+  ...
+# Subtest: terminalComposerControlAction preserves modifier, selection, and empty-input gates
+ok 134 - terminalComposerControlAction preserves modifier, selection, and empty-input gates
+  ---
+  duration_ms: 3.598489
+  type: 'test'
+  ...
+# Subtest: terminalInlineInputKeydownPlan preserves submit, send, and ignored key handling
+ok 135 - terminalInlineInputKeydownPlan preserves submit, send, and ignored key handling
+  ---
+  duration_ms: 0.433842
+  type: 'test'
+  ...
+# Subtest: terminalKeyStripClickPlan preserves target, disabled, and action dispatch gates
+ok 136 - terminalKeyStripClickPlan preserves target, disabled, and action dispatch gates
+  ---
+  duration_ms: 0.416248
+  type: 'test'
+  ...
+# Subtest: terminalKeyStripClickExecutorPlan preserves ignore, send, and unknown decisions
+ok 137 - terminalKeyStripClickExecutorPlan preserves ignore, send, and unknown decisions
+  ---
+  duration_ms: 0.267903
+  type: 'test'
+  ...
+# Subtest: terminalStageCaptureBindings preserves stage event labels and options
+ok 138 - terminalStageCaptureBindings preserves stage event labels and options
+  ---
+  duration_ms: 0.314403
+  type: 'test'
+  ...
+# Subtest: appEventListenerBindingPlan preserves binding order and special listener cases
+ok 139 - appEventListenerBindingPlan preserves binding order and special listener cases
+  ---
+  duration_ms: 3.36501
+  type: 'test'
+  ...
+# Subtest: terminalStageClickPlan preserves fallback, action, suppression, and focus decisions
+ok 140 - terminalStageClickPlan preserves fallback, action, suppression, and focus decisions
+  ---
+  duration_ms: 0.498326
+  type: 'test'
+  ...
+# Subtest: terminalStageTouchEndPlan preserves fallback, action, consume, and focus decisions
+ok 141 - terminalStageTouchEndPlan preserves fallback, action, consume, and focus decisions
+  ---
+  duration_ms: 0.468838
+  type: 'test'
+  ...
+# Subtest: terminalStageMouseDownPlan preserves action, link, selection, and forwarding decisions
+ok 142 - terminalStageMouseDownPlan preserves action, link, selection, and forwarding decisions
+  ---
+  duration_ms: 0.522892
+  type: 'test'
+  ...
+# Subtest: terminalStageMouseUpPlan preserves blocked, link, selection, and forwarding decisions
+ok 143 - terminalStageMouseUpPlan preserves blocked, link, selection, and forwarding decisions
+  ---
+  duration_ms: 0.875699
+  type: 'test'
+  ...
+# Subtest: terminalStageMouseMovePlan preserves hover, selection, read-only, and forwarding decisions
+ok 144 - terminalStageMouseMovePlan preserves hover, selection, read-only, and forwarding decisions
+  ---
+  duration_ms: 0.5372
+  type: 'test'
+  ...
+# Subtest: terminalStageWheelPlan preserves fallback, consume, blocked, and forwarding decisions
+ok 145 - terminalStageWheelPlan preserves fallback, consume, blocked, and forwarding decisions
+  ---
+  duration_ms: 0.491131
+  type: 'test'
+  ...
+# Subtest: terminalStagePastePlan preserves read-only, empty, and raw text decisions
+ok 146 - terminalStagePastePlan preserves read-only, empty, and raw text decisions
+  ---
+  duration_ms: 0.895357
+  type: 'test'
+  ...
+# Subtest: terminalStagePasteExecutorPlan preserves ignore, send, and unknown decisions
+ok 147 - terminalStagePasteExecutorPlan preserves ignore, send, and unknown decisions
+  ---
+  duration_ms: 1.648741
+  type: 'test'
+  ...
+# Subtest: terminalFallbackPastePlan preserves gating, propagation, and exact text
+ok 148 - terminalFallbackPastePlan preserves gating, propagation, and exact text
+  ---
+  duration_ms: 0.423982
+  type: 'test'
+  ...
+# Subtest: terminalStageFocusPlan preserves focus, blur, and ignore decisions
+ok 149 - terminalStageFocusPlan preserves focus, blur, and ignore decisions
+  ---
+  duration_ms: 0.357917
+  type: 'test'
+  ...
+# Subtest: terminalFallbackFocusPlan preserves fallback focus, blur, and no-op gates
+ok 150 - terminalFallbackFocusPlan preserves fallback focus, blur, and no-op gates
+  ---
+  duration_ms: 0.339341
+  type: 'test'
+  ...
+# Subtest: terminalFallbackActivationPlan preserves fallback activation side-effect decisions
+ok 151 - terminalFallbackActivationPlan preserves fallback activation side-effect decisions
+  ---
+  duration_ms: 0.580533
+  type: 'test'
+  ...
+# Subtest: terminalPendingByteBufferPlan preserves pending byte acceptance and drops
+ok 152 - terminalPendingByteBufferPlan preserves pending byte acceptance and drops
+  ---
+  duration_ms: 0.512032
+  type: 'test'
+  ...
+# Subtest: terminalPresentationPlan preserves terminal focus and canvas visibility decisions
+ok 153 - terminalPresentationPlan preserves terminal focus and canvas visibility decisions
+  ---
+  duration_ms: 0.58449
+  type: 'test'
+  ...
+# Subtest: terminalPaintProbeSchedulePlan preserves paint probe gates
+ok 154 - terminalPaintProbeSchedulePlan preserves paint probe gates
+  ---
+  duration_ms: 0.445614
+  type: 'test'
+  ...
+# Subtest: terminalPaintVerificationPlan preserves verify, refresh, and fallback decisions
+ok 155 - terminalPaintVerificationPlan preserves verify, refresh, and fallback decisions
+  ---
+  duration_ms: 0.410637
+  type: 'test'
+  ...
+# Subtest: terminalSurfaceSessionPlan preserves selected-session setup gates
+ok 156 - terminalSurfaceSessionPlan preserves selected-session setup gates
+  ---
+  duration_ms: 0.295437
+  type: 'test'
+  ...
+# Subtest: terminalSurfaceRendererPlan preserves renderer fallback, reuse, and init decisions
+ok 157 - terminalSurfaceRendererPlan preserves renderer fallback, reuse, and init decisions
+  ---
+  duration_ms: 0.333649
+  type: 'test'
+  ...
+# Subtest: terminalSurfaceInitErrorPlan preserves renderer error fallback status
+ok 158 - terminalSurfaceInitErrorPlan preserves renderer error fallback status
+  ---
+  duration_ms: 0.236935
+  type: 'test'
+  ...
+# Subtest: terminalSurfacePostInitPlan preserves successful setup side-effect data
+ok 159 - terminalSurfacePostInitPlan preserves successful setup side-effect data
+  ---
+  duration_ms: 0.838707
+  type: 'test'
+  ...
+# Subtest: terminalResizeGeometryPlan preserves resize geometry and side-effect decisions
+ok 160 - terminalResizeGeometryPlan preserves resize geometry and side-effect decisions
+  ---
+  duration_ms: 0.572939
+  type: 'test'
+  ...
+# Subtest: terminalLiveFrameFallbackPlan preserves live-frame fallback update decisions
+ok 161 - terminalLiveFrameFallbackPlan preserves live-frame fallback update decisions
+  ---
+  duration_ms: 0.587156
+  type: 'test'
+  ...
+# Subtest: terminalInputDockPlan preserves visibility and disabled state decisions
+ok 162 - terminalInputDockPlan preserves visibility and disabled state decisions
+  ---
+  duration_ms: 0.418782
+  type: 'test'
+  ...
+# Subtest: terminalZoomControlsPlan preserves support gates, bounds, and labels
+ok 163 - terminalZoomControlsPlan preserves support gates, bounds, and labels
+  ---
+  duration_ms: 0.473468
+  type: 'test'
+  ...
+# Subtest: normalizeTerminalZoomValue preserves parse, step, and clamp behavior
+ok 164 - normalizeTerminalZoomValue preserves parse, step, and clamp behavior
+  ---
+  duration_ms: 0.318311
+  type: 'test'
+  ...
+# Subtest: terminalZoomLoadValue preserves URL precedence over stored zoom
+ok 165 - terminalZoomLoadValue preserves URL precedence over stored zoom
+  ---
+  duration_ms: 0.305026
+  type: 'test'
+  ...
+# Subtest: terminalZoomPersistencePlan preserves URL and storage values
+ok 166 - terminalZoomPersistencePlan preserves URL and storage values
+  ---
+  duration_ms: 0.411799
+  type: 'test'
+  ...
+# Subtest: terminalAuxiliaryControlsPlan preserves mobile keyboard and copy-frame gates
+ok 167 - terminalAuxiliaryControlsPlan preserves mobile keyboard and copy-frame gates
+  ---
+  duration_ms: 0.450554
+  type: 'test'
+  ...
+# Subtest: terminalToolsAvailabilityPlan preserves control disabled states
+ok 168 - terminalToolsAvailabilityPlan preserves control disabled states
+  ---
+  duration_ms: 0.75099
+  type: 'test'
+  ...
+# Subtest: initialStateBootPlan preserves token, session, directory, and desktop defaults
+ok 169 - initialStateBootPlan preserves token, session, directory, and desktop defaults
+  ---
+  duration_ms: 0.812167
+  type: 'test'
+  ...
+# Subtest: initialStateBootPlan preserves stored fallbacks and root directory cleanup
+ok 170 - initialStateBootPlan preserves stored fallbacks and root directory cleanup
+  ---
+  duration_ms: 0.475291
+  type: 'test'
+  ...
+# Subtest: initialStateBootPlan preserves follow-published selection override
+ok 171 - initialStateBootPlan preserves follow-published selection override
+  ---
+  duration_ms: 0.720571
+  type: 'test'
+  ...
+# Subtest: controlEventSessionPatchPlan preserves session_state payload semantics
+ok 172 - controlEventSessionPatchPlan preserves session_state payload semantics
+  ---
+  duration_ms: 0.821405
+  type: 'test'
+  ...
+# Subtest: controlEventSessionPatchPlan preserves title and skill event semantics
+ok 173 - controlEventSessionPatchPlan preserves title and skill event semantics
+  ---
+  duration_ms: 0.39107
+  type: 'test'
+  ...
+# Subtest: controlEventSessionPatchPlan preserves thought update payload semantics
+ok 174 - controlEventSessionPatchPlan preserves thought update payload semantics
+  ---
+  duration_ms: 0.35476
+  type: 'test'
+  ...
+# Subtest: controlEventSessionPatchPlan preserves unknown event and non-object payload behavior
+ok 175 - controlEventSessionPatchPlan preserves unknown event and non-object payload behavior
+  ---
+  duration_ms: 0.574141
+  type: 'test'
+  ...
+# Subtest: lifecycleDeletedSessionPatchPlan preserves deleted-session patch semantics
+ok 176 - lifecycleDeletedSessionPatchPlan preserves deleted-session patch semantics
+  ---
+  duration_ms: 0.531228
+  type: 'test'
+  ...
+# Subtest: lifecycleDeletedSessionPatchPlan preserves fallback and default deleted-session fields
+ok 177 - lifecycleDeletedSessionPatchPlan preserves fallback and default deleted-session fields
+  ---
+  duration_ms: 0.3394
+  type: 'test'
+  ...
+# Subtest: inputAckActionPlan preserves delivered ack semantics
+ok 178 - inputAckActionPlan preserves delivered ack semantics
+  ---
+  duration_ms: 0.407752
+  type: 'test'
+  ...
+# Subtest: inputAckActionPlan preserves failed ack semantics
+ok 179 - inputAckActionPlan preserves failed ack semantics
+  ---
+  duration_ms: 0.342987
+  type: 'test'
+  ...
+# Subtest: inputAckActionPlan preserves missing id ignore semantics
+ok 180 - inputAckActionPlan preserves missing id ignore semantics
+  ---
+  duration_ms: 0.237065
+  type: 'test'
+  ...
+# Subtest: sheetActionAvailabilityPlan preserves enabled action state
+ok 181 - sheetActionAvailabilityPlan preserves enabled action state
+  ---
+  duration_ms: 0.399656
+  type: 'test'
+  ...
+# Subtest: sheetActionAvailabilityPlan preserves read-only and missing-resource disabled state
+ok 182 - sheetActionAvailabilityPlan preserves read-only and missing-resource disabled state
+  ---
+  duration_ms: 0.286539
+  type: 'test'
+  ...
+# Subtest: sheetActionAvailabilityPlan preserves path, group, and artifact fallback gates
+ok 183 - sheetActionAvailabilityPlan preserves path, group, and artifact fallback gates
+  ---
+  duration_ms: 0.289906
+  type: 'test'
+  ...
+# Subtest: terminalToolsAvailabilityPlan preserves search status copy
+ok 184 - terminalToolsAvailabilityPlan preserves search status copy
+  ---
+  duration_ms: 0.280187
+  type: 'test'
+  ...
+# Subtest: terminalFallbackPointerFocusPlan preserves scheduled and immediate focus gates
+ok 185 - terminalFallbackPointerFocusPlan preserves scheduled and immediate focus gates
+  ---
+  duration_ms: 0.361854
+  type: 'test'
+  ...
+# Subtest: terminalFallbackScrollPlan preserves auto-follow gates and values
+ok 186 - terminalFallbackScrollPlan preserves auto-follow gates and values
+  ---
+  duration_ms: 0.335673
+  type: 'test'
+  ...
+# Subtest: terminalFallbackTextScrollPlan preserves follow and scroll clamp decisions
+ok 187 - terminalFallbackTextScrollPlan preserves follow and scroll clamp decisions
+  ---
+  duration_ms: 0.402873
+  type: 'test'
+  ...
+# Subtest: terminalDestroyStatePatch returns exact fresh terminal teardown state
+ok 188 - terminalDestroyStatePatch returns exact fresh terminal teardown state
+  ---
+  duration_ms: 0.518415
+  type: 'test'
+  ...
+# Subtest: terminalStageFocusExecutorPlan preserves ignore, forward, and unknown decisions
+ok 189 - terminalStageFocusExecutorPlan preserves ignore, forward, and unknown decisions
+  ---
+  duration_ms: 0.374399
+  type: 'test'
+  ...
+# Subtest: terminalStageKeydownPlan preserves shortcut, capture, and response decisions
+ok 190 - terminalStageKeydownPlan preserves shortcut, capture, and response decisions
+  ---
+  duration_ms: 1.066795
+  type: 'test'
+  ...
+# Subtest: terminalFallbackKeydownPlan preserves active, shortcut, capture, and response decisions
+ok 191 - terminalFallbackKeydownPlan preserves active, shortcut, capture, and response decisions
+  ---
+  duration_ms: 0.865389
+  type: 'test'
+  ...
+# Subtest: boundedArtifactText appends a truncation marker without changing short text
+ok 192 - boundedArtifactText appends a truncation marker without changing short text
+  ---
+  duration_ms: 5.063467
+  type: 'test'
+  ...
+# Subtest: Mermaid plan file sanitization rejects path-ish names, dedupes, and caps
+ok 193 - Mermaid plan file sanitization rejects path-ish names, dedupes, and caps
+  ---
+  duration_ms: 1.056967
+  type: 'test'
+  ...
+# Subtest: mermaidPlanTabClickPlan preserves target matching and dataset forwarding
+ok 194 - mermaidPlanTabClickPlan preserves target matching and dataset forwarding
+  ---
+  duration_ms: 0.562648
+  type: 'test'
+  ...
+# Subtest: loadMermaidPlanFileWithRuntime no-ops without a session or trimmed file name
+ok 195 - loadMermaidPlanFileWithRuntime no-ops without a session or trimmed file name
+  ---
+  duration_ms: 1.138492
+  type: 'test'
+  ...
+# Subtest: loadMermaidPlanFileWithRuntime rejects unsafe or unlisted names without fetching
+ok 196 - loadMermaidPlanFileWithRuntime rejects unsafe or unlisted names without fetching
+  ---
+  duration_ms: 0.712285
+  type: 'test'
+  ...
+# Subtest: loadMermaidPlanFileWithRuntime loads valid files with exact path and truncation status
+ok 197 - loadMermaidPlanFileWithRuntime loads valid files with exact path and truncation status
+  ---
+  duration_ms: 1.209429
+  type: 'test'
+  ...
+# Subtest: loadMermaidPlanFileWithRuntime preserves payload error status copy
+ok 198 - loadMermaidPlanFileWithRuntime preserves payload error status copy
+  ---
+  duration_ms: 0.589911
+  type: 'test'
+  ...
+# Subtest: loadMermaidPlanFileWithRuntime reports fetch failures and syncs in finally
+ok 199 - loadMermaidPlanFileWithRuntime reports fetch failures and syncs in finally
+  ---
+  duration_ms: 0.757262
+  type: 'test'
+  ...
+# Subtest: buildMermaidArtifactView produces source, plan files, and status text
+ok 200 - buildMermaidArtifactView produces source, plan files, and status text
+  ---
+  duration_ms: 1.412488
+  type: 'test'
+  ...
+# Subtest: Mermaid artifact controller refresh owns blob lifecycle and DOM preview
+ok 201 - Mermaid artifact controller refresh owns blob lifecycle and DOM preview
+  ---
+  duration_ms: 2.298316
+  type: 'test'
+  ...
+# Subtest: status formatting and current mode label preserve native copy
+ok 202 - status formatting and current mode label preserve native copy
+  ---
+  duration_ms: 2.463142
+  type: 'test'
+  ...
+# Subtest: renderNativeStatusForm writes status, form fields, copy, diagnostics, and availability
+ok 203 - renderNativeStatusForm writes status, form fields, copy, diagnostics, and availability
+  ---
+  duration_ms: 5.605214
+  type: 'test'
+  ...
+# Subtest: refreshNativeStatus loads status, replaces diagnostics with summary, and clears loading
+ok 204 - refreshNativeStatus loads status, replaces diagnostics with summary, and clears loading
+  ---
+  duration_ms: 0.739638
+  type: 'test'
+  ...
+# Subtest: refreshNativeStatus reports load errors without leaving loading set
+ok 205 - refreshNativeStatus reports load errors without leaving loading set
+  ---
+  duration_ms: 0.488576
+  type: 'test'
+  ...
+# Subtest: saveNativeSettings writes the app first and skips mode for non-Ghostty apps
+ok 206 - saveNativeSettings writes the app first and skips mode for non-Ghostty apps
+  ---
+  duration_ms: 0.806716
+  type: 'test'
+  ...
+# Subtest: saveNativeSettings writes Ghostty mode after app and preserves save result
+ok 207 - saveNativeSettings writes Ghostty mode after app and preserves save result
+  ---
+  duration_ms: 0.695313
+  type: 'test'
+  ...
+# Subtest: saveNativeSettings reports errors and does not refresh sessions
+ok 208 - saveNativeSettings reports errors and does not refresh sessions
+  ---
+  duration_ms: 0.716684
+  type: 'test'
+  ...
+# Subtest: openSelectedNativeSession posts the selected session id and reports pane details
+ok 209 - openSelectedNativeSession posts the selected session id and reports pane details
+  ---
+  duration_ms: 0.703438
+  type: 'test'
+  ...
+# Subtest: openSelectedNativeSession is a no-op without a selected session
+ok 210 - openSelectedNativeSession is a no-op without a selected session
+  ---
+  duration_ms: 0.765417
+  type: 'test'
+  ...
+# Subtest: native form and field handlers preserve preventDefault and Ghostty mode availability
+ok 211 - native form and field handlers preserve preventDefault and Ghostty mode availability
+  ---
+  duration_ms: 1.25705
+  type: 'test'
+  ...
+# Subtest: surface frame emits flat patch payload invariants
+ok 212 - surface frame emits flat patch payload invariants
+  ---
+  duration_ms: 12.474214
+  type: 'test'
+  ...
+# Subtest: surface frame patch hash is deterministic and model-sensitive
+ok 213 - surface frame patch hash is deterministic and model-sensitive
+  ---
+  duration_ms: 67.434742
+  type: 'test'
+  ...
+# Subtest: surface exposes parity actions for the selected session
+ok 214 - surface exposes parity actions for the selected session
+  ---
+  duration_ms: 9.182202
+  type: 'test'
+  ...
+# Subtest: surface shows an overview prompt when no session is selected
+ok 215 - surface shows an overview prompt when no session is selected
+  ---
+  duration_ms: 7.732654
+  type: 'test'
+  ...
+# Subtest: surface calls out snapshot fallback mode
+ok 216 - surface calls out snapshot fallback mode
+  ---
+  duration_ms: 7.688439
+  type: 'test'
+  ...
+# Subtest: surface annotates untrusted session state
+ok 217 - surface annotates untrusted session state
+  ---
+  duration_ms: 2.219344
+  type: 'test'
+  ...
+# Subtest: surface annotates locally inferred medium-confidence state
+ok 218 - surface annotates locally inferred medium-confidence state
+  ---
+  duration_ms: 1.989955
+  type: 'test'
+  ...
+# Subtest: surface renders trogdor pressure atlas with hover speed reader
+ok 219 - surface renders trogdor pressure atlas with hover speed reader
+  ---
+  duration_ms: 9.223281
+  type: 'test'
+  ...
+# Subtest: surface uses shared operator pressure and exposes batch/commit actions
+ok 220 - surface uses shared operator pressure and exposes batch/commit actions
+  ---
+  duration_ms: 10.567958
+  type: 'test'
+  ...
+# Subtest: surface advances hovered speed-reader word by wpm timing
+ok 221 - surface advances hovered speed-reader word by wpm timing
+  ---
+  duration_ms: 5.192163
+  type: 'test'
+  ...
+# Subtest: surface starts the speed reader at the unread clawg cursor
+ok 222 - surface starts the speed reader at the unread clawg cursor
+  ---
+  duration_ms: 1.804078
+  type: 'test'
+  ...
+# Subtest: surface shows read-again instead of replaying a fully read clawg
+ok 223 - surface shows read-again instead of replaying a fully read clawg
+  ---
+  duration_ms: 1.697965
+  type: 'test'
+  ...
+# Subtest: surface does not render quiet sessions as swordsmen
+ok 224 - surface does not render quiet sessions as swordsmen
+  ---
+  duration_ms: 1.938687
+  type: 'test'
+  ...
+# Subtest: surface renders deep sleep sessions as hoverable swordsmen
+ok 225 - surface renders deep sleep sessions as hoverable swordsmen
+  ---
+  duration_ms: 1.719697
+  type: 'test'
+  ...
+# Subtest: atlas toggle keeps trogdor available after a terminal is selected
+ok 226 - atlas toggle keeps trogdor available after a terminal is selected
+  ---
+  duration_ms: 1.774742
+  type: 'test'
+  ...
+# Subtest: trogdor opens as an empty atlas before any sessions exist
+ok 227 - trogdor opens as an empty atlas before any sessions exist
+  ---
+  duration_ms: 6.149779
+  type: 'test'
+  ...
+# Subtest: top-level action chips have forgiving vertical hitboxes
+ok 228 - top-level action chips have forgiving vertical hitboxes
+  ---
+  duration_ms: 1.305573
+  type: 'test'
+  ...
+# Subtest: computeSurfaceLayout preserves rendered surface breakpoints and dimensions
+ok 229 - computeSurfaceLayout preserves rendered surface breakpoints and dimensions
+  ---
+  duration_ms: 3.555606
+  type: 'test'
+  ...
+# Subtest: drawTextBlock preserves wrapping, truncation, color, and attrs
+ok 230 - drawTextBlock preserves wrapping, truncation, color, and attrs
+  ---
+  duration_ms: 1.81522
+  type: 'test'
+  ...
+# Subtest: geometry helpers preserve clipped hit testing rectangles
+ok 231 - geometry helpers preserve clipped hit testing rectangles
+  ---
+  duration_ms: 0.699021
+  type: 'test'
+  ...
+# Subtest: drawActionChipRow preserves zone payloads and padded hitboxes
+ok 232 - drawActionChipRow preserves zone payloads and padded hitboxes
+  ---
+  duration_ms: 0.999917
+  type: 'test'
+  ...
+# Subtest: send history helpers preserve load, de-dupe, limit, display order, and escaping
+ok 233 - send history helpers preserve load, de-dupe, limit, display order, and escaping
+  ---
+  duration_ms: 3.253596
+  type: 'test'
+  ...
+# Subtest: send target and mode helpers preserve read-only, selected, group, and paste gates
+ok 234 - send target and mode helpers preserve read-only, selected, group, and paste gates
+  ---
+  duration_ms: 3.499489
+  type: 'test'
+  ...
+# Subtest: controller uses websocket fast path for selected line and paste sends
+ok 235 - controller uses websocket fast path for selected line and paste sends
+  ---
+  duration_ms: 1.761578
+  type: 'test'
+  ...
+# Subtest: controller falls back to API sends and summarizes successful group deliveries
+ok 236 - controller falls back to API sends and summarizes successful group deliveries
+  ---
+  duration_ms: 1.096242
+  type: 'test'
+  ...
+# Subtest: form submit preserves history, statuses, close, refresh, and failure availability sync
+ok 237 - form submit preserves history, statuses, close, refresh, and failure availability sync
+  ---
+  duration_ms: 1.429841
+  type: 'test'
+  ...
+# Subtest: open send sheet resets line mode, renders history, updates hints, and opens sheet
+ok 238 - open send sheet resets line mode, renders history, updates hints, and opens sheet
+  ---
+  duration_ms: 0.762852
+  type: 'test'
+  ...
+# Subtest: history click adapter recalls stored text and focuses the send input
+ok 239 - history click adapter recalls stored text and focuses the send input
+  ---
+  duration_ms: 0.551518
+  type: 'test'
+  ...
+# Subtest: sendSheetSubmitPlan ignores read-only and blank sends without trimming payloads
+ok 240 - sendSheetSubmitPlan ignores read-only and blank sends without trimming payloads
+  ---
+  duration_ms: 20.691996
+  type: 'test'
+  ...
+# Subtest: sendSheetSubmitPlan preserves group targets and paste-vs-line routing
+ok 241 - sendSheetSubmitPlan preserves group targets and paste-vs-line routing
+  ---
+  duration_ms: 0.644155
+  type: 'test'
+  ...
+# Subtest: sendSheetSuccessStatus preserves group, paste, and line status copy
+ok 242 - sendSheetSuccessStatus preserves group, paste, and line status copy
+  ---
+  duration_ms: 0.663201
+  type: 'test'
+  ...
+# Subtest: sendSheetFailureStatus preserves failure status copy
+ok 243 - sendSheetFailureStatus preserves failure status copy
+  ---
+  duration_ms: 0.387452
+  type: 'test'
+  ...
+# Subtest: sendHistoryClickPlan preserves target, index, and empty-history gates
+ok 244 - sendHistoryClickPlan preserves target, index, and empty-history gates
+  ---
+  duration_ms: 3.206798
+  type: 'test'
+  ...
+# Subtest: sessionUrlForSelection preserves selected, follow, and token cleanup rules
+ok 245 - sessionUrlForSelection preserves selected, follow, and token cleanup rules
+  ---
+  duration_ms: 2.939124
+  type: 'test'
+  ...
+# Subtest: persistSelectedSession preserves storage, reset, atlas, and URL side effects
+ok 246 - persistSelectedSession preserves storage, reset, atlas, and URL side effects
+  ---
+  duration_ms: 3.054265
+  type: 'test'
+  ...
+# Subtest: setFollowPublishedSelection preserves body class, URL sync, and render call
+ok 247 - setFollowPublishedSelection preserves body class, URL sync, and render call
+  ---
+  duration_ms: 0.882842
+  type: 'test'
+  ...
+# Subtest: sessionRefreshRequestPlan preserves refresh endpoint ordering data
+ok 248 - sessionRefreshRequestPlan preserves refresh endpoint ordering data
+  ---
+  duration_ms: 4.194801
+  type: 'test'
+  ...
+# Subtest: sessionRefreshSelectionPlan preserves published and local selection decisions
+ok 249 - sessionRefreshSelectionPlan preserves published and local selection decisions
+  ---
+  duration_ms: 0.781217
+  type: 'test'
+  ...
+# Subtest: sessionRefreshSuccessStatusPlan and sessionRefreshErrorPlan preserve status labels
+ok 250 - sessionRefreshSuccessStatusPlan and sessionRefreshErrorPlan preserve status labels
+  ---
+  duration_ms: 0.757612
+  type: 'test'
+  ...
+# Subtest: runSessionRefresh preserves successful refresh ordering and status side effects
+ok 251 - runSessionRefresh preserves successful refresh ordering and status side effects
+  ---
+  duration_ms: 8.027108
+  type: 'test'
+  ...
+# Subtest: runSessionRefresh preserves refresh error reset behavior
+ok 252 - runSessionRefresh preserves refresh error reset behavior
+  ---
+  duration_ms: 1.011939
+  type: 'test'
+  ...
+# Subtest: surface action dispatch guards null, disabled, and direct zones
+ok 253 - surface action dispatch guards null, disabled, and direct zones
+  ---
+  duration_ms: 3.254469
+  type: 'test'
+  ...
+# Subtest: surface action dispatch preserves gated current-session send behavior
+ok 254 - surface action dispatch preserves gated current-session send behavior
+  ---
+  duration_ms: 0.559883
+  type: 'test'
+  ...
+# Subtest: surface action context plans preserve data collection boundaries
+ok 255 - surface action context plans preserve data collection boundaries
+  ---
+  duration_ms: 0.560184
+  type: 'test'
+  ...
+# Subtest: surface action execution plans preserve payload passthroughs
+ok 256 - surface action execution plans preserve payload passthroughs
+  ---
+  duration_ms: 6.067291
+  type: 'test'
+  ...
+# Subtest: surface Trogdor reader and focus execution plans preserve object shapes
+ok 257 - surface Trogdor reader and focus execution plans preserve object shapes
+  ---
+  duration_ms: 1.185342
+  type: 'test'
+  ...
+# Subtest: surfaceSession preserves labels, pressure fields, and Trogdor enrichment
+ok 258 - surfaceSession preserves labels, pressure fields, and Trogdor enrichment
+  ---
+  duration_ms: 9.439316
+  type: 'test'
+  ...
+# Subtest: surfaceSession marks low or unobserved state as uncertain and keeps detail thought full
+ok 259 - surfaceSession marks low or unobserved state as uncertain and keeps detail thought full
+  ---
+  duration_ms: 1.441453
+  type: 'test'
+  ...
+# Subtest: buildSurfaceModel preserves selected/current session, terminal, reader, and HUD fields
+ok 260 - buildSurfaceModel preserves selected/current session, terminal, reader, and HUD fields
+  ---
+  duration_ms: 5.532486
+  type: 'test'
+  ...
+# Subtest: buildSurfaceModel reports terminal not ready without the expected websocket state
+ok 261 - buildSurfaceModel reports terminal not ready without the expected websocket state
+  ---
+  duration_ms: 4.459609
+  type: 'test'
+  ...
+# Subtest: buildSessionSocketUrl opts into framed resume without leaking auth
+ok 262 - buildSessionSocketUrl opts into framed resume without leaking auth
+  ---
+  duration_ms: 6.221165
+  type: 'test'
+  ...
+# Subtest: sessionSocketAuthMessageForToken trims and omits empty tokens
+ok 263 - sessionSocketAuthMessageForToken trims and omits empty tokens
+  ---
+  duration_ms: 0.672118
+  type: 'test'
+  ...
+# Subtest: selectedSessionConnectionPlan preserves ordered setup gates
+ok 264 - selectedSessionConnectionPlan preserves ordered setup gates
+  ---
+  duration_ms: 1.658629
+  type: 'test'
+  ...
+# Subtest: selectedSessionConnectionPlan preserves socket reuse and connect decisions
+ok 265 - selectedSessionConnectionPlan preserves socket reuse and connect decisions
+  ---
+  duration_ms: 0.437418
+  type: 'test'
+  ...
+# Subtest: sessionSocketAttachPlan preserves framed output and status copy
+ok 266 - sessionSocketAttachPlan preserves framed output and status copy
+  ---
+  duration_ms: 0.907659
+  type: 'test'
+  ...
+# Subtest: sessionSocketAttachStatePlan preserves attach side-effect data
+ok 267 - sessionSocketAttachStatePlan preserves attach side-effect data
+  ---
+  duration_ms: 0.567288
+  type: 'test'
+  ...
+# Subtest: sessionSocketOpenPlan preserves stale close guard and auth status copy
+ok 268 - sessionSocketOpenPlan preserves stale close guard and auth status copy
+  ---
+  duration_ms: 0.640207
+  type: 'test'
+  ...
+# Subtest: sessionSocketOpenExecutionPlan preserves callback side-effect order flags
+ok 269 - sessionSocketOpenExecutionPlan preserves callback side-effect order flags
+  ---
+  duration_ms: 0.457587
+  type: 'test'
+  ...
+# Subtest: sessionSocketMessagePlan preserves stale guard and text/binary routing
+ok 270 - sessionSocketMessagePlan preserves stale guard and text/binary routing
+  ---
+  duration_ms: 1.05898
+  type: 'test'
+  ...
+# Subtest: sessionSocketMessageExecutionPlan materializes binary bytes for terminal routing
+ok 271 - sessionSocketMessageExecutionPlan materializes binary bytes for terminal routing
+  ---
+  duration_ms: 1.204378
+  type: 'test'
+  ...
+# Subtest: sessionSocketClosePlan preserves reconnect guard and status rounding
+ok 272 - sessionSocketClosePlan preserves reconnect guard and status rounding
+  ---
+  duration_ms: 0.681577
+  type: 'test'
+  ...
+# Subtest: sessionSocketCloseExecutionPlan and error plan preserve status side effects
+ok 273 - sessionSocketCloseExecutionPlan and error plan preserve status side effects
+  ---
+  duration_ms: 0.446555
+  type: 'test'
+  ...
+# Subtest: sessionSocketReconnectPlan preserves generation and selected-session gates
+ok 274 - sessionSocketReconnectPlan preserves generation and selected-session gates
+  ---
+  duration_ms: 0.314373
+  type: 'test'
+  ...
+# Subtest: decodeTerminalOutputFrame parses opcode, sequence, and payload
+ok 275 - decodeTerminalOutputFrame parses opcode, sequence, and payload
+  ---
+  duration_ms: 0.512613
+  type: 'test'
+  ...
+# Subtest: fallbackTextForKeyEvent encodes printable, control, and navigation keys
+ok 276 - fallbackTextForKeyEvent encodes printable, control, and navigation keys
+  ---
+  duration_ms: 0.493718
+  type: 'test'
+  ...
+# Subtest: terminalControlKeyEvent and keyModifiers keep DOM controls stable
+ok 277 - terminalControlKeyEvent and keyModifiers keep DOM controls stable
+  ---
+  duration_ms: 0.413833
+  type: 'test'
+  ...
+# Subtest: terminalResizeStartPlan preserves no-surface and busy gates
+ok 278 - terminalResizeStartPlan preserves no-surface and busy gates
+  ---
+  duration_ms: 4.059292
+  type: 'test'
+  ...
+# Subtest: runTerminalSurfaceResize ignores missing reference surfaces
+ok 279 - runTerminalSurfaceResize ignores missing reference surfaces
+  ---
+  duration_ms: 1.188078
+  type: 'test'
+  ...
+# Subtest: runTerminalSurfaceResize queues while surfaces are busy
+ok 280 - runTerminalSurfaceResize queues while surfaces are busy
+  ---
+  duration_ms: 0.335734
+  type: 'test'
+  ...
+# Subtest: runTerminalSurfaceResize preserves fit, resize, send, and diagnostic ordering
+ok 281 - runTerminalSurfaceResize preserves fit, resize, send, and diagnostic ordering
+  ---
+  duration_ms: 0.925905
+  type: 'test'
+  ...
+# Subtest: runTerminalSurfaceResize preserves no-resize behavior after measurement
+ok 282 - runTerminalSurfaceResize preserves no-resize behavior after measurement
+  ---
+  duration_ms: 0.439803
+  type: 'test'
+  ...
+# Subtest: runTerminalSurfaceResize requeues deferred fit and resize operations
+ok 283 - runTerminalSurfaceResize requeues deferred fit and resize operations
+  ---
+  duration_ms: 0.371683
+  type: 'test'
+  ...
+# Subtest: FrankenTerm module and surface validators preserve error messages
+ok 284 - FrankenTerm module and surface validators preserve error messages
+  ---
+  duration_ms: 4.179963
+  type: 'test'
+  ...
+# Subtest: FrankenTerm asset summary preserves js wasm font ordering and optional fields
+ok 285 - FrankenTerm asset summary preserves js wasm font ordering and optional fields
+  ---
+  duration_ms: 6.913173
+  type: 'test'
+  ...
+# Subtest: surface operation guard defers busy and records recursive renderer errors
+ok 286 - surface operation guard defers busy and records recursive renderer errors
+  ---
+  duration_ms: 2.460617
+  type: 'test'
+  ...
+# Subtest: canvas visible pixel probe preserves dimensions threshold and failure fallbacks
+ok 287 - canvas visible pixel probe preserves dimensions threshold and failure fallbacks
+  ---
+  duration_ms: 5.414139
+  type: 'test'
+  ...
+# Subtest: FrankenTerm link policy allows HTTP only for loopback hosts
+ok 288 - FrankenTerm link policy allows HTTP only for loopback hosts
+  ---
+  duration_ms: 3.626462
+  type: 'test'
+  ...
+# Subtest: safeAnchorHref rejects active-content URLs
+ok 289 - safeAnchorHref rejects active-content URLs
+  ---
+  duration_ms: 0.713889
+  type: 'test'
+  ...
+# Subtest: terminal paste budget measures UTF-8 bytes
+ok 290 - terminal paste budget measures UTF-8 bytes
+  ---
+  duration_ms: 7.483236
+  type: 'test'
+  ...
+# Subtest: terminal search controller preserves query apply, clear, and match cycling
+ok 291 - terminal search controller preserves query apply, clear, and match cycling
+  ---
+  duration_ms: 4.256961
+  type: 'test'
+  ...
+# Subtest: terminal selection controller preserves normalized ranges and copy behavior
+ok 292 - terminal selection controller preserves normalized ranges and copy behavior
+  ---
+  duration_ms: 1.218797
+  type: 'test'
+  ...
+# Subtest: terminal link controller preserves hover highlighting and link tool visibility
+ok 293 - terminal link controller preserves hover highlighting and link tool visibility
+  ---
+  duration_ms: 3.213931
+  type: 'test'
+  ...
+# Subtest: terminal link controller preserves URL policy and drained click behavior
+ok 294 - terminal link controller preserves URL policy and drained click behavior
+  ---
+  duration_ms: 0.941074
+  type: 'test'
+  ...
+# Subtest: terminal frame and hovered link copy helpers preserve clipboard fallbacks
+ok 295 - terminal frame and hovered link copy helpers preserve clipboard fallbacks
+  ---
+  duration_ms: 0.974118
+  type: 'test'
+  ...
+# Subtest: terminal status controller preserves strip ordering and document attention state
+ok 296 - terminal status controller preserves strip ordering and document attention state
+  ---
+  duration_ms: 2.598111
+  type: 'test'
+  ...
+# Subtest: terminal status controller preserves fallback mode labels
+ok 297 - terminal status controller preserves fallback mode labels
+  ---
+  duration_ms: 0.422832
+  type: 'test'
+  ...
+# Subtest: terminal status setters preserve state updates, render calls, and health normalization
+ok 298 - terminal status setters preserve state updates, render calls, and health normalization
+  ---
+  duration_ms: 0.889395
+  type: 'test'
+  ...
+# Subtest: utility status preserves default labels, timer clearing, and muted reset
+ok 299 - utility status preserves default labels, timer clearing, and muted reset
+  ---
+  duration_ms: 5.907265
+  type: 'test'
+  ...
+# Subtest: terminal zoom controller preserves URL precedence, storage persistence, and setZoom dispatch
+ok 300 - terminal zoom controller preserves URL precedence, storage persistence, and setZoom dispatch
+  ---
+  duration_ms: 8.920961
+  type: 'test'
+  ...
+# Subtest: terminal input dock controller preserves fallback projection and send order
+ok 301 - terminal input dock controller preserves fallback projection and send order
+  ---
+  duration_ms: 1.435682
+  type: 'test'
+  ...
+# Subtest: backend and model normalization preserve backend aliases and OpenRouter filtering
+ok 302 - backend and model normalization preserve backend aliases and OpenRouter filtering
+  ---
+  duration_ms: 5.888147
+  type: 'test'
+  ...
+# Subtest: metadata helpers preserve fallback presets and UI-provided backend metadata
+ok 303 - metadata helpers preserve fallback presets and UI-provided backend metadata
+  ---
+  duration_ms: 2.358622
+  type: 'test'
+  ...
+# Subtest: applyToForm normalizes config, renders presets, daemon defaults, and action availability
+ok 304 - applyToForm normalizes config, renders presets, daemon defaults, and action availability
+  ---
+  duration_ms: 8.138712
+  type: 'test'
+  ...
+# Subtest: draft and backend change preserve form edits and model preset behavior
+ok 305 - draft and backend change preserve form edits and model preset behavior
+  ---
+  duration_ms: 0.63639
+  type: 'test'
+  ...
+# Subtest: refresh loads config endpoint, clears loading, and updates result text
+ok 306 - refresh loads config endpoint, clears loading, and updates result text
+  ---
+  duration_ms: 0.687457
+  type: 'test'
+  ...
+# Subtest: test posts draft config and reports probe result details
+ok 307 - test posts draft config and reports probe result details
+  ---
+  duration_ms: 0.707085
+  type: 'test'
+  ...
+# Subtest: save puts draft config, refreshes sessions, and preserves save result state
+ok 308 - save puts draft config, refreshes sessions, and preserves save result state
+  ---
+  duration_ms: 0.807177
+  type: 'test'
+  ...
+# Subtest: load and save errors set result error class without refreshing sessions
+ok 309 - load and save errors set result error class without refreshing sessions
+  ---
+  duration_ms: 2.622638
+  type: 'test'
+  ...
+# Subtest: bindTrogdorEvents installs launcher, passthrough, and surface listeners in order
+ok 310 - bindTrogdorEvents installs launcher, passthrough, and surface listeners in order
+  ---
+  duration_ms: 5.203826
+  type: 'test'
+  ...
+# Subtest: Trogdor pointer and click handlers preserve default prevention and action dispatch
+ok 311 - Trogdor pointer and click handlers preserve default prevention and action dispatch
+  ---
+  duration_ms: 1.620697
+  type: 'test'
+  ...
+# Subtest: Trogdor handlers preserve disabled button and non-element target behavior
+ok 312 - Trogdor handlers preserve disabled button and non-element target behavior
+  ---
+  duration_ms: 0.588027
+  type: 'test'
+  ...
+# Subtest: Trogdor passthrough, hover, and focus handlers preserve surface updates
+ok 313 - Trogdor passthrough, hover, and focus handlers preserve surface updates
+  ---
+  duration_ms: 0.930975
+  type: 'test'
+  ...
+# Subtest: Trogdor action cues, clawg keys, and raw rest detection are stable
+ok 314 - Trogdor action cues, clawg keys, and raw rest detection are stable
+  ---
+  duration_ms: 9.184657
+  type: 'test'
+  ...
+# Subtest: Trogdor read progress helpers sanitize, clamp, complete, and serialize
+ok 315 - Trogdor read progress helpers sanitize, clamp, complete, and serialize
+  ---
+  duration_ms: 2.576168
+  type: 'test'
+  ...
+# Subtest: Trogdor read progress storage helpers are best-effort and injectable
+ok 316 - Trogdor read progress storage helpers are best-effort and injectable
+  ---
+  duration_ms: 0.793552
+  type: 'test'
+  ...
+# Subtest: Trogdor dismissed clawg helpers set and clear by current clawg key
+ok 317 - Trogdor dismissed clawg helpers set and clear by current clawg key
+  ---
+  duration_ms: 0.520769
+  type: 'test'
+  ...
+# Subtest: Trogdor response helpers normalize ids and update only awaiting sessions
+ok 318 - Trogdor response helpers normalize ids and update only awaiting sessions
+  ---
+  duration_ms: 1.072415
+  type: 'test'
+  ...
+# Subtest: Trogdor burn helpers mark, check, and prune expired sessions immutably
+ok 319 - Trogdor burn helpers mark, check, and prune expired sessions immutably
+  ---
+  duration_ms: 0.785195
+  type: 'test'
+  ...
+# Subtest: Trogdor cue transition helpers derive awaiting, burns, and hover reset
+ok 320 - Trogdor cue transition helpers derive awaiting, burns, and hover reset
+  ---
+  duration_ms: 0.93917
+  type: 'test'
+  ...
+# Subtest: Trogdor visibility helpers preserve burnt, dismissed, and rest-state rules
+ok 321 - Trogdor visibility helpers preserve burnt, dismissed, and rest-state rules
+  ---
+  duration_ms: 0.95996
+  type: 'test'
+  ...
+# Subtest: Trogdor hover helpers preserve current session and reader reset decisions
+ok 322 - Trogdor hover helpers preserve current session and reader reset decisions
+  ---
+  duration_ms: 4.589718
+  type: 'test'
+  ...
+# Subtest: Trogdor atlas transition helpers preserve path-specific state patches
+ok 323 - Trogdor atlas transition helpers preserve path-specific state patches
+  ---
+  duration_ms: 5.09648
+  type: 'test'
+  ...
+# Subtest: Trogdor action payload helpers preserve zone defaults and terminal copy
+ok 324 - Trogdor action payload helpers preserve zone defaults and terminal copy
+  ---
+  duration_ms: 0.701665
+  type: 'test'
+  ...
+# Subtest: Trogdor DOM action zone helper preserves dataset parsing semantics
+ok 325 - Trogdor DOM action zone helper preserves dataset parsing semantics
+  ---
+  duration_ms: 0.637061
+  type: 'test'
+  ...
+# Subtest: Trogdor DOM event planners preserve pointer, click, and passthrough semantics
+ok 326 - Trogdor DOM event planners preserve pointer, click, and passthrough semantics
+  ---
+  duration_ms: 0.621111
+  type: 'test'
+  ...
+# Subtest: Trogdor DOM event planners preserve hover and focus semantics
+ok 327 - Trogdor DOM event planners preserve hover and focus semantics
+  ---
+  duration_ms: 0.522642
+  type: 'test'
+  ...
+# Subtest: Trogdor reader base index prefers active reader key over persisted progress
+ok 328 - Trogdor reader base index prefers active reader key over persisted progress
+  ---
+  duration_ms: 0.288914
+  type: 'test'
+  ...
+# Subtest: Trogdor reader word index advances by elapsed WPM and respects pause/complete states
+ok 329 - Trogdor reader word index advances by elapsed WPM and respects pause/complete states
+  ---
+  duration_ms: 0.448109
+  type: 'test'
+  ...
+# Subtest: Trogdor reader display state formats banners and read-complete state
+ok 330 - Trogdor reader display state formats banners and read-complete state
+  ---
+  duration_ms: 0.591995
+  type: 'test'
+  ...
+# Subtest: Trogdor reader timer action preserves run-state decisions and short-circuits
+ok 331 - Trogdor reader timer action preserves run-state decisions and short-circuits
+  ---
+  duration_ms: 0.419013
+  type: 'test'
+  ...
+# Subtest: Trogdor reader toggle action preserves pause, resume, and read-again decisions
+ok 332 - Trogdor reader toggle action preserves pause, resume, and read-again decisions
+  ---
+  duration_ms: 0.445614
+  type: 'test'
+  ...
+# Subtest: Trogdor reader WPM action preserves step, bounds, and JS arithmetic semantics
+ok 333 - Trogdor reader WPM action preserves step, bounds, and JS arithmetic semantics
+  ---
+  duration_ms: 0.295257
+  type: 'test'
+  ...
+# Subtest: Trogdor reader advancement helpers clamp progress and preserve WPM restart state
+ok 334 - Trogdor reader advancement helpers clamp progress and preserve WPM restart state
+  ---
+  duration_ms: 0.583749
+  type: 'test'
+  ...
+# Subtest: Trogdor reader start state resumes progress and read-again resets progress
+ok 335 - Trogdor reader start state resumes progress and read-again resets progress
+  ---
+  duration_ms: 0.50605
+  type: 'test'
+  ...
+# Subtest: Trogdor pressure, reason, glyph, and tone prefer operator pressure when present
+ok 336 - Trogdor pressure, reason, glyph, and tone prefer operator pressure when present
+  ---
+  duration_ms: 0.62136
+  type: 'test'
+  ...
+# Subtest: Trogdor groups sort by pressure and summarize score/action cues
+ok 337 - Trogdor groups sort by pressure and summarize score/action cues
+  ---
+  duration_ms: 0.624878
+  type: 'test'
+  ...
+# Subtest: Trogdor dragon pose focuses burnt sessions and keeps 8-way body frames
+ok 338 - Trogdor dragon pose focuses burnt sessions and keeps 8-way body frames
+  ---
+  duration_ms: 0.540816
+  type: 'test'
+  ...
+# Subtest: Trogdor dragon renderer emits 8-way sprite assets and fire state
+ok 339 - Trogdor dragon renderer emits 8-way sprite assets and fire state
+  ---
+  duration_ms: 2.609853
+  type: 'test'
+  ...
+# Subtest: Trogdor structure renderer filters invisible agents and carries burn classes
+ok 340 - Trogdor structure renderer filters invisible agents and carries burn classes
+  ---
+  duration_ms: 1.881486
+  type: 'test'
+  ...
+# Subtest: Trogdor empty field respects readonly create state
+ok 341 - Trogdor empty field respects readonly create state
+  ---
+  duration_ms: 0.4795
+  type: 'test'
+  ...
+# Subtest: Trogdor surface frame renders scoreboard, controls, and structures
+ok 342 - Trogdor surface frame renders scoreboard, controls, and structures
+  ---
+  duration_ms: 0.889436
+  type: 'test'
+  ...
+# Subtest: Trogdor surface signature tracks pressure and readonly changes
+ok 343 - Trogdor surface signature tracks pressure and readonly changes
+  ---
+  duration_ms: 0.716844
+  type: 'test'
+  ...
+# Subtest: Trogdor read button labels distinguish pause, read, and replay
+ok 344 - Trogdor read button labels distinguish pause, read, and replay
+  ---
+  duration_ms: 0.326947
+  type: 'test'
+  ...
+# Subtest: workbenchWidgetTitleForDetailsNode reads widget titles defensively
+ok 345 - workbenchWidgetTitleForDetailsNode reads widget titles defensively
+  ---
+  duration_ms: 1.517909
+  type: 'test'
+  ...
+# Subtest: workbenchWidgetOpenStateByTitle snapshots non-empty titles only
+ok 346 - workbenchWidgetOpenStateByTitle snapshots non-empty titles only
+  ---
+  duration_ms: 1.30875
+  type: 'test'
+  ...
+# Subtest: restoreWorkbenchWidgetOpenState restores matching details by title only
+ok 347 - restoreWorkbenchWidgetOpenState restores matching details by title only
+  ---
+  duration_ms: 0.386301
+  type: 'test'
+  ...
+# Subtest: writeWorkbenchWidgetsHtmlToDom preserves missing-container and identical-html no-ops
+ok 348 - writeWorkbenchWidgetsHtmlToDom preserves missing-container and identical-html no-ops
+  ---
+  duration_ms: 2.880261
+  type: 'test'
+  ...
+# Subtest: writeWorkbenchWidgetsHtmlToDom replaces HTML, restores open state, and schedules scroll restore
+ok 349 - writeWorkbenchWidgetsHtmlToDom replaces HTML, restores open state, and schedules scroll restore
+  ---
+  duration_ms: 0.68312
+  type: 'test'
+  ...
+# Subtest: writeWorkbenchWidgetsHtmlToDom restores scroll synchronously without requestAnimationFrame
+ok 350 - writeWorkbenchWidgetsHtmlToDom restores scroll synchronously without requestAnimationFrame
+  ---
+  duration_ms: 0.244599
+  type: 'test'
+  ...
+# Subtest: workbench log lens public exports remain available from workbench_render
+ok 351 - workbench log lens public exports remain available from workbench_render
+  ---
+  duration_ms: 6.460274
+  type: 'test'
+  ...
+# Subtest: workbench log lens classifies transcript blocks with stable labels and line ranges
+ok 352 - workbench log lens classifies transcript blocks with stable labels and line ranges
+  ---
+  duration_ms: 7.222024
+  type: 'test'
+  ...
+# Subtest: workbench log lens preserves lens controls, filters, data attrs, highlighting, and escaping
+ok 353 - workbench log lens preserves lens controls, filters, data attrs, highlighting, and escaping
+  ---
+  duration_ms: 1.470861
+  type: 'test'
+  ...
+# Subtest: workbench log lens preserves raw and empty output states
+ok 354 - workbench log lens preserves raw and empty output states
+  ---
+  duration_ms: 0.644527
+  type: 'test'
+  ...
+# Subtest: workbench JSONL lens preserves brief, record HTML, raw JSON, and record text helpers
+ok 355 - workbench JSONL lens preserves brief, record HTML, raw JSON, and record text helpers
+  ---
+  duration_ms: 11.770724
+  type: 'test'
+  ...
+# Subtest: workbenchRefreshStartPlan preserves no-session, throttle, loading, and start gates
+ok 356 - workbenchRefreshStartPlan preserves no-session, throttle, loading, and start gates
+  ---
+  duration_ms: 3.367044
+  type: 'test'
+  ...
+# Subtest: workbenchRefreshStalePlan preserves request and selected-session stale guards
+ok 357 - workbenchRefreshStalePlan preserves request and selected-session stale guards
+  ---
+  duration_ms: 0.574471
+  type: 'test'
+  ...
+# Subtest: runWorkbenchWidgetRefresh preserves no-session reset behavior
+ok 358 - runWorkbenchWidgetRefresh preserves no-session reset behavior
+  ---
+  duration_ms: 2.428836
+  type: 'test'
+  ...
+# Subtest: runWorkbenchWidgetRefresh preserves request ordering and result application
+ok 359 - runWorkbenchWidgetRefresh preserves request ordering and result application
+  ---
+  duration_ms: 1.952724
+  type: 'test'
+  ...
+# Subtest: runWorkbenchWidgetRefresh preserves stale response guard
+ok 360 - runWorkbenchWidgetRefresh preserves stale response guard
+  ---
+  duration_ms: 1.2883
+  type: 'test'
+  ...
+# Subtest: workbench text and action summaries stay compact
+ok 361 - workbench text and action summaries stay compact
+  ---
+  duration_ms: 2.918915
+  type: 'test'
+  ...
+# Subtest: workbench log lens classifies, filters, searches, and renders raw mode
+ok 362 - workbench log lens classifies, filters, searches, and renders raw mode
+  ---
+  duration_ms: 7.346233
+  type: 'test'
+  ...
+# Subtest: workbench widget renderer composes turns, JSONL, diff, artifacts, and skills
+ok 363 - workbench widget renderer composes turns, JSONL, diff, artifacts, and skills
+  ---
+  duration_ms: 6.271421
+  type: 'test'
+  ...
+# Subtest: workbench widget event planners classify click, input, and change targets
+ok 364 - workbench widget event planners classify click, input, and change targets
+  ---
+  duration_ms: 1.257821
+  type: 'test'
+  ...
+# Subtest: workbench refresh helpers plan delta fetches and merge transcript pages
+ok 365 - workbench refresh helpers plan delta fetches and merge transcript pages
+  ---
+  duration_ms: 1.852521
+  type: 'test'
+  ...
+# Subtest: workbench widget reset preserves request sequence and clears payload
+ok 366 - workbench widget reset preserves request sequence and clears payload
+  ---
+  duration_ms: 0.403584
+  type: 'test'
+  ...
+1..366
+# tests 366
+# suites 0
+# pass 366
+# fail 0
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms 1925.51372

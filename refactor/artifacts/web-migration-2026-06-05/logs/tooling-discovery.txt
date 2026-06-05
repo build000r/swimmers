@@ -1,0 +1,2 @@
+$ rg --files | rg '(^|/)(package.json|vite.config|tsconfig|pnpm-lock|package-lock|yarn.lock|bun.lock)$'
+NO_MATCHES
