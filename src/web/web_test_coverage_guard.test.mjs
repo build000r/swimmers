@@ -136,3 +136,22 @@ test("Vite can transform the app.js behavior-test entry with public test exports
   assert.ok(transformed?.code, "Vite did not transform app.js?behavior-test");
   assert.match(transformed.code, /__swimmersWebTest/);
 });
+
+test("Vite transforms the React shell path that owns React imports", async (t) => {
+  const source = await readRepoFile("src/web/react_shell.js");
+  assert.match(source, /from "react"/);
+  assert.match(source, /from "react-dom\/client"/);
+
+  const server = await createServer({
+    configFile: path.join(repoRoot, "vite.config.js"),
+    logLevel: "silent",
+    server: { middlewareMode: true },
+  });
+  t.after(() => server.close());
+
+  const transformed = await server.transformRequest("/src/web/react_shell.js");
+
+  assert.ok(transformed?.code, "Vite did not transform react_shell.js");
+  assert.match(transformed.code, /react/);
+  assert.match(transformed.code, /react-dom/);
+});

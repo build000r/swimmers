@@ -322,6 +322,7 @@ const {
 });
 
 const defaultDocumentTitle = document.title || "swimmers";
+let reactShell = null;
 let terminalZoomInputController;
 let clearPendingTerminalBytes;
 let bufferTerminalBytes;
@@ -1870,7 +1871,44 @@ const {
   updateSendHint,
 });
 
+function viteManagedModuleGraph() {
+  return Boolean(import.meta.env?.DEV || import.meta.env?.PROD);
+}
+
+function reactRootShellEnabled() {
+  if (window.__SWIMMERS_DISABLE_REACT_SHELL__) {
+    return false;
+  }
+  if (window.__SWIMMERS_ENABLE_REACT_SHELL__) {
+    return true;
+  }
+  return viteManagedModuleGraph();
+}
+
+async function mountReactRootShell() {
+  if (!reactRootShellEnabled()) {
+    return null;
+  }
+  const root = document.getElementById("swimmers-react-root");
+  if (!root) {
+    return null;
+  }
+  try {
+    const { mountSwimmersRootShell } = await import("./react_shell.js");
+    return mountSwimmersRootShell({
+      root,
+      boot,
+      documentRef: document,
+      windowRef: window,
+    });
+  } catch (error) {
+    console.warn("[swimmers-web] React shell mount skipped", error);
+    return null;
+  }
+}
+
 async function init() {
+  reactShell = await mountReactRootShell();
   loadInitialState();
   bindEvents();
   setUtilityStatus(defaultUtilityLabel(), true);
@@ -1963,6 +2001,9 @@ export const __swimmersWebTest = {
   applyBackendHealth,
   copyTerminalFrameText,
   syncLinkTools,
+  reactRootShellEnabled,
+  mountReactRootShell,
+  reactShell: () => reactShell,
 };
 
 if (!window.__SWIMMERS_DISABLE_AUTO_INIT__) {

@@ -350,6 +350,8 @@ fn lifecycle_event_delivery_payload_matches_session_lagged_and_closed_cases() {
 #[tokio::test]
 async fn index_shell_includes_new_web_parity_sheets() {
     let html = html_string(render_index(false).await).await;
+    assert!(html.contains("swimmers-react-root"));
+    assert!(html.find("swimmers-react-root").unwrap() < html.find("terminal-stage").unwrap());
     assert!(html.contains("thought-config-sheet"));
     assert!(html.contains("native-sheet"));
     assert!(html.contains("mermaid-sheet"));
@@ -858,6 +860,18 @@ async fn browser_js_asset_handlers_cover_app_module_graph() {
         let text = String::from_utf8(body.to_vec()).expect("utf8 js asset");
         assert!(text.contains(needle), "{route} did not contain {needle}");
     }
+}
+
+#[tokio::test]
+async fn direct_app_js_route_defers_react_imports_to_vite_shell_path() {
+    let app = response_text(app_js().await).await;
+    assert!(!app.contains("from \"react\""));
+    assert!(!app.contains("from \"react-dom/client\""));
+    assert!(app.contains("import(\"./react_shell.js\")"));
+
+    let react_shell = include_str!("react_shell.js");
+    assert!(react_shell.contains("from \"react\""));
+    assert!(react_shell.contains("from \"react-dom/client\""));
 }
 
 #[tokio::test]

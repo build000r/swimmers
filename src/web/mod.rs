@@ -113,6 +113,7 @@ async fn render_index(focus_layout: bool) -> impl IntoResponse {
     let stylesheet_tags = frontend_stylesheet_tags(&frontend_assets);
     let module_script_tags = frontend_module_script_tags(&frontend_assets);
     let franken_term_font_route = assets::FRANKENTERM_FONT_ROUTE;
+    let franken_term_available = boot.franken_term_available;
 
     let html = format!(
         r#"<!doctype html>
@@ -126,39 +127,43 @@ async fn render_index(focus_layout: bool) -> impl IntoResponse {
   </head>
   <body class="{body_class}">
     <div class="shell">
-      <main
-        class="terminal-stage"
-        id="terminal-stage"
-        tabindex="0"
-        role="application"
-        aria-label="swimmers rendered control surface"
-      >
-        <canvas class="terminal-canvas hidden" id="terminal-canvas"></canvas>
-        <canvas class="hud-canvas hidden" id="hud-canvas" aria-hidden="true"></canvas>
-        <pre
-          class="terminal-fallback hidden"
-          id="terminal-fallback"
+      <div id="swimmers-react-root" data-swimmers-react-root="shell">
+        <main
+          class="terminal-stage"
+          id="terminal-stage"
           tabindex="0"
-          aria-label="Live terminal text fallback"></pre>
-        <textarea
-          class="terminal-a11y-mirror"
-          id="terminal-a11y-mirror"
-          aria-label="Live terminal text mirror"
-          readonly
-          tabindex="-1"></textarea>
-        <div class="terminal-announcer" id="terminal-announcer" aria-live="polite" aria-atomic="false"></div>
-        <div class="terminal-status-strip" id="terminal-status-strip" aria-live="polite"></div>
-        <div class="terminal-link-tools hidden" id="terminal-link-tools" role="group" aria-label="Terminal link actions">
-          <span id="terminal-link-text"></span>
-          <button id="terminal-link-open" type="button">Open</button>
-          <button id="terminal-link-copy" type="button">Copy</button>
-        </div>
-        <div class="loading-overlay visible" id="loading-overlay" aria-hidden="true">
-          <div class="loading-label" id="loading-label">Loading FrankenTerm…</div>
-          <div class="loading-bar"><div class="loading-bar-fill"></div></div>
-        </div>
-        <section class="trogdor-surface hidden" id="trogdor-surface" aria-label="Trogdor repository atlas"></section>
-      </main>
+          role="application"
+          aria-label="swimmers rendered control surface"
+          data-franken-term-available="{franken_term_available}"
+          data-focus-layout="{focus_layout}"
+        >
+          <canvas class="terminal-canvas hidden" id="terminal-canvas"></canvas>
+          <canvas class="hud-canvas hidden" id="hud-canvas" aria-hidden="true"></canvas>
+          <pre
+            class="terminal-fallback hidden"
+            id="terminal-fallback"
+            tabindex="0"
+            aria-label="Live terminal text fallback"></pre>
+          <textarea
+            class="terminal-a11y-mirror"
+            id="terminal-a11y-mirror"
+            aria-label="Live terminal text mirror"
+            readonly
+            tabindex="-1"></textarea>
+          <div class="terminal-announcer" id="terminal-announcer" aria-live="polite" aria-atomic="false"></div>
+          <div class="terminal-status-strip" id="terminal-status-strip" aria-live="polite"></div>
+          <div class="terminal-link-tools hidden" id="terminal-link-tools" role="group" aria-label="Terminal link actions">
+            <span id="terminal-link-text"></span>
+            <button id="terminal-link-open" type="button">Open</button>
+            <button id="terminal-link-copy" type="button">Copy</button>
+          </div>
+          <div class="loading-overlay visible" id="loading-overlay" aria-hidden="true">
+            <div class="loading-label" id="loading-label">Loading FrankenTerm…</div>
+            <div class="loading-bar"><div class="loading-bar-fill"></div></div>
+          </div>
+          <section class="trogdor-surface hidden" id="trogdor-surface" aria-label="Trogdor repository atlas"></section>
+        </main>
+      </div>
       <textarea
         class="mobile-kb-proxy"
         id="mobile-kb-proxy"
