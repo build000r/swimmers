@@ -12,6 +12,16 @@ const TROGDOR_DRAGON_FRAME_BY_SECTOR = {
   "3": "3q-left",
 };
 
+const TROGDOR_ACTION_CUE_AWAITING_USER = 1 << 0;
+const TROGDOR_ACTION_CUE_COMMIT_READY = 1 << 1;
+const TROGDOR_ACTION_CUE_VALIDATION_MISSING = 1 << 2;
+const TROGDOR_ACTION_CUE_DIRTY_CHECK_MISSING = 1 << 3;
+const TROGDOR_PRIMARY_ACTION_CUE_MASK =
+  TROGDOR_ACTION_CUE_AWAITING_USER
+  | TROGDOR_ACTION_CUE_COMMIT_READY
+  | TROGDOR_ACTION_CUE_VALIDATION_MISSING
+  | TROGDOR_ACTION_CUE_DIRTY_CHECK_MISSING;
+
 function clampInt(value, fallback, min, max) {
   const numeric = Number.isFinite(value) ? Math.trunc(value) : fallback;
   return Math.max(min, Math.min(max, numeric));
@@ -22,6 +32,46 @@ function relativeCwd(cwd) {
   const parts = cwd.split("/").filter(Boolean);
   if (!parts.length) return cwd;
   return parts.slice(-2).join("/");
+}
+
+function actionCuesForSession(session) {
+  return Array.isArray(session?.actionCues) ? session.actionCues : [];
+}
+
+function normalizedActionCueKind(cue) {
+  return String(cue?.kind || "").toLowerCase();
+}
+
+function actionCueBit(kind) {
+  switch (kind) {
+    case "awaiting_user":
+      return TROGDOR_ACTION_CUE_AWAITING_USER;
+    case "commit_ready":
+      return TROGDOR_ACTION_CUE_COMMIT_READY;
+    case "validation_missing_after_edit":
+      return TROGDOR_ACTION_CUE_VALIDATION_MISSING;
+    case "dirty_check_missing":
+      return TROGDOR_ACTION_CUE_DIRTY_CHECK_MISSING;
+    default:
+      return 0;
+  }
+}
+
+function primaryActionCueMask(session) {
+  let mask = 0;
+  for (const cue of actionCuesForSession(session)) {
+    mask |= actionCueBit(normalizedActionCueKind(cue));
+    if (mask === TROGDOR_PRIMARY_ACTION_CUE_MASK) break;
+  }
+  return mask;
+}
+
+function primaryActionCueFromMask(mask) {
+  if (mask & TROGDOR_ACTION_CUE_AWAITING_USER) return "awaiting_user";
+  if (mask & TROGDOR_ACTION_CUE_COMMIT_READY) return "commit_ready";
+  if (mask & TROGDOR_ACTION_CUE_VALIDATION_MISSING) return "validation_missing_after_edit";
+  if (mask & TROGDOR_ACTION_CUE_DIRTY_CHECK_MISSING) return "dirty_check_missing";
+  return "";
 }
 
 export function trogdorSessionIsSleepingOrDeepSleep(session) {
@@ -122,11 +172,12 @@ export function trogdorDomPressure(session) {
     return clampInt(pressure.score, 1, 0, 99);
   }
   let score = 0;
+  const cueMask = primaryActionCueMask(session);
   const stateLabel = String(session?.state || "").toLowerCase();
   const rest = String(session?.restLabel || "").toLowerCase();
-  if (trogdorHasActionCue(session, "awaiting_user")) score += 55;
-  if (trogdorHasActionCue(session, "commit_ready")) score += 45;
-  if (trogdorHasActionCue(session, "validation_missing_after_edit")) score += 40;
+  if (cueMask & TROGDOR_ACTION_CUE_AWAITING_USER) score += 55;
+  if (cueMask & TROGDOR_ACTION_CUE_COMMIT_READY) score += 45;
+  if (cueMask & TROGDOR_ACTION_CUE_VALIDATION_MISSING) score += 40;
   if (stateLabel === "attention") score += 45;
   if (stateLabel === "busy") score += 12;
   if (stateLabel === "error") score += 55;
@@ -151,9 +202,10 @@ export function trogdorDomReason(session) {
 export function trogdorAgentGlyph(session) {
   const pressure = session?.operatorPressure || {};
   if (pressure.glyph) return String(pressure.glyph).slice(0, 1);
-  if (trogdorHasActionCue(session, "awaiting_user")) return "!";
-  if (trogdorHasActionCue(session, "commit_ready") || session?.commitCandidate) return "$";
-  if (trogdorHasActionCue(session, "validation_missing_after_edit")) return "v";
+  const cueMask = primaryActionCueMask(session);
+  if (cueMask & TROGDOR_ACTION_CUE_AWAITING_USER) return "!";
+  if ((cueMask & TROGDOR_ACTION_CUE_COMMIT_READY) || session?.commitCandidate) return "$";
+  if (cueMask & TROGDOR_ACTION_CUE_VALIDATION_MISSING) return "v";
   if (String(session?.state || "").toLowerCase() === "error") return "x";
   if (trogdorSessionIsSleepingOrDeepSleep(session)) return "z";
   return "a";
@@ -172,19 +224,25 @@ export function trogdorAgentTone(session) {
 }
 
 export function trogdorDomActionCueKinds(session) {
-  return (Array.isArray(session?.actionCues) ? session.actionCues : [])
-    .map((cue) => String(cue?.kind || "").toLowerCase())
-    .filter(Boolean);
+  const kinds = [];
+  for (const cue of actionCuesForSession(session)) {
+    const kind = normalizedActionCueKind(cue);
+    if (kind) kinds.push(kind);
+  }
+  return kinds;
 }
 
 export function trogdorHasActionCue(session, kind) {
-  return trogdorDomActionCueKinds(session).includes(kind);
+  const knownBit = actionCueBit(kind);
+  if (knownBit) {
+    return Boolean(primaryActionCueMask(session) & knownBit);
+  }
+  for (const cue of actionCuesForSession(session)) {
+    if (normalizedActionCueKind(cue) === kind) return true;
+  }
+  return false;
 }
 
 export function trogdorPrimaryActionCue(session) {
-  const kinds = trogdorDomActionCueKinds(session);
-  for (const kind of ["awaiting_user", "commit_ready", "validation_missing_after_edit", "dirty_check_missing"]) {
-    if (kinds.includes(kind)) return kind;
-  }
-  return "";
+  return primaryActionCueFromMask(primaryActionCueMask(session));
 }
