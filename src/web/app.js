@@ -327,6 +327,7 @@ let commandPaletteIsland = null;
 let searchSheetIsland = null;
 let sendSheetIsland = null;
 let authSheetIsland = null;
+let thoughtConfigSheetIsland = null;
 let createSheetIsland = null;
 let terminalZoomInputController;
 let clearPendingTerminalBytes;
@@ -1996,6 +1997,25 @@ async function mountAuthSheetReactIsland() {
   }
 }
 
+async function mountThoughtConfigSheetReactIsland() {
+  if (!reactRootShellEnabled()) {
+    return null;
+  }
+  if (!el.thoughtConfigSheet) {
+    return null;
+  }
+  try {
+    const { mountThoughtConfigSheetIsland } = await import("./thought_config_sheet_island.js");
+    return mountThoughtConfigSheetIsland({
+      thoughtConfigSheet: el.thoughtConfigSheet,
+      documentRef: document,
+    });
+  } catch (error) {
+    console.warn("[swimmers-web] thought config sheet React island mount skipped", error);
+    return null;
+  }
+}
+
 async function mountCreateSheetReactIsland() {
   if (!reactRootShellEnabled()) {
     return null;
@@ -2021,6 +2041,7 @@ async function init() {
   searchSheetIsland = await mountSearchSheetReactIsland();
   sendSheetIsland = await mountSendSheetReactIsland();
   authSheetIsland = await mountAuthSheetReactIsland();
+  thoughtConfigSheetIsland = await mountThoughtConfigSheetReactIsland();
   createSheetIsland = await mountCreateSheetReactIsland();
   loadInitialState();
   bindEvents();
@@ -2120,12 +2141,14 @@ export const __swimmersWebTest = {
   mountSearchSheetReactIsland,
   mountSendSheetReactIsland,
   mountAuthSheetReactIsland,
+  mountThoughtConfigSheetReactIsland,
   mountCreateSheetReactIsland,
   reactShell: () => reactShell,
   commandPaletteIsland: () => commandPaletteIsland,
   searchSheetIsland: () => searchSheetIsland,
   sendSheetIsland: () => sendSheetIsland,
   authSheetIsland: () => authSheetIsland,
+  thoughtConfigSheetIsland: () => thoughtConfigSheetIsland,
   createSheetIsland: () => createSheetIsland,
 };
 
