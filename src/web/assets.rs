@@ -51,6 +51,7 @@ pub(super) const TROGDOR_STATE_JS_ROUTE: &str = "/trogdor_state.js";
 pub(super) const TROGDOR_DOM_LOGIC_JS_ROUTE: &str = "/trogdor_dom_logic.js";
 pub(super) const TROGDOR_RENDER_JS_ROUTE: &str = "/trogdor_render.js";
 pub(super) const TROGDOR_SURFACE_CONTROLLER_JS_ROUTE: &str = "/trogdor_surface_controller.js";
+pub(super) const TROGDOR_ISLAND_JS_ROUTE: &str = "/trogdor_island.js";
 pub(super) const WORKBENCH_DOM_JS_ROUTE: &str = "/workbench_dom.js";
 pub(super) const WORKBENCH_RENDER_JS_ROUTE: &str = "/workbench_render.js";
 pub(super) const WORKBENCH_LOG_LENS_JS_ROUTE: &str = "/workbench_log_lens.js";
@@ -154,6 +155,7 @@ pub(super) fn routes() -> Router<Arc<AppState>> {
             TROGDOR_SURFACE_CONTROLLER_JS_ROUTE,
             get(trogdor_surface_controller_js),
         )
+        .route(TROGDOR_ISLAND_JS_ROUTE, get(trogdor_island_js))
         .route(WORKBENCH_DOM_JS_ROUTE, get(workbench_dom_js))
         .route(WORKBENCH_RENDER_JS_ROUTE, get(workbench_render_js))
         .route(WORKBENCH_LOG_LENS_JS_ROUTE, get(workbench_log_lens_js))
@@ -625,6 +627,11 @@ javascript_route!(
     trogdor_surface_controller_js,
     "src/web/trogdor_surface_controller.js",
     "trogdor_surface_controller.js"
+);
+javascript_route!(
+    trogdor_island_js,
+    "src/web/trogdor_island.js",
+    "trogdor_island.js"
 );
 javascript_route!(
     workbench_dom_js,

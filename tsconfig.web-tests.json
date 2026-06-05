@@ -34,6 +34,7 @@
     "src/web/terminal_zoom_input.test.mjs",
     "src/web/thought_config_sheet.test.mjs",
     "src/web/trogdor_event_bindings.test.mjs",
+    "src/web/trogdor_island.test.mjs",
     "src/web/trogdor_logic.test.mjs",
     "src/web/trogdor_render.test.mjs",
     "src/web/web_test_coverage_guard.test.mjs",

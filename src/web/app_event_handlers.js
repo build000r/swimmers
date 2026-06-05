@@ -13,7 +13,8 @@ import {
   terminalKeyStripClickPlan,
   terminalStageCaptureBindings,
 } from "./input_support.js";
-import { createTrogdorEventBindings } from "./trogdor_event_bindings.js";
+
+const noop = () => {};
 
 export function createAppEventHandlers(runtime = {}) {
   const {
@@ -23,6 +24,7 @@ export function createAppEventHandlers(runtime = {}) {
     ElementClass = globalThis.Element,
     ResizeObserverCtor = globalThis.ResizeObserver,
     applySearchQuery,
+    bindTrogdorEvents = noop,
     captureSurfaceAction,
     clearHoveredLink,
     closeMobileKeyboard,
@@ -91,22 +93,6 @@ export function createAppEventHandlers(runtime = {}) {
     updateHoveredTrogdorSurface,
     updateSendHint,
   } = runtime;
-
-  let trogdorEventBindings = null;
-
-  function bindTrogdorEvents() {
-    if (!trogdorEventBindings) {
-      trogdorEventBindings = createTrogdorEventBindings({
-        elements: el,
-        ElementClass,
-        handleSurfaceAction: runtime.handleSurfaceAction,
-        openTrogdorAgentTerminal,
-        openTrogdorAtlas,
-        updateHoveredTrogdorSurface,
-      });
-    }
-    trogdorEventBindings.bindTrogdorEvents();
-  }
 
   function handleGlobalShortcut(event) {
     const plan = globalShortcutPlan(event, {

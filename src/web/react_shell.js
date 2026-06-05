@@ -2,6 +2,10 @@ import React from "react";
 import { hydrateRoot } from "react-dom/client";
 
 import { normalizeBootPayload } from "./contracts.js";
+import {
+  TROGDOR_ATLAS_ISLAND_ID,
+  createTrogdorAtlasIslandElement,
+} from "./trogdor_island.js";
 
 export const SWIMMERS_REACT_ROOT_ID = "swimmers-react-root";
 
@@ -12,7 +16,7 @@ export const SWIMMERS_STABLE_CONTAINER_IDS = Object.freeze({
   terminalFallback: "terminal-fallback",
   terminalA11yMirror: "terminal-a11y-mirror",
   terminalAnnouncer: "terminal-announcer",
-  trogdorSurface: "trogdor-surface",
+  trogdorSurface: TROGDOR_ATLAS_ISLAND_ID,
 });
 
 const h = React.createElement;
@@ -86,11 +90,7 @@ export function SwimmersRootShell({ boot }) {
       h("div", { className: "loading-label", id: "loading-label" }, "Loading FrankenTerm…"),
       h("div", { className: "loading-bar" }, h("div", { className: "loading-bar-fill" })),
     ),
-    h("section", {
-      className: "trogdor-surface hidden",
-      id: "trogdor-surface",
-      "aria-label": "Trogdor repository atlas",
-    }),
+    createTrogdorAtlasIslandElement(h),
   );
 }
 

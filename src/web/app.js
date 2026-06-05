@@ -88,8 +88,8 @@ import {
   createTrogdorStateHelpers,
 } from "./trogdor_state.js";
 import {
-  createTrogdorSurfaceController,
-} from "./trogdor_surface_controller.js";
+  createTrogdorAtlasIsland,
+} from "./trogdor_island.js";
 import {
   emptyWorkbenchWidgets,
   renderTranscriptBlocks,
@@ -292,11 +292,11 @@ const state = {
   },
 };
 
-let trogdorSurfaceController;
-function renderTrogdorSurface() { return trogdorSurfaceController.renderTrogdorSurface(); }
-function applyTrogdorAtlasVisibility() { return trogdorSurfaceController.applyTrogdorAtlasVisibility(); }
-function updateHoveredTrogdorSurface(zone) { return trogdorSurfaceController.updateHoveredTrogdorSurface(zone); }
-function syncTrogdorReaderTimer() { return trogdorSurfaceController.syncTrogdorReaderTimer(); }
+let trogdorAtlasIsland;
+function renderTrogdorSurface() { return trogdorAtlasIsland.renderTrogdorSurface(); }
+function applyTrogdorAtlasVisibility() { return trogdorAtlasIsland.applyTrogdorAtlasVisibility(); }
+function updateHoveredTrogdorSurface(zone) { return trogdorAtlasIsland.updateHoveredTrogdorSurface(zone); }
+function syncTrogdorReaderTimer() { return trogdorAtlasIsland.syncTrogdorReaderTimer(); }
 
 const {
   advanceTrogdorReaderProgressForCurrentHover,
@@ -1592,9 +1592,10 @@ function openSheet(sheetId) { return commandPaletteController.openSheet(sheetId)
 
 function closeSheets() { return commandPaletteController.closeSheets(); }
 
-trogdorSurfaceController = createTrogdorSurfaceController({
+trogdorAtlasIsland = createTrogdorAtlasIsland({
   state,
   el,
+  ElementClass: Element,
   documentRef: document,
   windowRef: window,
   surfaceSession,
@@ -1606,6 +1607,9 @@ trogdorSurfaceController = createTrogdorSurfaceController({
   renderHudSurface: (...args) => renderHudSurface(...args),
   setUtilityStatus,
   clampInt,
+  handleSurfaceAction,
+  openTrogdorAgentTerminal,
+  openTrogdorAtlas,
 });
 
 function closeTrogdorAtlasForTerminal() {
@@ -1793,6 +1797,7 @@ const {
   state,
   ElementClass: Element,
   ResizeObserverCtor: globalThis.ResizeObserver,
+  bindTrogdorEvents: () => trogdorAtlasIsland.bindTrogdorEvents(),
   applySearchQuery,
   captureSurfaceAction,
   clearHoveredLink,

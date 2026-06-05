@@ -626,7 +626,28 @@ async fn browser_js_asset_handlers_cover_app_module_graph() {
         (
             APP_EVENT_HANDLERS_JS_ROUTE,
             app_event_handlers_js().await,
+            "export function createAppEventHandlers",
+        ),
+        (APP_JS_ROUTE, app_js().await, "from \"./trogdor_island.js\""),
+        (
+            TROGDOR_ISLAND_JS_ROUTE,
+            trogdor_island_js().await,
+            "export function createTrogdorAtlasIsland",
+        ),
+        (
+            TROGDOR_ISLAND_JS_ROUTE,
+            trogdor_island_js().await,
+            "from \"./trogdor_surface_controller.js\"",
+        ),
+        (
+            TROGDOR_ISLAND_JS_ROUTE,
+            trogdor_island_js().await,
             "from \"./trogdor_event_bindings.js\"",
+        ),
+        (
+            TROGDOR_SURFACE_CONTROLLER_JS_ROUTE,
+            trogdor_surface_controller_js().await,
+            "export function createTrogdorSurfaceController",
         ),
         (
             TROGDOR_EVENT_BINDINGS_JS_ROUTE,
@@ -1148,14 +1169,17 @@ fn app_js_and_css_wire_trogdor_sprite_burn_loop() {
     let trogdor_dom_logic = include_str!("trogdor_dom_logic.js");
     let trogdor_render = include_str!("trogdor_render.js");
     let trogdor_surface_controller = include_str!("trogdor_surface_controller.js");
+    let trogdor_island = include_str!("trogdor_island.js");
     assert!(trogdor_render.contains("TROGDOR_DRAGON_ASSET_BASE = \"/assets/dragon\""));
     assert!(trogdor_logic.contains("from \"./trogdor_dom_logic.js\""));
     assert!(trogdor_dom_logic.contains("export function trogdorDragonPose(groups, summary"));
     assert!(trogdor_render.contains("trogdor-dragon-sprite"));
     assert!(trogdor_render.contains("agent-burn-flame"));
     assert!(trogdor_render.contains("const dragonTarget = dragonPose || TROGDOR_DRAGON_TARGET"));
-    assert!(js.contains("createTrogdorSurfaceController"));
+    assert!(js.contains("createTrogdorAtlasIsland"));
     assert!(trogdor_surface_controller.contains("renderTrogdorSurfaceFrame"));
+    assert!(trogdor_island.contains("createTrogdorSurfaceController"));
+    assert!(trogdor_island.contains("createTrogdorEventBindings"));
 
     let css = app_css_body();
     assert!(css.contains("@keyframes dragon-walk-around"));
@@ -1306,6 +1330,7 @@ fn app_js_trogdor_agent_click_opens_terminal() {
     let terminal_input = include_str!("terminal_input.js");
     let trogdor_logic = include_str!("trogdor_logic.js");
     let trogdor_surface_controller = include_str!("trogdor_surface_controller.js");
+    let trogdor_island = include_str!("trogdor_island.js");
     assert!(js.contains("function closeTrogdorAtlasForTerminal()"));
     assert!(js.contains("function openTrogdorAtlas()"));
     assert!(js.contains("terminalTrogdorBack"));
@@ -1318,6 +1343,9 @@ fn app_js_trogdor_agent_click_opens_terminal() {
     assert!(trogdor_logic.contains("case \"close_terminal\":"));
     assert!(trogdor_logic.contains("...trogdorHoverReaderResetState(),"));
     assert!(js.contains("function applyTrogdorAtlasVisibility()"));
+    assert!(js.contains("bindTrogdorEvents: () => trogdorAtlasIsland.bindTrogdorEvents()"));
+    assert!(trogdor_island.contains("bindTrogdorEvents"));
+    assert!(trogdor_island.contains("handleSurfaceAction: runtime.handleSurfaceAction"));
     assert!(trogdor_surface_controller
         .contains("el.trogdorSurface.style.display = visible ? \"\" : \"none\""));
     assert!(trogdor_surface_controller
