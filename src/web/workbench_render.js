@@ -470,7 +470,7 @@ function renderSkillsPanel(skillsPayload) {
   return `${skillsHtml}${issueHtml}`;
 }
 
-export function buildWorkbenchWidgetsHtml({
+export function buildWorkbenchWidgetsViewModel({
   widgets = {},
   contextPayload = null,
   selectedTurnId = "",
@@ -522,11 +522,6 @@ export function buildWorkbenchWidgetsHtml({
         : "dirty"
       : "clean"
     : diffEvent?.summary || "unavailable";
-  const status = widgets.loading
-    ? `<div class="workbench-action-detail">Loading pinned widgets...</div>`
-    : widgets.error
-      ? `<div class="workbench-action-detail">${escapeHtml(widgets.error)}</div>`
-      : "";
   const outputBody = useTranscriptLogs
     ? renderWorkbenchLogLens(transcriptText, {
         title: "Post-turn JSONL",
@@ -578,49 +573,80 @@ export function buildWorkbenchWidgetsHtml({
     ? `${Array.isArray(skills.skills) ? skills.skills.length : 0} skills`
     : "unavailable";
 
+  return {
+    statusText: widgets.loading
+      ? "Loading pinned widgets..."
+      : widgets.error
+        ? String(widgets.error)
+        : "",
+    items: [
+      {
+        key: "turns",
+        title: "Turns",
+        meta: turns.length ? `${turns.length} user` : "empty",
+        bodyHtml: renderTurnsPanel(turns, activeTurnId),
+        open: true,
+      },
+      {
+        key: "logs",
+        title: "Logs",
+        meta: useTranscriptLogs ? `${lines} records` : lines ? `${lines} lines` : "empty",
+        bodyHtml: outputBody,
+        open: true,
+      },
+      {
+        key: "activity",
+        title: "Activity",
+        meta: timelineEvents.length ? `${timelineEvents.length} events` : "snapshot",
+        bodyHtml: activityBody,
+        open: Boolean(activityEvents.length || toolActions.length),
+      },
+      {
+        key: "diffs",
+        title: "Diffs",
+        meta: diffMeta,
+        bodyHtml: diffBody,
+        open: Boolean(diffAvailable && diffText.trim()),
+      },
+      {
+        key: "artifacts",
+        title: "Artifacts",
+        meta: artifactMeta,
+        bodyHtml: artifactBody,
+        open: false,
+      },
+      {
+        key: "skills",
+        title: "Skills",
+        meta: skillsMeta,
+        bodyHtml: renderSkillsPanel(skills),
+        open: false,
+      },
+    ],
+  };
+}
+
+export function renderWorkbenchWidgetsViewModelHtml(model = {}) {
+  const items = Array.isArray(model?.items) ? model.items : [];
+  const status = model?.statusText
+    ? `<div class="workbench-action-detail">${escapeHtml(model.statusText)}</div>`
+    : "";
   return `
     ${status}
-    <details class="workbench-widget" open>
-      <summary>
-        <span class="workbench-widget-title">Turns</span>
-        <span class="workbench-widget-meta">${turns.length ? `${turns.length} user` : "empty"}</span>
-      </summary>
-      <div class="workbench-widget-body">${renderTurnsPanel(turns, activeTurnId)}</div>
-    </details>
-    <details class="workbench-widget" open>
-      <summary>
-        <span class="workbench-widget-title">Logs</span>
-        <span class="workbench-widget-meta">${useTranscriptLogs ? `${lines} records` : lines ? `${lines} lines` : "empty"}</span>
-      </summary>
-      <div class="workbench-widget-body">${outputBody}</div>
-    </details>
-    <details class="workbench-widget" ${activityEvents.length || toolActions.length ? "open" : ""}>
-      <summary>
-        <span class="workbench-widget-title">Activity</span>
-        <span class="workbench-widget-meta">${timelineEvents.length ? `${timelineEvents.length} events` : "snapshot"}</span>
-      </summary>
-      <div class="workbench-widget-body">${activityBody}</div>
-    </details>
-    <details class="workbench-widget" ${diffAvailable && diffText.trim() ? "open" : ""}>
-      <summary>
-        <span class="workbench-widget-title">Diffs</span>
-        <span class="workbench-widget-meta">${escapeHtml(diffMeta)}</span>
-      </summary>
-      <div class="workbench-widget-body">${diffBody}</div>
-    </details>
-    <details class="workbench-widget">
-      <summary>
-        <span class="workbench-widget-title">Artifacts</span>
-        <span class="workbench-widget-meta">${escapeHtml(artifactMeta)}</span>
-      </summary>
-      <div class="workbench-widget-body">${artifactBody}</div>
-    </details>
-    <details class="workbench-widget">
-      <summary>
-        <span class="workbench-widget-title">Skills</span>
-        <span class="workbench-widget-meta">${escapeHtml(skillsMeta)}</span>
-      </summary>
-      <div class="workbench-widget-body">${renderSkillsPanel(skills)}</div>
-    </details>
+    ${items
+      .map((item) => `
+        <details class="workbench-widget" ${item?.open ? "open" : ""}>
+          <summary>
+            <span class="workbench-widget-title">${escapeHtml(item?.title || "")}</span>
+            <span class="workbench-widget-meta">${escapeHtml(item?.meta || "")}</span>
+          </summary>
+          <div class="workbench-widget-body">${String(item?.bodyHtml || "")}</div>
+        </details>
+      `)
+      .join("")}
   `;
+}
+
+export function buildWorkbenchWidgetsHtml(options = {}) {
+  return renderWorkbenchWidgetsViewModelHtml(buildWorkbenchWidgetsViewModel(options));
 }

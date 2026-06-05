@@ -331,6 +331,7 @@ let thoughtConfigSheetIsland = null;
 let nativeDesktopSheetIsland = null;
 let createSheetIsland = null;
 let dirBrowserViewIsland = null;
+let workbenchWidgetsIsland = null;
 let mermaidSheetIsland = null;
 let terminalZoomInputController;
 let clearPendingTerminalBytes;
@@ -841,6 +842,7 @@ const terminalWorkbenchController = createTerminalWorkbenchController({
   focusTerminalInputSurface,
   documentRef: document,
   requestAnimationFrameRef: typeof requestAnimationFrame === "function" ? requestAnimationFrame : null,
+  renderWorkbenchWidgetsView: renderWorkbenchWidgetsReactView,
 });
 
 const sessionRefreshRuntime = {
@@ -1040,6 +1042,10 @@ function renderWorkbenchWidgets() {
 
 async function refreshWorkbenchWidgetsForSelectedSession(options = {}) {
   return terminalWorkbenchController.refreshWorkbenchWidgetsForSelectedSession(options);
+}
+
+function renderWorkbenchWidgetsReactView(view) {
+  return workbenchWidgetsIsland?.render?.(view?.model) === true;
 }
 
 function applyZoomToSurface(surface) {
@@ -2082,6 +2088,25 @@ async function mountDirBrowserViewReactIsland() {
   }
 }
 
+async function mountWorkbenchWidgetsReactIsland() {
+  if (!reactRootShellEnabled()) {
+    return null;
+  }
+  if (!el.terminalWorkbenchWidgets) {
+    return null;
+  }
+  try {
+    const { mountWorkbenchWidgetsIsland } = await import("./workbench_widgets_island.js");
+    return mountWorkbenchWidgetsIsland({
+      terminalWorkbenchWidgets: el.terminalWorkbenchWidgets,
+      documentRef: document,
+    });
+  } catch (error) {
+    console.warn("[swimmers-web] workbench widgets React island mount skipped", error);
+    return null;
+  }
+}
+
 async function mountMermaidSheetReactIsland() {
   if (!reactRootShellEnabled()) {
     return null;
@@ -2111,6 +2136,7 @@ async function init() {
   nativeDesktopSheetIsland = await mountNativeDesktopSheetReactIsland();
   createSheetIsland = await mountCreateSheetReactIsland();
   dirBrowserViewIsland = await mountDirBrowserViewReactIsland();
+  workbenchWidgetsIsland = await mountWorkbenchWidgetsReactIsland();
   mermaidSheetIsland = await mountMermaidSheetReactIsland();
   loadInitialState();
   bindEvents();
@@ -2214,6 +2240,7 @@ export const __swimmersWebTest = {
   mountNativeDesktopSheetReactIsland,
   mountCreateSheetReactIsland,
   mountDirBrowserViewReactIsland,
+  mountWorkbenchWidgetsReactIsland,
   mountMermaidSheetReactIsland,
   reactShell: () => reactShell,
   commandPaletteIsland: () => commandPaletteIsland,
@@ -2224,6 +2251,7 @@ export const __swimmersWebTest = {
   nativeDesktopSheetIsland: () => nativeDesktopSheetIsland,
   createSheetIsland: () => createSheetIsland,
   dirBrowserViewIsland: () => dirBrowserViewIsland,
+  workbenchWidgetsIsland: () => workbenchWidgetsIsland,
   mermaidSheetIsland: () => mermaidSheetIsland,
 };
 

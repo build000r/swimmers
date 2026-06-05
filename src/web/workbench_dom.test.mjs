@@ -6,6 +6,7 @@ import {
   workbenchWidgetOpenStateByTitle,
   workbenchWidgetTitleForDetailsNode,
   writeWorkbenchWidgetsHtmlToDom,
+  writeWorkbenchWidgetsViewToDom,
 } from "./workbench_dom.js";
 
 function detailsNode(title, open) {
@@ -151,4 +152,71 @@ test("writeWorkbenchWidgetsHtmlToDom restores scroll synchronously without reque
   assert.equal(container.innerHTML, "new");
   assert.equal(widgets.lastHtml, "new");
   assert.equal(scroller.scrollTop, 55);
+});
+
+test("writeWorkbenchWidgetsViewToDom delegates React view rendering and preserves details and scroll", () => {
+  const previousDetails = [
+    detailsNode("Turns", false),
+    detailsNode("Logs", true),
+  ];
+  const nextDetails = [
+    detailsNode("Turns", true),
+    detailsNode("Logs", false),
+    detailsNode("Artifacts", true),
+  ];
+  const calls = [];
+  const container = containerWithDetails([previousDetails, nextDetails], calls);
+  const widgets = { lastHtml: "old" };
+  const scroller = { scrollTop: 90 };
+  const renderViews = [];
+
+  writeWorkbenchWidgetsViewToDom({
+    html: "<details class=\"workbench-widget\">new</details>",
+    model: { items: [{ title: "Turns" }] },
+  }, {
+    container,
+    widgets,
+    scroller,
+    renderWorkbenchWidgetsView(view) {
+      renderViews.push(view);
+      return true;
+    },
+  });
+
+  assert.deepEqual(renderViews, [{
+    html: "<details class=\"workbench-widget\">new</details>",
+    model: { items: [{ title: "Turns" }] },
+  }]);
+  assert.equal(container.innerHTML, "initial", "React path does not use legacy innerHTML");
+  assert.equal(widgets.lastHtml, "<details class=\"workbench-widget\">new</details>");
+  assert.equal(nextDetails[0].open, false);
+  assert.equal(nextDetails[1].open, true);
+  assert.equal(nextDetails[2].open, true);
+  assert.equal(scroller.scrollTop, 90);
+  assert.deepEqual(calls, [
+    ["querySelectorAll", "details.workbench-widget"],
+    ["querySelectorAll", "details.workbench-widget"],
+  ]);
+});
+
+test("writeWorkbenchWidgetsViewToDom falls back to legacy HTML when React view declines", () => {
+  const widgets = { lastHtml: "old" };
+  const container = containerWithDetails([[detailsNode("Logs", true)]]);
+  const scroller = { scrollTop: 12 };
+
+  writeWorkbenchWidgetsViewToDom({
+    html: "<details class=\"workbench-widget\">fallback</details>",
+    model: { items: [] },
+  }, {
+    container,
+    widgets,
+    scroller,
+    renderWorkbenchWidgetsView() {
+      return false;
+    },
+  });
+
+  assert.equal(container.innerHTML, "<details class=\"workbench-widget\">fallback</details>");
+  assert.equal(widgets.lastHtml, "<details class=\"workbench-widget\">fallback</details>");
+  assert.equal(scroller.scrollTop, 12);
 });

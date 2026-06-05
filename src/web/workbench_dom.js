@@ -33,10 +33,18 @@ export function restoreWorkbenchWidgetOpenState(container, openByTitle) {
 }
 
 export function writeWorkbenchWidgetsHtmlToDom(nextHtml, runtime = {}) {
+  return writeWorkbenchWidgetsViewToDom({
+    html: String(nextHtml || ""),
+    model: null,
+  }, runtime);
+}
+
+export function writeWorkbenchWidgetsViewToDom(view, runtime = {}) {
   const container = runtime.container;
   if (!container) {
     return;
   }
+  const nextHtml = String(view?.html || "");
   if (runtime.widgets.lastHtml === nextHtml) {
     return;
   }
@@ -45,7 +53,11 @@ export function writeWorkbenchWidgetsHtmlToDom(nextHtml, runtime = {}) {
     scroller && typeof scroller.scrollTop === "number" ? scroller.scrollTop : 0;
   const openByTitle = workbenchWidgetOpenStateByTitle(container);
 
-  container.innerHTML = nextHtml;
+  const renderedByIsland = typeof runtime.renderWorkbenchWidgetsView === "function" &&
+    runtime.renderWorkbenchWidgetsView(view) === true;
+  if (!renderedByIsland) {
+    container.innerHTML = nextHtml;
+  }
   runtime.widgets.lastHtml = nextHtml;
   restoreWorkbenchWidgetOpenState(container, openByTitle);
 

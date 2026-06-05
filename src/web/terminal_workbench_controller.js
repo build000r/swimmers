@@ -1,10 +1,14 @@
 import { runAgentContextRefresh } from "./agent_context_refresh.js";
-import { writeWorkbenchWidgetsHtmlToDom } from "./workbench_dom.js";
+import {
+  writeWorkbenchWidgetsHtmlToDom,
+  writeWorkbenchWidgetsViewToDom,
+} from "./workbench_dom.js";
 import { runWorkbenchWidgetRefresh } from "./workbench_refresh.js";
 import {
   agentActionLabel,
-  buildWorkbenchWidgetsHtml,
+  buildWorkbenchWidgetsViewModel,
   operatorPressureSummary,
+  renderWorkbenchWidgetsViewModelHtml,
   renderTerminalWorkbenchActions,
   resetWorkbenchWidgetsState,
   selectedWorkbenchWidgetsSnapshot,
@@ -29,6 +33,7 @@ export function createTerminalWorkbenchController({
   focusTerminalInputSurface = () => {},
   documentRef = globalThis.document,
   requestAnimationFrameRef = globalThis.requestAnimationFrame,
+  renderWorkbenchWidgetsView = null,
 } = {}) {
   function resetAgentContextForSession(sessionId) {
     state.agentContextSessionId = normalizeSessionId(sessionId);
@@ -142,6 +147,18 @@ export function createTerminalWorkbenchController({
     });
   }
 
+  function writeWorkbenchWidgetsView(view) {
+    writeWorkbenchWidgetsViewToDom(view, {
+      container: el.terminalWorkbenchWidgets,
+      scroller: el.terminalWorkbench,
+      widgets: state.workbenchWidgets,
+      requestAnimationFrame: typeof requestAnimationFrameRef === "function"
+        ? (callback) => requestAnimationFrameRef(callback)
+        : null,
+      renderWorkbenchWidgetsView,
+    });
+  }
+
   function renderWorkbenchWidgets() {
     if (!el.terminalWorkbenchWidgets) {
       return;
@@ -157,7 +174,7 @@ export function createTerminalWorkbenchController({
     }
 
     const contextPayload = selectedAgentContextPayload();
-    writeWorkbenchWidgetsHtml(buildWorkbenchWidgetsHtml({
+    const model = buildWorkbenchWidgetsViewModel({
       widgets,
       contextPayload,
       selectedTurnId: state.workbenchSelectedTurnId,
@@ -166,7 +183,11 @@ export function createTerminalWorkbenchController({
         filter: state.workbenchLogFilter,
         query: state.workbenchLogSearch,
       },
-    }));
+    });
+    writeWorkbenchWidgetsView({
+      html: renderWorkbenchWidgetsViewModelHtml(model),
+      model,
+    });
   }
 
   async function refreshWorkbenchWidgetsForSelectedSession(options = {}) {
