@@ -159,35 +159,30 @@ function workbenchLogCounts(blocks) {
 }
 
 const WORKBENCH_LOG_PATH_RE = /(?:^|[\s"'`([])((?:~\/|\.{1,2}\/|\/)?[A-Za-z0-9_@%+=:.-][A-Za-z0-9_@%+=:./-]*\.(?:c|cc|cpp|css|h|html|js|jsx|json|jsonl|lock|log|md|mjs|mmd|mmdx|py|rs|sh|toml|ts|tsx|txt|wasm|yaml|yml))(?:$|[\s"'`),\]])/g;
+const WORKBENCH_BRIEF_OUTCOME_RE = /baked|blocked|complete|done|error|fail|pass|result|summary|written/i;
 
 function normalizeWorkbenchBriefText(text, limit = 260) {
   return truncateWorkbenchText(String(text || "").replace(/\r/g, "").replace(/\s+/g, " ").trim(), limit);
 }
 
-function uniqueNonEmpty(values) {
-  const seen = new Set();
-  const result = [];
-  for (const value of values) {
-    const text = String(value || "").trim();
-    if (!text || seen.has(text)) {
-      continue;
-    }
-    seen.add(text);
-    result.push(text);
+function addUniqueBriefText(result, seen, value, limit) {
+  const text = normalizeWorkbenchBriefText(value, limit);
+  if (!text || seen.has(text)) {
+    return;
   }
-  return result;
+  seen.add(text);
+  result.push(text);
 }
 
-function extractWorkbenchPaths(text) {
-  const paths = [];
+function addWorkbenchPathCandidates(result, seen, text) {
   const source = String(text || "");
   for (const match of source.matchAll(WORKBENCH_LOG_PATH_RE)) {
-    const path = String(match[1] || "").replace(/[;:.,]+$/, "");
-    if (path && !path.startsWith("http")) {
-      paths.push(path);
+    const path = String(match[1] || "").replace(/[;:.,]+$/, "").trim();
+    if (path && !path.startsWith("http") && !seen.has(path)) {
+      seen.add(path);
+      result.push(path);
     }
   }
-  return paths;
 }
 
 function workbenchPathScore(path) {
@@ -224,48 +219,63 @@ function workbenchRecordRole(record) {
 function workbenchBriefItems(records, options = {}) {
   const items = [];
   const selectedTurnText = normalizeWorkbenchBriefText(options.selectedTurn?.text || "", 220);
-  const userRecord = [...records].reverse().find((record) => workbenchRecordRole(record) === "user");
-  const userText = selectedTurnText || normalizeWorkbenchBriefText(workbenchRecordBody(userRecord), 220);
-  const outcomeRecord = [...records].reverse().find((record) => {
+  let userText = selectedTurnText;
+  let outcomeText = "";
+  let assistantText = "";
+  let fallbackText = "";
+
+  for (let index = records.length - 1; index >= 0; index -= 1) {
+    const record = records[index];
     const body = workbenchRecordBody(record);
-    return body && /baked|blocked|complete|done|error|fail|pass|result|summary|written/i.test(body);
-  });
-  const assistantRecord = [...records].reverse().find((record) => {
     const role = workbenchRecordRole(record);
-    const body = workbenchRecordBody(record);
-    return body && (role === "assistant" || /assistant|agent/.test(record?.title || ""));
-  });
-  const fallbackRecord = [...records].reverse().find((record) => workbenchRecordBody(record));
-  const outcomeText = normalizeWorkbenchBriefText(
-    workbenchRecordBody(outcomeRecord) || workbenchRecordBody(assistantRecord) || workbenchRecordBody(fallbackRecord),
-    280,
-  );
-  const commands = uniqueNonEmpty(
-    records
-      .filter((record) => record.kind === "command")
-      .map((record) => normalizeWorkbenchBriefText(workbenchRecordBody(record), 120)),
-  ).slice(0, 3);
-  const paths = uniqueNonEmpty(
-    records.flatMap((record) => [
-      ...extractWorkbenchPaths(record.body),
-      ...extractWorkbenchPaths(record.raw),
-      ...(record.fields || []).flatMap(([, value]) => extractWorkbenchPaths(value)),
-    ]),
-  )
-    .sort((left, right) => workbenchPathScore(right) - workbenchPathScore(left))
-    .slice(0, 4);
+    if (!userText && role === "user") {
+      userText = normalizeWorkbenchBriefText(body, 220);
+    }
+    if (body) {
+      if (!outcomeText && WORKBENCH_BRIEF_OUTCOME_RE.test(body)) {
+        outcomeText = normalizeWorkbenchBriefText(body, 280);
+      }
+      if (!assistantText && (role === "assistant" || /assistant|agent/.test(record?.title || ""))) {
+        assistantText = normalizeWorkbenchBriefText(body, 280);
+      }
+      if (!fallbackText) {
+        fallbackText = normalizeWorkbenchBriefText(body, 280);
+      }
+    }
+    if (userText && outcomeText && assistantText && fallbackText) {
+      break;
+    }
+  }
+
+  const commands = [];
+  const commandSeen = new Set();
+  const paths = [];
+  const pathSeen = new Set();
+  for (const record of records) {
+    if (commands.length < 3 && record?.kind === "command") {
+      addUniqueBriefText(commands, commandSeen, workbenchRecordBody(record), 120);
+    }
+    addWorkbenchPathCandidates(paths, pathSeen, record?.body);
+    addWorkbenchPathCandidates(paths, pathSeen, record?.raw);
+    const fields = Array.isArray(record?.fields) ? record.fields : [];
+    for (const [, value] of fields) {
+      addWorkbenchPathCandidates(paths, pathSeen, value);
+    }
+  }
+  paths.sort((left, right) => workbenchPathScore(right) - workbenchPathScore(left));
 
   if (userText) {
     items.push(["User turn", userText]);
   }
-  if (outcomeText) {
-    items.push(["Outcome", outcomeText]);
+  const resolvedOutcomeText = outcomeText || assistantText || fallbackText;
+  if (resolvedOutcomeText) {
+    items.push(["Outcome", resolvedOutcomeText]);
   }
   if (commands.length) {
     items.push(["Tool actions", commands.join("\n")]);
   }
   if (paths.length) {
-    items.push(["Where to read", paths.join("\n")]);
+    items.push(["Where to read", paths.slice(0, 4).join("\n")]);
   }
   return items;
 }

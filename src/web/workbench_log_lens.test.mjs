@@ -134,6 +134,11 @@ test("workbench JSONL lens preserves brief, record HTML, raw JSON, and record te
   assert.equal(html.includes("<span>run &lt;tests&gt;</span>"), true);
   assert.equal(html.includes('<div class="workbench-log-brief-label">Tool actions</div>'), true);
   assert.equal(html.includes("<span>cargo test &lt;unit&gt;</span>"), true);
+  assert.equal(html.includes('<div class="workbench-log-brief-label">Where to read</div>'), true);
+  assert.ok(
+    html.indexOf("<span>result.mmdx</span>") <
+      html.indexOf("<span>src/web/workbench_render.js</span>"),
+  );
   assert.equal(html.includes('<details class="workbench-log-evidence" >'), true);
   assert.equal(html.includes("<span>Event stream</span>"), true);
   assert.equal(html.includes("<span>3/3 shown</span>"), true);
