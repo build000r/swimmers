@@ -77,6 +77,10 @@ Summary:
 
 ## Files
 
+- `ISOMORPHISM_LEDGER.md`
+- `MODULE_GRAPH.md`
+- `SCAN_COMMANDS.md`
+- `VALIDATION_LEDGER.md`
 - `logs/js-node-test.log`
 - `logs/cargo-test-web.log`
 - `logs/loc-web.txt`
