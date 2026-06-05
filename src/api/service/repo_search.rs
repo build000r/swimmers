@@ -117,6 +117,22 @@ fn compact_repo_search_path(path: &Path) -> String {
     path.to_string_lossy().into_owned()
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn compact_repo_search_path_uses_tilde_for_home_paths() {
+        let home = dirs::home_dir().expect("home dir");
+
+        assert_eq!(compact_repo_search_path(&home), "~");
+        assert_eq!(
+            compact_repo_search_path(&home.join("repos").join("swimmers")),
+            "~/repos/swimmers"
+        );
+    }
+}
+
 fn repo_search_entry(path: &Path) -> DirEntry {
     let basename = path
         .file_name()
