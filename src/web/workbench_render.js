@@ -2,7 +2,6 @@ import {
   WORKBENCH_LOG_FILTERS,
   renderWorkbenchLogLens,
   renderTranscriptBlocks,
-  transcriptRecordsToLensText,
   transcriptRecordsToRawText,
 } from "./workbench_log_lens.js";
 
@@ -495,9 +494,8 @@ export function buildWorkbenchWidgetsViewModel({
     turns.at(-1)?.id ||
     "";
   const transcriptAvailable = Boolean(transcript?.available);
-  const transcriptText = transcriptRecordsToLensText(transcriptRecords);
-  const transcriptRawText = transcriptRecordsToRawText(transcriptRecords);
   const useTranscriptLogs = transcriptAvailable && (Boolean(transcript?.selected_turn) || transcriptRecords.length > 0);
+  const transcriptRawText = useTranscriptLogs ? transcriptRecordsToRawText(transcriptRecords) : "";
   const lines = useTranscriptLogs ? transcriptRecords.length : tailLineCount(tailText);
   const artifact = widgets.artifact;
   const gitDiff = widgets.gitDiff;
@@ -523,7 +521,7 @@ export function buildWorkbenchWidgetsViewModel({
       : "clean"
     : diffEvent?.summary || "unavailable";
   const outputBody = useTranscriptLogs
-    ? renderWorkbenchLogLens(transcriptText, {
+    ? renderWorkbenchLogLens("", {
         title: "Post-turn JSONL",
         rawText: transcriptRawText,
         records: transcriptRecords,
