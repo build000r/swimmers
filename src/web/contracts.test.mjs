@@ -6,6 +6,7 @@ import {
   normalizeDirListResponse,
   normalizeMermaidArtifactResponse,
   normalizeNativeDesktopStatusResponse,
+  normalizeOperatorPressureResponse,
   normalizeSessionListResponse,
   normalizeSurfaceModel,
   normalizeTerminalServerFrame,
@@ -110,6 +111,75 @@ test("normalizeSessionListResponse preserves SessionSummary-derived web fields w
     last_activity_at: "2026-06-05T00:00:00Z",
     repo_theme_id: null,
     batch: null,
+  });
+});
+
+test("normalizeOperatorPressureResponse preserves existing Trogdor input fields only", () => {
+  const payload = normalizeOperatorPressureResponse({
+    sessions: [{
+      session_id: "agent-1",
+      repo_key: "/tmp/repos/swimmers",
+      repo_label: "swimmers",
+      pressure: {
+        score: "42",
+        reason: "dirty check",
+        reason_kind: "dirty_check_missing",
+        glyph: "d",
+        tone: "warning",
+        needs_input: true,
+        launch_ready: true,
+        commit_ready: false,
+        action_cue_count: "2",
+        burnination_state: "not-a-backend-fact",
+      },
+      batch_send_session_ids: ["agent-1", null, "agent-2"],
+      villager_intent: "not-a-backend-fact",
+    }],
+    repos: [{
+      repo_key: "/tmp/repos/swimmers",
+      repo_label: "swimmers",
+      score: "42",
+      reason: "dirty check",
+      session_ids: ["agent-1", 7],
+    }],
+    summary: {
+      max_score: "42",
+      action_cues: "2",
+      batch_send_groups: "1",
+    },
+    trogdor_schema: "not-a-backend-fact",
+  });
+
+  assert.deepEqual(payload, {
+    sessions: [{
+      session_id: "agent-1",
+      repo_key: "/tmp/repos/swimmers",
+      repo_label: "swimmers",
+      pressure: {
+        score: 42,
+        reason: "dirty check",
+        reason_kind: "dirty_check_missing",
+        glyph: "d",
+        tone: "warning",
+        needs_input: true,
+        launch_ready: true,
+        commit_ready: false,
+        action_cue_count: 2,
+      },
+      batch_send_session_ids: ["agent-1", "agent-2"],
+    }],
+    repos: [{
+      repo_key: "/tmp/repos/swimmers",
+      repo_label: "swimmers",
+      score: 42,
+      reason: "dirty check",
+      session_ids: ["agent-1", "7"],
+    }],
+    summary: {
+      max_score: 42,
+      action_cues: 2,
+      batch_send_groups: 1,
+    },
   });
 });
 
@@ -280,7 +350,21 @@ test("normalizeSurfaceModel preserves Trogdor view model fields and null current
       state: "busy",
       restLabel: "sleeping",
       actionCues: [{ kind: "commit_ready" }],
+      operatorPressure: {
+        score: "70",
+        reason: "commit ready",
+        reason_kind: "commit_ready",
+        glyph: "$",
+        tone: "danger",
+        commit_ready: true,
+      },
       batchSendSessionIds: ["agent-1", null],
+      clawgReadIndex: "2",
+      clawgWordCount: "4",
+      trogdorAwaitingUser: true,
+      trogdorBurnt: false,
+      trogdorDismissed: true,
+      trogdorSwordsmanVisible: false,
     }],
     currentSession: null,
     selectedSessionId: undefined,
@@ -291,7 +375,15 @@ test("normalizeSurfaceModel preserves Trogdor view model fields and null current
 
   assert.equal(model.sessions[0].sessionId, "agent-1");
   assert.equal(model.sessions[0].actionCues[0].kind, "commit_ready");
+  assert.equal(model.sessions[0].operatorPressure.score, 70);
+  assert.equal(model.sessions[0].operatorPressure.commit_ready, true);
   assert.deepEqual(model.sessions[0].batchSendSessionIds, ["agent-1"]);
+  assert.equal(model.sessions[0].clawgReadIndex, 2);
+  assert.equal(model.sessions[0].clawgWordCount, 4);
+  assert.equal(model.sessions[0].trogdorAwaitingUser, true);
+  assert.equal(model.sessions[0].trogdorBurnt, false);
+  assert.equal(model.sessions[0].trogdorDismissed, true);
+  assert.equal(model.sessions[0].trogdorSwordsmanVisible, false);
   assert.equal(model.currentSession, null);
   assert.equal(model.selectedSessionId, null);
   assert.equal(model.publishedSessionId, "agent-1");

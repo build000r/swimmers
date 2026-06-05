@@ -173,6 +173,57 @@ export function normalizePublishedSelectionResponse(value) {
   };
 }
 
+export function normalizeOperatorPressure(value) {
+  const pressure = objectRecord(value) || {};
+  return {
+    score: finiteNumber(pressure.score),
+    reason: stringValue(pressure.reason),
+    reason_kind: stringValue(pressure.reason_kind, "idle"),
+    glyph: stringValue(pressure.glyph, "a"),
+    tone: stringValue(pressure.tone, "quiet"),
+    needs_input: booleanValue(pressure.needs_input),
+    launch_ready: booleanValue(pressure.launch_ready),
+    commit_ready: booleanValue(pressure.commit_ready),
+    action_cue_count: finiteNumber(pressure.action_cue_count),
+  };
+}
+
+export function normalizeOperatorPressureSession(value) {
+  const session = objectRecord(value) || {};
+  return {
+    session_id: stringValue(session.session_id),
+    repo_key: stringValue(session.repo_key),
+    repo_label: stringValue(session.repo_label),
+    pressure: normalizeOperatorPressure(session.pressure),
+    batch_send_session_ids: stringArray(session.batch_send_session_ids),
+  };
+}
+
+function normalizeOperatorPressureRepo(value) {
+  const repo = objectRecord(value) || {};
+  return {
+    repo_key: stringValue(repo.repo_key),
+    repo_label: stringValue(repo.repo_label),
+    score: finiteNumber(repo.score),
+    reason: stringValue(repo.reason),
+    session_ids: stringArray(repo.session_ids),
+  };
+}
+
+export function normalizeOperatorPressureResponse(value) {
+  const payload = objectRecord(value) || {};
+  const summary = objectRecord(payload.summary) || {};
+  return {
+    sessions: objectArray(payload.sessions).map(normalizeOperatorPressureSession),
+    repos: objectArray(payload.repos).map(normalizeOperatorPressureRepo),
+    summary: {
+      max_score: finiteNumber(summary.max_score),
+      action_cues: finiteNumber(summary.action_cues),
+      batch_send_groups: finiteNumber(summary.batch_send_groups),
+    },
+  };
+}
+
 export function normalizeTerminalServerFrame(value) {
   const frame = objectRecord(value);
   if (!frame) {
@@ -706,11 +757,19 @@ export function normalizeTrogdorSurfaceSession(value) {
     attachedLabel: stringValue(session.attachedLabel),
     commitCandidate: booleanValue(session.commitCandidate),
     actionCues: objectArray(session.actionCues).map(normalizeActionCue),
-    operatorPressure: objectRecord(session.operatorPressure),
+    operatorPressure: objectRecord(session.operatorPressure)
+      ? normalizeOperatorPressure(session.operatorPressure)
+      : null,
     batchSendSessionIds: stringArray(session.batchSendSessionIds),
     repoKey: stringValue(session.repoKey),
     repoLabel: stringValue(session.repoLabel),
     isStale: booleanValue(session.isStale),
+    clawgReadIndex: finiteNumber(session.clawgReadIndex),
+    clawgWordCount: finiteNumber(session.clawgWordCount),
+    trogdorAwaitingUser: booleanValue(session.trogdorAwaitingUser),
+    trogdorBurnt: booleanValue(session.trogdorBurnt),
+    trogdorDismissed: booleanValue(session.trogdorDismissed),
+    trogdorSwordsmanVisible: booleanValue(session.trogdorSwordsmanVisible),
   };
 }
 

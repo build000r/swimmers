@@ -18,6 +18,70 @@ export type RepoActionState = "running" | "succeeded" | "failed" | string;
 export type NativeDesktopApp = "iterm" | "ghostty" | string;
 export type GhosttyOpenMode = "swap" | "add" | "window" | string;
 export type SpawnTool = "claude" | "codex" | "grok" | string;
+export type OperatorPressureReasonKind =
+  | "awaiting_user"
+  | "commit_ready"
+  | "validation_missing_after_edit"
+  | "dirty_check_missing"
+  | "needs_input"
+  | "error"
+  | "sleeping"
+  | "untrusted_state"
+  | "stale"
+  | "transport"
+  | "busy"
+  | "idle"
+  | string;
+export type OperatorPressureTone = "quiet" | "working" | "warning" | "danger" | string;
+export type TrogdorActionId =
+  | "trogdor_read_toggle"
+  | "trogdor_wpm_down"
+  | "trogdor_wpm_up"
+  | "trogdor_send"
+  | "trogdor_group_send"
+  | "trogdor_launch"
+  | "trogdor_mermaid"
+  | "trogdor_commit";
+
+export interface OperatorPressure {
+  score: number;
+  reason: string;
+  reason_kind: OperatorPressureReasonKind;
+  glyph: string;
+  tone: OperatorPressureTone;
+  needs_input: boolean;
+  launch_ready: boolean;
+  commit_ready: boolean;
+  action_cue_count: number;
+}
+
+export interface OperatorPressureSession {
+  session_id: string;
+  repo_key: string;
+  repo_label: string;
+  pressure: OperatorPressure;
+  batch_send_session_ids: string[];
+}
+
+export interface OperatorPressureRepo {
+  repo_key: string;
+  repo_label: string;
+  score: number;
+  reason: string;
+  session_ids: string[];
+}
+
+export interface OperatorPressureSummary {
+  max_score: number;
+  action_cues: number;
+  batch_send_groups: number;
+}
+
+export interface OperatorPressureResponse {
+  sessions: OperatorPressureSession[];
+  repos: OperatorPressureRepo[];
+  summary: OperatorPressureSummary;
+}
 
 export interface FrankenTermAssetFileInfo {
   route: string;
@@ -613,6 +677,28 @@ export interface WorkbenchWidgetsState {
   lastHtml: string;
 }
 
+export interface TrogdorReadProgress {
+  [clawgKey: string]: number;
+}
+
+export interface TrogdorDismissedClawgs {
+  [clawgKey: string]: boolean;
+}
+
+export interface TrogdorReaderContractState {
+  hoveredSessionId: Nullable<string>;
+  wpm: number;
+  reading: boolean;
+  readerClawgKey: string;
+  readerStartIndex: number;
+  readerStartedAt: number;
+  readerElapsedMs: number;
+  readProgress: TrogdorReadProgress;
+  dismissedClawgs: TrogdorDismissedClawgs;
+  burntSessionIds: string[];
+  awaitingSessionIds: string[];
+}
+
 export interface TrogdorSurfaceSession {
   sessionId: string;
   name: string;
@@ -637,13 +723,112 @@ export interface TrogdorSurfaceSession {
   attachedLabel: string;
   commitCandidate: boolean;
   actionCues: ActionCue[];
-  operatorPressure: Nullable<Record<string, unknown>>;
+  operatorPressure: Nullable<OperatorPressure>;
   batchSendSessionIds: string[];
   repoKey: string;
   repoLabel: string;
   isStale: boolean;
-  trogdorBurnt?: boolean;
-  trogdorDismissed?: boolean;
+  clawgReadIndex: number;
+  clawgWordCount: number;
+  trogdorAwaitingUser: boolean;
+  trogdorBurnt: boolean;
+  trogdorDismissed: boolean;
+  trogdorSwordsmanVisible: boolean;
+}
+
+export interface TrogdorRepoGroup {
+  key: string;
+  label: string;
+  sessions: TrogdorSurfaceSession[];
+  pressure: number;
+  reason: string;
+}
+
+export interface TrogdorSummary {
+  score: string;
+  level: number;
+  actionCues: number;
+}
+
+export interface TrogdorDragonPose {
+  x: number;
+  y: number;
+  direction: "left" | "right" | string;
+  bodyFrame: string;
+  walkX: string;
+  walkY: string;
+  heated: boolean;
+  firing: boolean;
+}
+
+export interface TrogdorReaderDisplayState {
+  bannerText: string;
+  readComplete: boolean;
+}
+
+export interface TrogdorDerivedPresentationState {
+  sessions: TrogdorSurfaceSession[];
+  groups: TrogdorRepoGroup[];
+  summary: TrogdorSummary;
+  dragonPose: TrogdorDragonPose;
+  reader: TrogdorReaderDisplayState;
+  readOnly: boolean;
+}
+
+export interface TrogdorIslandInput {
+  sessions: SessionSummary[];
+  operatorPressure: OperatorPressureResponse;
+  reader: TrogdorReaderContractState;
+  readOnly: boolean;
+  selectedSessionId: Nullable<string>;
+}
+
+export interface TrogdorSessionActionPayload {
+  type: "session";
+  sessionId: string;
+  label: string;
+}
+
+export interface TrogdorGroupActionPayload {
+  type: "group";
+  sessionIds: string[];
+  label: string;
+}
+
+export interface TrogdorLaunchActionPayload {
+  cwd: string;
+}
+
+export interface TrogdorSessionIdActionPayload {
+  sessionId: string;
+}
+
+export type TrogdorActionPayload =
+  | TrogdorSessionActionPayload
+  | TrogdorGroupActionPayload
+  | TrogdorLaunchActionPayload
+  | TrogdorSessionIdActionPayload
+  | null;
+
+export type TrogdorActionZone =
+  | { type: "trogdor_agent"; sessionId: string; disabled?: boolean; rect?: unknown }
+  | { type: "trogdor_reader"; sessionId?: string; disabled?: boolean; rect?: unknown }
+  | {
+      type: "action";
+      actionId: TrogdorActionId | string;
+      sessionId?: string;
+      sessionIds?: string[];
+      label?: string;
+      cwd?: string;
+      disabled?: boolean;
+      rect?: unknown;
+      payload?: TrogdorActionPayload;
+    };
+
+export interface TrogdorIslandOutput {
+  html: string;
+  signature: string;
+  actionZones: TrogdorActionZone[];
 }
 
 export interface SurfaceModel {
@@ -752,6 +937,9 @@ export function normalizePublishedSelectionResponse(value: unknown): PublishedSe
 export function normalizeTerminalServerFrame(value: unknown): TerminalServerFrame;
 export function normalizeControlEventFrame(value: unknown): ControlEventFrame;
 export function normalizeLifecycleEventFrame(value: unknown): LifecycleEventFrame;
+export function normalizeOperatorPressure(value: unknown): OperatorPressure;
+export function normalizeOperatorPressureSession(value: unknown): OperatorPressureSession;
+export function normalizeOperatorPressureResponse(value: unknown): OperatorPressureResponse;
 export function normalizeTerminalSnapshotResponse(value: unknown): TerminalSnapshotResponse;
 export function normalizeDirEntry(value: unknown): DirEntry;
 export function normalizeLaunchTargetSummary(value: unknown): LaunchTargetSummary;

@@ -1,5 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 
 import {
   buildTrogdorDomGroups,
@@ -89,6 +90,19 @@ function closestTarget(matches = {}) {
     },
   };
 }
+
+test("Trogdor web docs keep backend vocabulary and action contract explicit", () => {
+  const doc = readFileSync(new URL("../../docs/TROGDOR_WEB.md", import.meta.url), "utf8");
+
+  for (const term of ["SessionSummary", "RestState", "StateEvidence", "action_cues", "operator_pressure"]) {
+    assert.ok(doc.includes(term), `${term} should stay named as a source fact`);
+  }
+  for (const action of ["send", "batch", "launch", "mmd", "commit"]) {
+    assert.ok(doc.includes(`- \`${action}\``), `${action} hover action should stay documented`);
+  }
+  assert.match(doc, /Do not add separate Trogdor backend facts/);
+  assert.match(doc, /presentation only/);
+});
 
 test("Trogdor action cues, clawg keys, and raw rest detection are stable", () => {
   const raw = {
@@ -855,6 +869,21 @@ test("Trogdor pressure, reason, glyph, and tone prefer operator pressure when pr
   assert.equal(trogdorDomReason(pressured), "needs review");
   assert.equal(trogdorAgentGlyph(pressured), "?");
   assert.equal(trogdorAgentTone(pressured), "danger");
+
+  const dirtyCheck = session({
+    operatorPressure: {
+      score: 40,
+      reason: "dirty check",
+      reason_kind: "dirty_check_missing",
+      glyph: "d",
+      tone: "warning",
+    },
+    actionCues: [{ kind: "dirty_check_missing" }],
+    state: "idle",
+  });
+  assert.equal(trogdorDomReason(dirtyCheck), "dirty check");
+  assert.equal(trogdorAgentGlyph(dirtyCheck), "d");
+  assert.equal(trogdorAgentTone(dirtyCheck), "warning");
 
   const inferred = session({ actionCues: [{ kind: "commit_ready" }], state: "busy", commitCandidate: true });
   assert.equal(trogdorDomPressure(inferred), 82);
