@@ -74,13 +74,46 @@ export function commandPaletteScore(item, query) {
   return score;
 }
 
-export function filterCommandPaletteItems(items = [], query = "", limit = 18) {
-  const normalizedQuery = String(query || "").trim().toLowerCase();
-  return (Array.isArray(items) ? items : [])
+function commandPaletteRankCompare(a, b) {
+  return b.score - a.score || a.label.localeCompare(b.label);
+}
+
+function sortedCommandPaletteItems(source, normalizedQuery) {
+  return source
     .map((item) => ({ ...item, score: commandPaletteScore(item, normalizedQuery) }))
     .filter((item) => !normalizedQuery || item.score > 0)
-    .sort((a, b) => b.score - a.score || a.label.localeCompare(b.label))
-    .slice(0, limit);
+    .sort(commandPaletteRankCompare);
+}
+
+function insertBoundedCommandPaletteItem(ranked, item, limit) {
+  let index = ranked.length;
+  while (index > 0 && commandPaletteRankCompare(item, ranked[index - 1]) < 0) {
+    index -= 1;
+  }
+  if (index >= limit) {
+    return;
+  }
+  ranked.splice(index, 0, item);
+  if (ranked.length > limit) {
+    ranked.pop();
+  }
+}
+
+export function filterCommandPaletteItems(items = [], query = "", limit = 18) {
+  const normalizedQuery = String(query || "").trim().toLowerCase();
+  const source = Array.isArray(items) ? items : [];
+  if (!Number.isInteger(limit) || limit <= 0) {
+    return sortedCommandPaletteItems(source, normalizedQuery).slice(0, limit);
+  }
+  const ranked = [];
+  for (const item of source) {
+    const scoredItem = { ...item, score: commandPaletteScore(item, normalizedQuery) };
+    if (normalizedQuery && scoredItem.score <= 0) {
+      continue;
+    }
+    insertBoundedCommandPaletteItem(ranked, scoredItem, limit);
+  }
+  return ranked;
 }
 
 export function filteredCommandPaletteItemsForState({

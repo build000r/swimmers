@@ -78,6 +78,27 @@ test("command palette scoring and filtering preserve search ordering and limits"
   assert.equal(unqueried[1].label, "Beta");
 });
 
+test("command palette filtering matches full-sort ranking for bounded result sets", () => {
+  const items = Array.from({ length: 80 }, (_, index) => ({
+    label: index % 2 === 0 ? `Switch to Agent ${80 - index}` : `Open Agent ${index}`,
+    meta: index % 5 === 0 ? "agent running" : `agent workspace ${index % 7}`,
+    actionId: `action_${index}`,
+    disabled: index % 11 === 0,
+  }));
+  const oracle = (query, limit) => {
+    const normalizedQuery = String(query || "").trim().toLowerCase();
+    return items
+      .map((item) => ({ ...item, score: commandPaletteScore(item, normalizedQuery) }))
+      .filter((item) => !normalizedQuery || item.score > 0)
+      .sort((a, b) => b.score - a.score || a.label.localeCompare(b.label))
+      .slice(0, limit);
+  };
+
+  assert.deepEqual(filterCommandPaletteItems(items, "agent", 7), oracle("agent", 7));
+  assert.deepEqual(filterCommandPaletteItems(items, "", 5), oracle("", 5));
+  assert.deepEqual(filterCommandPaletteItems(items, "workspace 3", 9), oracle("workspace 3", 9));
+});
+
 test("command palette state helper combines built-in commands, sessions, and scores", () => {
   const items = filteredCommandPaletteItemsForState({
     selectedSession: session(),
