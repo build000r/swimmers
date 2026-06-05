@@ -324,6 +324,7 @@ const {
 const defaultDocumentTitle = document.title || "swimmers";
 let reactShell = null;
 let commandPaletteIsland = null;
+let searchSheetIsland = null;
 let terminalZoomInputController;
 let clearPendingTerminalBytes;
 let bufferTerminalBytes;
@@ -1935,9 +1936,29 @@ async function mountCommandPaletteReactIsland() {
   }
 }
 
+async function mountSearchSheetReactIsland() {
+  if (!reactRootShellEnabled()) {
+    return null;
+  }
+  if (!el.searchSheet) {
+    return null;
+  }
+  try {
+    const { mountSearchSheetIsland } = await import("./search_sheet_island.js");
+    return mountSearchSheetIsland({
+      searchSheet: el.searchSheet,
+      documentRef: document,
+    });
+  } catch (error) {
+    console.warn("[swimmers-web] search sheet React island mount skipped", error);
+    return null;
+  }
+}
+
 async function init() {
   reactShell = await mountReactRootShell();
   commandPaletteIsland = await mountCommandPaletteReactIsland();
+  searchSheetIsland = await mountSearchSheetReactIsland();
   loadInitialState();
   bindEvents();
   setUtilityStatus(defaultUtilityLabel(), true);
@@ -2033,8 +2054,10 @@ export const __swimmersWebTest = {
   reactRootShellEnabled,
   mountReactRootShell,
   mountCommandPaletteReactIsland,
+  mountSearchSheetReactIsland,
   reactShell: () => reactShell,
   commandPaletteIsland: () => commandPaletteIsland,
+  searchSheetIsland: () => searchSheetIsland,
 };
 
 if (!window.__SWIMMERS_DISABLE_AUTO_INIT__) {

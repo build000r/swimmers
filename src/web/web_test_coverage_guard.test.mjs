@@ -121,6 +121,13 @@ test("focused helper suites keep migration-critical behavior coverage topics", a
         "command palette island mounts, rerenders results, and guards stable nodes",
       ],
     ],
+    [
+      "src/web/search_sheet_island.test.mjs",
+      [
+        "search sheet island preserves sheet host and child DOM contract",
+        "search sheet island mounts, rerenders, and guards stable nodes",
+      ],
+    ],
   ]);
 
   for (const [relativePath, snippets] of requiredSnippetsByFile) {
@@ -182,4 +189,24 @@ test("Vite transforms the command palette React island path", async (t) => {
 
   assert.ok(transformed?.code, "Vite did not transform command_palette_island.js");
   assert.match(transformed.code, /CommandPaletteSheet/);
+});
+
+test("Vite transforms the search sheet React island path", async (t) => {
+  const appSource = await readRepoFile("src/web/app.js");
+  const source = await readRepoFile("src/web/search_sheet_island.js");
+  assert.match(appSource, /import\("\.\/search_sheet_island\.js"\)/);
+  assert.match(source, /from "react"/);
+  assert.match(source, /from "react-dom\/client"/);
+
+  const server = await createServer({
+    configFile: path.join(repoRoot, "vite.config.js"),
+    logLevel: "silent",
+    server: { middlewareMode: true },
+  });
+  t.after(() => server.close());
+
+  const transformed = await server.transformRequest("/src/web/search_sheet_island.js");
+
+  assert.ok(transformed?.code, "Vite did not transform search_sheet_island.js");
+  assert.match(transformed.code, /SearchSheet/);
 });

@@ -20,6 +20,7 @@
     "src/web/rendered_surface.test.mjs",
     "src/web/rendered_surface_draw.test.mjs",
     "src/web/react_shell.test.mjs",
+    "src/web/search_sheet_island.test.mjs",
     "src/web/send_controller.test.mjs",
     "src/web/send_sheet.test.mjs",
     "src/web/session_persistence.test.mjs",
