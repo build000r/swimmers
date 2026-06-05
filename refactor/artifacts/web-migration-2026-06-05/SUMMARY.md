@@ -77,6 +77,7 @@ Summary:
 
 ## Files
 
+- `AXUM_VITE_FRONTEND_CONTRACT.md`
 - `ISOMORPHISM_LEDGER.md`
 - `MODULE_GRAPH.md`
 - `SCAN_COMMANDS.md`
