@@ -10,6 +10,7 @@ import {
   TROGDOR_ATLAS_ISLAND_ID,
   createTrogdorAtlasIslandElement,
 } from "./trogdor_island.js";
+import { assertStableIdentity } from "./react_island_identity.js";
 
 export const SWIMMERS_REACT_ROOT_ID = "swimmers-react-root";
 
@@ -68,12 +69,10 @@ export function resolveStableShellContainers(documentRef = globalThis.document) 
 }
 
 export function assertStableShellContainerIdentity(previous, next) {
-  for (const key of Object.keys(SWIMMERS_STABLE_CONTAINER_IDS)) {
-    if (previous?.[key] !== next?.[key]) {
-      throw new Error(`Swimmers React shell replaced stable container ${key}`);
-    }
-  }
-  return next;
+  return assertStableIdentity(previous, next, {
+    keys: Object.keys(SWIMMERS_STABLE_CONTAINER_IDS),
+    label: "Swimmers React shell",
+  });
 }
 
 export function mountSwimmersRootShell(options = {}) {

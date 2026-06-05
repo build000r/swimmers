@@ -1,6 +1,9 @@
 import React from "react";
 import { hydrateRoot } from "react-dom/client";
 
+import { assertStableIdentity, elementFromRef } from "./react_island_identity.js";
+import { mountHydratedStaticIsland } from "./static_sheet_island.js";
+
 export const CREATE_SHEET_ISLAND_IDS = Object.freeze({
   createSheet: "create-sheet",
   createSheetTitle: "create-sheet-title",
@@ -94,10 +97,6 @@ export const CREATE_SHEET_TOOL_OPTIONS = Object.freeze([
 ]);
 
 const h = React.createElement;
-
-function elementFromRef(ref) {
-  return ref?.current ?? ref;
-}
 
 function searchIcon(createElement) {
   return createElement(
@@ -439,12 +438,7 @@ export function resolveCreateSheetIslandContainers({
 }
 
 export function assertStableCreateSheetIslandContainers(previous, next) {
-  for (const key of Object.keys(previous || {})) {
-    if (previous?.[key] !== next?.[key]) {
-      throw new Error(`Create sheet island replaced stable container ${key}`);
-    }
-  }
-  return next;
+  return assertStableIdentity(previous, next, { label: "Create sheet island" });
 }
 
 export function mountCreateSheetIsland({
@@ -453,22 +447,15 @@ export function mountCreateSheetIsland({
   hydrateRootImpl = hydrateRoot,
 } = {}) {
   const containers = resolveCreateSheetIslandContainers({ documentRef, createSheet });
-  const handle = {
+  return mountHydratedStaticIsland({
     containers,
-    reactRoot: null,
-    render() {
-      const previousContainers = handle.containers;
-      handle.reactRoot?.render?.(h(CreateSheet));
-      handle.containers = assertStableCreateSheetIslandContainers(
-        previousContainers,
-        resolveCreateSheetIslandContainers({ documentRef, createSheet: containers.createSheet }),
-      );
-      return handle;
-    },
-    unmount() {
-      handle.reactRoot?.unmount?.();
-    },
-  };
-  handle.reactRoot = hydrateRootImpl(containers.createSheet, h(CreateSheet));
-  return handle;
+    hydrateRootImpl,
+    root: containers.createSheet,
+    renderElement: () => h(CreateSheet),
+    refreshContainers: () => resolveCreateSheetIslandContainers({
+      documentRef,
+      createSheet: containers.createSheet,
+    }),
+    assertStableContainers: assertStableCreateSheetIslandContainers,
+  });
 }

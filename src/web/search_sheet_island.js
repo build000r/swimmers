@@ -1,6 +1,9 @@
 import React from "react";
 import { hydrateRoot } from "react-dom/client";
 
+import { assertStableIdentity, elementFromRef } from "./react_island_identity.js";
+import { mountHydratedStaticIsland } from "./static_sheet_island.js";
+
 export const SEARCH_SHEET_ISLAND_IDS = Object.freeze({
   searchSheet: "search-sheet",
   searchSheetTitle: "search-sheet-title",
@@ -33,10 +36,6 @@ export const SEARCH_SHEET_INPUT_PROPS = Object.freeze({
 });
 
 const h = React.createElement;
-
-function elementFromRef(ref) {
-  return ref?.current ?? ref;
-}
 
 function keyedProps(key, props = {}) {
   return { ...props, key };
@@ -149,12 +148,7 @@ export function resolveSearchSheetIslandContainers({
 }
 
 export function assertStableSearchSheetIslandContainers(previous, next) {
-  for (const key of Object.keys(previous || {})) {
-    if (previous?.[key] !== next?.[key]) {
-      throw new Error(`Search sheet island replaced stable container ${key}`);
-    }
-  }
-  return next;
+  return assertStableIdentity(previous, next, { label: "Search sheet island" });
 }
 
 export function mountSearchSheetIsland({
@@ -163,22 +157,15 @@ export function mountSearchSheetIsland({
   hydrateRootImpl = hydrateRoot,
 } = {}) {
   const containers = resolveSearchSheetIslandContainers({ documentRef, searchSheet });
-  const handle = {
+  return mountHydratedStaticIsland({
     containers,
-    reactRoot: null,
-    render() {
-      const previousContainers = handle.containers;
-      handle.reactRoot?.render?.(h(SearchSheet));
-      handle.containers = assertStableSearchSheetIslandContainers(
-        previousContainers,
-        resolveSearchSheetIslandContainers({ documentRef, searchSheet: containers.searchSheet }),
-      );
-      return handle;
-    },
-    unmount() {
-      handle.reactRoot?.unmount?.();
-    },
-  };
-  handle.reactRoot = hydrateRootImpl(containers.searchSheet, h(SearchSheet));
-  return handle;
+    hydrateRootImpl,
+    root: containers.searchSheet,
+    renderElement: () => h(SearchSheet),
+    refreshContainers: () => resolveSearchSheetIslandContainers({
+      documentRef,
+      searchSheet: containers.searchSheet,
+    }),
+    assertStableContainers: assertStableSearchSheetIslandContainers,
+  });
 }

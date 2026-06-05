@@ -1,6 +1,8 @@
 import React from "react";
 import { hydrateRoot } from "react-dom/client";
 
+import { assertStableIdentity, elementFromRef } from "./react_island_identity.js";
+
 export const COMMAND_PALETTE_ISLAND_IDS = Object.freeze({
   paletteSheet: "palette-sheet",
   paletteSheetTitle: "palette-sheet-title",
@@ -30,10 +32,6 @@ export const COMMAND_PALETTE_RESULTS_PROPS = Object.freeze({
 });
 
 const h = React.createElement;
-
-function elementFromRef(ref) {
-  return ref?.current ?? ref;
-}
 
 function keyedProps(key, props = {}) {
   return { ...props, key };
@@ -157,12 +155,7 @@ export function resolveCommandPaletteIslandContainers({
 }
 
 export function assertStableCommandPaletteIslandContainers(previous, next) {
-  for (const key of Object.keys(previous || {})) {
-    if (previous?.[key] !== next?.[key]) {
-      throw new Error(`Command palette island replaced stable container ${key}`);
-    }
-  }
-  return next;
+  return assertStableIdentity(previous, next, { label: "Command palette island" });
 }
 
 export function mountCommandPaletteIsland({

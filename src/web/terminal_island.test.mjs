@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
+import { fakeElement } from "./island_test_helpers.mjs";
 import {
   TERMINAL_SURFACE_ISLAND_IDS,
   TERMINAL_SURFACE_ISLAND_KEYS,
@@ -11,10 +12,6 @@ import {
   resolveTerminalSurfaceIslandRefs,
   terminalSurfaceIslandCleanupPlan,
 } from "./terminal_island.js";
-
-function element(id) {
-  return { id };
-}
 
 function childIds(children) {
   return children.map((child) => child?.props?.id).filter(Boolean);
@@ -96,8 +93,8 @@ test("terminal island host elements preserve stable DOM ids and classes", () => 
 });
 
 test("terminal island creates one adapter from stable refs across rerenders", () => {
-  const terminalCanvas = element("terminal-canvas");
-  const hudCanvas = element("hud-canvas");
+  const terminalCanvas = fakeElement("terminal-canvas");
+  const hudCanvas = fakeElement("hud-canvas");
   const adapterCalls = [];
   const adapter = {
     setupHudSurface() {
@@ -139,7 +136,7 @@ test("terminal island creates one adapter from stable refs across rerenders", ()
 
   assert.equal(factoryCalls.length, 1);
   assert.throws(
-    () => island.rerender({ refs: { terminalCanvas: element("new-terminal"), hudCanvas } }),
+    () => island.rerender({ refs: { terminalCanvas: fakeElement("new-terminal"), hudCanvas } }),
     /replaced stable ref terminalCanvas/,
   );
   assert.throws(
@@ -152,8 +149,8 @@ test("terminal island lifecycle delegates setup and cleanup to adapter in order"
   const calls = [];
   const island = createTerminalSurfaceIsland({
     refs: {
-      terminalCanvas: element("terminal-canvas"),
-      hudCanvas: element("hud-canvas"),
+      terminalCanvas: fakeElement("terminal-canvas"),
+      hudCanvas: fakeElement("hud-canvas"),
     },
     createRuntimeAdapter() {
       return {

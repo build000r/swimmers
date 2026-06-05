@@ -2,6 +2,12 @@ import test from "node:test";
 import assert from "node:assert/strict";
 
 import {
+  buttonIdsFor,
+  createElement,
+  fakeDocumentForIds,
+  keysFor,
+} from "./island_test_helpers.mjs";
+import {
   SEND_SHEET_HISTORY_PROPS,
   SEND_SHEET_INPUT_PROPS,
   SEND_SHEET_ISLAND_HOST_PROPS,
@@ -15,39 +21,8 @@ import {
   resolveSendSheetIslandContainers,
 } from "./send_sheet_island.js";
 
-function fakeElement(id) {
-  return { id };
-}
-
-function createElement(type, props, ...children) {
-  return {
-    type,
-    props: { ...(props || {}), children },
-  };
-}
-
 function fakeDocument() {
-  const elements = new Map(Object.values(SEND_SHEET_ISLAND_IDS).map((id) => [id, fakeElement(id)]));
-  return {
-    documentRef: {
-      getElementById(id) {
-        return elements.get(id) ?? null;
-      },
-    },
-    replace(id) {
-      const replacement = { id, replaced: true };
-      elements.set(id, replacement);
-      return replacement;
-    },
-  };
-}
-
-function keysFor(children) {
-  return children.map((child) => child?.props?.key).filter(Boolean);
-}
-
-function buttonIdsFor(children) {
-  return children.map((child) => child?.props?.id).filter(Boolean);
+  return fakeDocumentForIds(SEND_SHEET_ISLAND_IDS);
 }
 
 test("send sheet island preserves sheet host and child DOM contract", () => {

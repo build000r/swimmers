@@ -1,4 +1,5 @@
 import { createFrankenTermRuntimeAdapter } from "./terminal_surface_controller.js";
+import { assertStableIdentity, elementFromRef } from "./react_island_identity.js";
 
 export const TERMINAL_SURFACE_ISLAND_IDS = Object.freeze({
   terminalCanvas: "terminal-canvas",
@@ -73,10 +74,6 @@ export const TERMINAL_SURFACE_ISLAND_KEYS = Object.freeze({
   loadingOverlay: TERMINAL_SURFACE_ISLAND_IDS.loadingOverlay,
 });
 
-function elementFromRef(ref) {
-  return ref?.current ?? ref;
-}
-
 function keyedProps(key, props) {
   return { ...props, key };
 }
@@ -95,12 +92,10 @@ export function resolveTerminalSurfaceIslandRefs(refs = {}) {
 
 export function assertStableTerminalSurfaceIslandRefs(previous, next) {
   const resolvedNext = resolveTerminalSurfaceIslandRefs(next);
-  for (const key of Object.keys(previous)) {
-    if (previous[key] !== resolvedNext[key]) {
-      throw new Error(`Terminal surface island replaced stable ref ${key}`);
-    }
-  }
-  return resolvedNext;
+  return assertStableIdentity(previous, resolvedNext, {
+    label: "Terminal surface island",
+    noun: "ref",
+  });
 }
 
 export function terminalSurfaceIslandCleanupPlan({

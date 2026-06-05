@@ -2,6 +2,12 @@ import test from "node:test";
 import assert from "node:assert/strict";
 
 import {
+  createElement,
+  fakeDocumentForIds,
+  idsFor,
+  keysFor,
+} from "./island_test_helpers.mjs";
+import {
   CREATE_SHEET_CWD_INPUT_PROPS,
   CREATE_SHEET_DEFAULT_COPY,
   CREATE_SHEET_DIR_LIST_PROPS,
@@ -20,39 +26,8 @@ import {
   resolveCreateSheetIslandContainers,
 } from "./create_sheet_island.js";
 
-function fakeElement(id) {
-  return { id };
-}
-
-function createElement(type, props, ...children) {
-  return {
-    type,
-    props: { ...(props || {}), children },
-  };
-}
-
 function fakeDocument() {
-  const elements = new Map(Object.values(CREATE_SHEET_ISLAND_IDS).map((id) => [id, fakeElement(id)]));
-  return {
-    documentRef: {
-      getElementById(id) {
-        return elements.get(id) ?? null;
-      },
-    },
-    replace(id) {
-      const replacement = { id, replaced: true };
-      elements.set(id, replacement);
-      return replacement;
-    },
-  };
-}
-
-function keysFor(children) {
-  return children.map((child) => child?.props?.key).filter(Boolean);
-}
-
-function idsFor(children) {
-  return children.map((child) => child?.props?.id).filter(Boolean);
+  return fakeDocumentForIds(CREATE_SHEET_ISLAND_IDS);
 }
 
 function textFor(node) {

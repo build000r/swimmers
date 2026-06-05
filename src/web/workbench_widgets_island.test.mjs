@@ -1,6 +1,10 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
+import {
+  createElement,
+  fakeDocumentForIds,
+} from "./island_test_helpers.mjs";
 import { buildWorkbenchWidgetsViewModel } from "./workbench_render.js";
 import {
   WORKBENCH_WIDGETS_ISLAND_IDS,
@@ -11,34 +15,8 @@ import {
   resolveWorkbenchWidgetsIslandContainers,
 } from "./workbench_widgets_island.js";
 
-function fakeElement(id) {
-  return { id };
-}
-
-function createElement(type, props, ...children) {
-  return {
-    type,
-    props: { ...(props || {}), children },
-  };
-}
-
 function fakeDocument() {
-  const elements = new Map(Object.values(WORKBENCH_WIDGETS_ISLAND_IDS).map((id) => [id, fakeElement(id)]));
-  return {
-    documentRef: {
-      getElementById(id) {
-        return elements.get(id) ?? null;
-      },
-    },
-    remove(id) {
-      elements.delete(id);
-    },
-    replace(id) {
-      const replacement = { id, replaced: true };
-      elements.set(id, replacement);
-      return replacement;
-    },
-  };
+  return fakeDocumentForIds(WORKBENCH_WIDGETS_ISLAND_IDS);
 }
 
 function titlesFor(nodes) {

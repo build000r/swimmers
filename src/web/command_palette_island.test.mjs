@@ -2,6 +2,12 @@ import test from "node:test";
 import assert from "node:assert/strict";
 
 import {
+  createElement,
+  fakeDocumentForIds,
+  idsFor,
+  keysFor,
+} from "./island_test_helpers.mjs";
+import {
   COMMAND_PALETTE_ISLAND_HOST_PROPS,
   COMMAND_PALETTE_ISLAND_IDS,
   COMMAND_PALETTE_ISLAND_KEYS,
@@ -15,44 +21,8 @@ import {
   resolveCommandPaletteIslandContainers,
 } from "./command_palette_island.js";
 
-function fakeElement(id) {
-  return { id };
-}
-
-function createElement(type, props, ...children) {
-  return {
-    type,
-    props: { ...(props || {}), children },
-  };
-}
-
 function fakeDocument() {
-  const elements = new Map([
-    [COMMAND_PALETTE_ISLAND_IDS.paletteSheet, fakeElement(COMMAND_PALETTE_ISLAND_IDS.paletteSheet)],
-    [COMMAND_PALETTE_ISLAND_IDS.paletteSearch, fakeElement(COMMAND_PALETTE_ISLAND_IDS.paletteSearch)],
-    [COMMAND_PALETTE_ISLAND_IDS.paletteResults, fakeElement(COMMAND_PALETTE_ISLAND_IDS.paletteResults)],
-    [COMMAND_PALETTE_ISLAND_IDS.paletteCloseButton, fakeElement(COMMAND_PALETTE_ISLAND_IDS.paletteCloseButton)],
-  ]);
-  return {
-    documentRef: {
-      getElementById(id) {
-        return elements.get(id) ?? null;
-      },
-    },
-    replace(id) {
-      const replacement = { id, replaced: true };
-      elements.set(id, replacement);
-      return replacement;
-    },
-  };
-}
-
-function idsFor(children) {
-  return children.map((child) => child?.props?.id).filter(Boolean);
-}
-
-function keysFor(children) {
-  return children.map((child) => child?.props?.key).filter(Boolean);
+  return fakeDocumentForIds(COMMAND_PALETTE_ISLAND_IDS);
 }
 
 test("command palette island preserves sheet host and child DOM contract", () => {

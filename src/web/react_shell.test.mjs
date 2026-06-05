@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
+import { fakeDocumentForIds } from "./island_test_helpers.mjs";
 import {
   SWIMMERS_REACT_ROOT_ID,
   SWIMMERS_STABLE_CONTAINER_IDS,
@@ -10,30 +11,11 @@ import {
   resolveStableShellContainers,
 } from "./react_shell.js";
 
-function fakeElement(id) {
-  return { id };
-}
-
 function fakeDocument() {
-  const elements = new Map();
-  for (const id of [
-    SWIMMERS_REACT_ROOT_ID,
-    ...Object.values(SWIMMERS_STABLE_CONTAINER_IDS),
-  ]) {
-    elements.set(id, fakeElement(id));
-  }
-  return {
-    documentRef: {
-      getElementById(id) {
-        return elements.get(id) ?? null;
-      },
-    },
-    replace(id) {
-      const replacement = { id, replaced: true };
-      elements.set(id, replacement);
-      return replacement;
-    },
-  };
+  return fakeDocumentForIds({
+    root: SWIMMERS_REACT_ROOT_ID,
+    ...SWIMMERS_STABLE_CONTAINER_IDS,
+  });
 }
 
 test("React shell mount normalizes boot payload and preserves unmount semantics", () => {

@@ -1,6 +1,9 @@
 import React from "react";
 import { hydrateRoot } from "react-dom/client";
 
+import { assertStableIdentity, elementFromRef } from "./react_island_identity.js";
+import { mountHydratedStaticIsland } from "./static_sheet_island.js";
+
 export const SEND_SHEET_ISLAND_IDS = Object.freeze({
   sendSheet: "send-sheet",
   sendSheetTitle: "send-sheet-title",
@@ -42,10 +45,6 @@ export const SEND_SHEET_HISTORY_PROPS = Object.freeze({
 });
 
 const h = React.createElement;
-
-function elementFromRef(ref) {
-  return ref?.current ?? ref;
-}
 
 function keyedProps(key, props = {}) {
   return { ...props, key };
@@ -163,12 +162,7 @@ export function resolveSendSheetIslandContainers({
 }
 
 export function assertStableSendSheetIslandContainers(previous, next) {
-  for (const key of Object.keys(previous || {})) {
-    if (previous?.[key] !== next?.[key]) {
-      throw new Error(`Send sheet island replaced stable container ${key}`);
-    }
-  }
-  return next;
+  return assertStableIdentity(previous, next, { label: "Send sheet island" });
 }
 
 export function mountSendSheetIsland({
@@ -177,22 +171,15 @@ export function mountSendSheetIsland({
   hydrateRootImpl = hydrateRoot,
 } = {}) {
   const containers = resolveSendSheetIslandContainers({ documentRef, sendSheet });
-  const handle = {
+  return mountHydratedStaticIsland({
     containers,
-    reactRoot: null,
-    render() {
-      const previousContainers = handle.containers;
-      handle.reactRoot?.render?.(h(SendSheet));
-      handle.containers = assertStableSendSheetIslandContainers(
-        previousContainers,
-        resolveSendSheetIslandContainers({ documentRef, sendSheet: containers.sendSheet }),
-      );
-      return handle;
-    },
-    unmount() {
-      handle.reactRoot?.unmount?.();
-    },
-  };
-  handle.reactRoot = hydrateRootImpl(containers.sendSheet, h(SendSheet));
-  return handle;
+    hydrateRootImpl,
+    root: containers.sendSheet,
+    renderElement: () => h(SendSheet),
+    refreshContainers: () => resolveSendSheetIslandContainers({
+      documentRef,
+      sendSheet: containers.sendSheet,
+    }),
+    assertStableContainers: assertStableSendSheetIslandContainers,
+  });
 }

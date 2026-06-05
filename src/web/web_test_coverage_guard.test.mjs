@@ -241,13 +241,88 @@ test("Vite transforms the React shell path that owns React imports", async (t) =
   assert.match(transformed.code, /react-dom/);
 });
 
-test("Vite transforms the auth sheet React island path", async (t) => {
+const reactIslandTransformGuards = Object.freeze([
+  Object.freeze({
+    title: "auth sheet React island path",
+    sourcePath: "src/web/auth_sheet_island.js",
+    importPattern: /import\("\.\/auth_sheet_island\.js"\)/,
+    marker: /AuthSheet/,
+  }),
+  Object.freeze({
+    title: "command palette React island path",
+    sourcePath: "src/web/command_palette_island.js",
+    importPattern: /import\("\.\/command_palette_island\.js"\)/,
+    marker: /CommandPaletteSheet/,
+  }),
+  Object.freeze({
+    title: "search sheet React island path",
+    sourcePath: "src/web/search_sheet_island.js",
+    importPattern: /import\("\.\/search_sheet_island\.js"\)/,
+    marker: /SearchSheet/,
+  }),
+  Object.freeze({
+    title: "send sheet React island path",
+    sourcePath: "src/web/send_sheet_island.js",
+    importPattern: /import\("\.\/send_sheet_island\.js"\)/,
+    marker: /SendSheet/,
+  }),
+  Object.freeze({
+    title: "thought config sheet React island path",
+    sourcePath: "src/web/thought_config_sheet_island.js",
+    importPattern: /import\("\.\/thought_config_sheet_island\.js"\)/,
+    marker: /ThoughtConfigSheet/,
+  }),
+  Object.freeze({
+    title: "native desktop sheet React island path",
+    sourcePath: "src/web/native_desktop_sheet_island.js",
+    importPattern: /import\("\.\/native_desktop_sheet_island\.js"\)/,
+    marker: /NativeDesktopSheet/,
+  }),
+  Object.freeze({
+    title: "Mermaid sheet React island path",
+    sourcePath: "src/web/mermaid_sheet_island.js",
+    importPattern: /import\("\.\/mermaid_sheet_island\.js"\)/,
+    marker: /MermaidSheet/,
+  }),
+  Object.freeze({
+    title: "create sheet React island path",
+    sourcePath: "src/web/create_sheet_island.js",
+    importPattern: /import\("\.\/create_sheet_island\.js"\)/,
+    marker: /CreateSheet/,
+  }),
+  Object.freeze({
+    title: "directory browser React view island path",
+    sourcePath: "src/web/dir_browser_view_island.js",
+    importPattern: /import\("\.\/dir_browser_view_island\.js"\)/,
+    marker: /DirBrowserList/,
+    importsReactDom: true,
+  }),
+  Object.freeze({
+    title: "workbench widgets React island path",
+    sourcePath: "src/web/workbench_widgets_island.js",
+    importPattern: /import\("\.\/workbench_widgets_island\.js"\)/,
+    marker: /WorkbenchWidgets/,
+    importsReactDom: true,
+  }),
+]);
+
+async function assertViteTransformsReactIsland(server, guard) {
   const appSource = await readRepoFile("src/web/app.js");
-  const source = await readRepoFile("src/web/auth_sheet_island.js");
-  assert.match(appSource, /import\("\.\/auth_sheet_island\.js"\)/);
+  const source = await readRepoFile(guard.sourcePath);
+  assert.match(appSource, guard.importPattern);
   assert.match(source, /from "react"/);
+  if (guard.importsReactDom) {
+    assert.match(source, /from "react-dom"/);
+  }
   assert.match(source, /from "react-dom\/client"/);
 
+  const transformed = await server.transformRequest(`/${guard.sourcePath}`);
+
+  assert.ok(transformed?.code, `Vite did not transform ${path.basename(guard.sourcePath)}`);
+  assert.match(transformed.code, guard.marker);
+}
+
+test("Vite transforms React island paths", async (t) => {
   const server = await createServer({
     configFile: path.join(repoRoot, "vite.config.js"),
     logLevel: "silent",
@@ -255,190 +330,7 @@ test("Vite transforms the auth sheet React island path", async (t) => {
   });
   t.after(() => server.close());
 
-  const transformed = await server.transformRequest("/src/web/auth_sheet_island.js");
-
-  assert.ok(transformed?.code, "Vite did not transform auth_sheet_island.js");
-  assert.match(transformed.code, /AuthSheet/);
-});
-
-test("Vite transforms the command palette React island path", async (t) => {
-  const appSource = await readRepoFile("src/web/app.js");
-  const source = await readRepoFile("src/web/command_palette_island.js");
-  assert.match(appSource, /import\("\.\/command_palette_island\.js"\)/);
-  assert.match(source, /from "react"/);
-  assert.match(source, /from "react-dom\/client"/);
-
-  const server = await createServer({
-    configFile: path.join(repoRoot, "vite.config.js"),
-    logLevel: "silent",
-    server: { middlewareMode: true },
-  });
-  t.after(() => server.close());
-
-  const transformed = await server.transformRequest("/src/web/command_palette_island.js");
-
-  assert.ok(transformed?.code, "Vite did not transform command_palette_island.js");
-  assert.match(transformed.code, /CommandPaletteSheet/);
-});
-
-test("Vite transforms the search sheet React island path", async (t) => {
-  const appSource = await readRepoFile("src/web/app.js");
-  const source = await readRepoFile("src/web/search_sheet_island.js");
-  assert.match(appSource, /import\("\.\/search_sheet_island\.js"\)/);
-  assert.match(source, /from "react"/);
-  assert.match(source, /from "react-dom\/client"/);
-
-  const server = await createServer({
-    configFile: path.join(repoRoot, "vite.config.js"),
-    logLevel: "silent",
-    server: { middlewareMode: true },
-  });
-  t.after(() => server.close());
-
-  const transformed = await server.transformRequest("/src/web/search_sheet_island.js");
-
-  assert.ok(transformed?.code, "Vite did not transform search_sheet_island.js");
-  assert.match(transformed.code, /SearchSheet/);
-});
-
-test("Vite transforms the send sheet React island path", async (t) => {
-  const appSource = await readRepoFile("src/web/app.js");
-  const source = await readRepoFile("src/web/send_sheet_island.js");
-  assert.match(appSource, /import\("\.\/send_sheet_island\.js"\)/);
-  assert.match(source, /from "react"/);
-  assert.match(source, /from "react-dom\/client"/);
-
-  const server = await createServer({
-    configFile: path.join(repoRoot, "vite.config.js"),
-    logLevel: "silent",
-    server: { middlewareMode: true },
-  });
-  t.after(() => server.close());
-
-  const transformed = await server.transformRequest("/src/web/send_sheet_island.js");
-
-  assert.ok(transformed?.code, "Vite did not transform send_sheet_island.js");
-  assert.match(transformed.code, /SendSheet/);
-});
-
-test("Vite transforms the thought config sheet React island path", async (t) => {
-  const appSource = await readRepoFile("src/web/app.js");
-  const source = await readRepoFile("src/web/thought_config_sheet_island.js");
-  assert.match(appSource, /import\("\.\/thought_config_sheet_island\.js"\)/);
-  assert.match(source, /from "react"/);
-  assert.match(source, /from "react-dom\/client"/);
-
-  const server = await createServer({
-    configFile: path.join(repoRoot, "vite.config.js"),
-    logLevel: "silent",
-    server: { middlewareMode: true },
-  });
-  t.after(() => server.close());
-
-  const transformed = await server.transformRequest("/src/web/thought_config_sheet_island.js");
-
-  assert.ok(transformed?.code, "Vite did not transform thought_config_sheet_island.js");
-  assert.match(transformed.code, /ThoughtConfigSheet/);
-});
-
-test("Vite transforms the native desktop sheet React island path", async (t) => {
-  const appSource = await readRepoFile("src/web/app.js");
-  const source = await readRepoFile("src/web/native_desktop_sheet_island.js");
-  assert.match(appSource, /import\("\.\/native_desktop_sheet_island\.js"\)/);
-  assert.match(source, /from "react"/);
-  assert.match(source, /from "react-dom\/client"/);
-
-  const server = await createServer({
-    configFile: path.join(repoRoot, "vite.config.js"),
-    logLevel: "silent",
-    server: { middlewareMode: true },
-  });
-  t.after(() => server.close());
-
-  const transformed = await server.transformRequest("/src/web/native_desktop_sheet_island.js");
-
-  assert.ok(transformed?.code, "Vite did not transform native_desktop_sheet_island.js");
-  assert.match(transformed.code, /NativeDesktopSheet/);
-});
-
-test("Vite transforms the Mermaid sheet React island path", async (t) => {
-  const appSource = await readRepoFile("src/web/app.js");
-  const source = await readRepoFile("src/web/mermaid_sheet_island.js");
-  assert.match(appSource, /import\("\.\/mermaid_sheet_island\.js"\)/);
-  assert.match(source, /from "react"/);
-  assert.match(source, /from "react-dom\/client"/);
-
-  const server = await createServer({
-    configFile: path.join(repoRoot, "vite.config.js"),
-    logLevel: "silent",
-    server: { middlewareMode: true },
-  });
-  t.after(() => server.close());
-
-  const transformed = await server.transformRequest("/src/web/mermaid_sheet_island.js");
-
-  assert.ok(transformed?.code, "Vite did not transform mermaid_sheet_island.js");
-  assert.match(transformed.code, /MermaidSheet/);
-});
-
-test("Vite transforms the create sheet React island path", async (t) => {
-  const appSource = await readRepoFile("src/web/app.js");
-  const source = await readRepoFile("src/web/create_sheet_island.js");
-  assert.match(appSource, /import\("\.\/create_sheet_island\.js"\)/);
-  assert.match(source, /from "react"/);
-  assert.match(source, /from "react-dom\/client"/);
-
-  const server = await createServer({
-    configFile: path.join(repoRoot, "vite.config.js"),
-    logLevel: "silent",
-    server: { middlewareMode: true },
-  });
-  t.after(() => server.close());
-
-  const transformed = await server.transformRequest("/src/web/create_sheet_island.js");
-
-  assert.ok(transformed?.code, "Vite did not transform create_sheet_island.js");
-  assert.match(transformed.code, /CreateSheet/);
-});
-
-test("Vite transforms the directory browser React view island path", async (t) => {
-  const appSource = await readRepoFile("src/web/app.js");
-  const source = await readRepoFile("src/web/dir_browser_view_island.js");
-  assert.match(appSource, /import\("\.\/dir_browser_view_island\.js"\)/);
-  assert.match(source, /from "react"/);
-  assert.match(source, /from "react-dom"/);
-  assert.match(source, /from "react-dom\/client"/);
-
-  const server = await createServer({
-    configFile: path.join(repoRoot, "vite.config.js"),
-    logLevel: "silent",
-    server: { middlewareMode: true },
-  });
-  t.after(() => server.close());
-
-  const transformed = await server.transformRequest("/src/web/dir_browser_view_island.js");
-
-  assert.ok(transformed?.code, "Vite did not transform dir_browser_view_island.js");
-  assert.match(transformed.code, /DirBrowserList/);
-});
-
-test("Vite transforms the workbench widgets React island path", async (t) => {
-  const appSource = await readRepoFile("src/web/app.js");
-  const source = await readRepoFile("src/web/workbench_widgets_island.js");
-  assert.match(appSource, /import\("\.\/workbench_widgets_island\.js"\)/);
-  assert.match(source, /from "react"/);
-  assert.match(source, /from "react-dom"/);
-  assert.match(source, /from "react-dom\/client"/);
-
-  const server = await createServer({
-    configFile: path.join(repoRoot, "vite.config.js"),
-    logLevel: "silent",
-    server: { middlewareMode: true },
-  });
-  t.after(() => server.close());
-
-  const transformed = await server.transformRequest("/src/web/workbench_widgets_island.js");
-
-  assert.ok(transformed?.code, "Vite did not transform workbench_widgets_island.js");
-  assert.match(transformed.code, /WorkbenchWidgets/);
+  for (const guard of reactIslandTransformGuards) {
+    await assertViteTransformsReactIsland(server, guard);
+  }
 });

@@ -1935,137 +1935,117 @@ async function mountReactRootShell() {
   }
 }
 
-async function mountCommandPaletteReactIsland() {
+async function mountOptionalReactIsland({ host, label, load }) {
   if (!reactRootShellEnabled()) {
     return null;
   }
-  if (!el.paletteSheet) {
+  if (!host) {
     return null;
   }
   try {
-    const { mountCommandPaletteIsland } = await import("./command_palette_island.js");
-    return mountCommandPaletteIsland({
-      paletteSheet: el.paletteSheet,
-      documentRef: document,
-    });
+    return await load();
   } catch (error) {
-    console.warn("[swimmers-web] command palette React island mount skipped", error);
+    console.warn(`[swimmers-web] ${label} React island mount skipped`, error);
     return null;
   }
+}
+
+async function mountCommandPaletteReactIsland() {
+  return mountOptionalReactIsland({
+    host: el.paletteSheet,
+    label: "command palette",
+    load: async () => {
+      const { mountCommandPaletteIsland } = await import("./command_palette_island.js");
+      return mountCommandPaletteIsland({
+        paletteSheet: el.paletteSheet,
+        documentRef: document,
+      });
+    },
+  });
 }
 
 async function mountSearchSheetReactIsland() {
-  if (!reactRootShellEnabled()) {
-    return null;
-  }
-  if (!el.searchSheet) {
-    return null;
-  }
-  try {
-    const { mountSearchSheetIsland } = await import("./search_sheet_island.js");
-    return mountSearchSheetIsland({
-      searchSheet: el.searchSheet,
-      documentRef: document,
-    });
-  } catch (error) {
-    console.warn("[swimmers-web] search sheet React island mount skipped", error);
-    return null;
-  }
+  return mountOptionalReactIsland({
+    host: el.searchSheet,
+    label: "search sheet",
+    load: async () => {
+      const { mountSearchSheetIsland } = await import("./search_sheet_island.js");
+      return mountSearchSheetIsland({
+        searchSheet: el.searchSheet,
+        documentRef: document,
+      });
+    },
+  });
 }
 
 async function mountSendSheetReactIsland() {
-  if (!reactRootShellEnabled()) {
-    return null;
-  }
-  if (!el.sendSheet) {
-    return null;
-  }
-  try {
-    const { mountSendSheetIsland } = await import("./send_sheet_island.js");
-    return mountSendSheetIsland({
-      sendSheet: el.sendSheet,
-      documentRef: document,
-    });
-  } catch (error) {
-    console.warn("[swimmers-web] send sheet React island mount skipped", error);
-    return null;
-  }
+  return mountOptionalReactIsland({
+    host: el.sendSheet,
+    label: "send sheet",
+    load: async () => {
+      const { mountSendSheetIsland } = await import("./send_sheet_island.js");
+      return mountSendSheetIsland({
+        sendSheet: el.sendSheet,
+        documentRef: document,
+      });
+    },
+  });
 }
 
 async function mountAuthSheetReactIsland() {
-  if (!reactRootShellEnabled()) {
-    return null;
-  }
-  if (!el.authSheet) {
-    return null;
-  }
-  try {
-    const { mountAuthSheetIsland } = await import("./auth_sheet_island.js");
-    return mountAuthSheetIsland({
-      authSheet: el.authSheet,
-      documentRef: document,
-    });
-  } catch (error) {
-    console.warn("[swimmers-web] auth sheet React island mount skipped", error);
-    return null;
-  }
+  return mountOptionalReactIsland({
+    host: el.authSheet,
+    label: "auth sheet",
+    load: async () => {
+      const { mountAuthSheetIsland } = await import("./auth_sheet_island.js");
+      return mountAuthSheetIsland({
+        authSheet: el.authSheet,
+        documentRef: document,
+      });
+    },
+  });
 }
 
 async function mountThoughtConfigSheetReactIsland() {
-  if (!reactRootShellEnabled()) {
-    return null;
-  }
-  if (!el.thoughtConfigSheet) {
-    return null;
-  }
-  try {
-    const { mountThoughtConfigSheetIsland } = await import("./thought_config_sheet_island.js");
-    return mountThoughtConfigSheetIsland({
-      thoughtConfigSheet: el.thoughtConfigSheet,
-      documentRef: document,
-    });
-  } catch (error) {
-    console.warn("[swimmers-web] thought config sheet React island mount skipped", error);
-    return null;
-  }
+  return mountOptionalReactIsland({
+    host: el.thoughtConfigSheet,
+    label: "thought config sheet",
+    load: async () => {
+      const { mountThoughtConfigSheetIsland } = await import("./thought_config_sheet_island.js");
+      return mountThoughtConfigSheetIsland({
+        thoughtConfigSheet: el.thoughtConfigSheet,
+        documentRef: document,
+      });
+    },
+  });
 }
 
 async function mountNativeDesktopSheetReactIsland() {
-  if (!reactRootShellEnabled()) {
-    return null;
-  }
-  if (!el.nativeSheet) {
-    return null;
-  }
-  try {
-    const { mountNativeDesktopSheetIsland } = await import("./native_desktop_sheet_island.js");
-    return mountNativeDesktopSheetIsland({
-      nativeSheet: el.nativeSheet,
-      documentRef: document,
-    });
-  } catch (error) {
-    console.warn("[swimmers-web] native desktop sheet React island mount skipped", error);
-    return null;
-  }
+  return mountOptionalReactIsland({
+    host: el.nativeSheet,
+    label: "native desktop sheet",
+    load: async () => {
+      const { mountNativeDesktopSheetIsland } = await import("./native_desktop_sheet_island.js");
+      return mountNativeDesktopSheetIsland({
+        nativeSheet: el.nativeSheet,
+        documentRef: document,
+      });
+    },
+  });
 }
 
 async function mountCreateSheetReactIsland() {
-  if (!reactRootShellEnabled()) {
-    return null;
-  }
-  if (!el.createSheet) {
-    return null;
-  }
-  try {
-    const { mountCreateSheetIsland } = await import("./create_sheet_island.js");
-    return mountCreateSheetIsland({
-      createSheet: el.createSheet,
-      documentRef: document,
-    });
-  } catch (error) {
-    console.warn("[swimmers-web] create sheet React island mount skipped", error);
-    return null;
-  }
+  return mountOptionalReactIsland({
+    host: el.createSheet,
+    label: "create sheet",
+    load: async () => {
+      const { mountCreateSheetIsland } = await import("./create_sheet_island.js");
+      return mountCreateSheetIsland({
+        createSheet: el.createSheet,
+        documentRef: document,
+      });
+    },
+  });
 }
 
 async function mountDirBrowserViewReactIsland() {
@@ -2108,22 +2088,17 @@ async function mountWorkbenchWidgetsReactIsland() {
 }
 
 async function mountMermaidSheetReactIsland() {
-  if (!reactRootShellEnabled()) {
-    return null;
-  }
-  if (!el.mermaidSheet) {
-    return null;
-  }
-  try {
-    const { mountMermaidSheetIsland } = await import("./mermaid_sheet_island.js");
-    return mountMermaidSheetIsland({
-      mermaidSheet: el.mermaidSheet,
-      documentRef: document,
-    });
-  } catch (error) {
-    console.warn("[swimmers-web] Mermaid sheet React island mount skipped", error);
-    return null;
-  }
+  return mountOptionalReactIsland({
+    host: el.mermaidSheet,
+    label: "Mermaid sheet",
+    load: async () => {
+      const { mountMermaidSheetIsland } = await import("./mermaid_sheet_island.js");
+      return mountMermaidSheetIsland({
+        mermaidSheet: el.mermaidSheet,
+        documentRef: document,
+      });
+    },
+  });
 }
 
 async function init() {

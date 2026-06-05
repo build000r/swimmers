@@ -1,6 +1,9 @@
 import React from "react";
 import { hydrateRoot } from "react-dom/client";
 
+import { assertStableIdentity, elementFromRef } from "./react_island_identity.js";
+import { mountHydratedStaticIsland } from "./static_sheet_island.js";
+
 export const NATIVE_DESKTOP_SHEET_ISLAND_IDS = Object.freeze({
   nativeSheet: "native-sheet",
   nativeSheetTitle: "native-sheet-title",
@@ -46,10 +49,6 @@ export const NATIVE_DESKTOP_MODE_OPTIONS = Object.freeze([
 ]);
 
 const h = React.createElement;
-
-function elementFromRef(ref) {
-  return ref?.current ?? ref;
-}
 
 function optionElements(createElement, options) {
   return options.map((option) => createElement(
@@ -198,12 +197,7 @@ export function resolveNativeDesktopSheetIslandContainers({
 }
 
 export function assertStableNativeDesktopSheetIslandContainers(previous, next) {
-  for (const key of Object.keys(previous || {})) {
-    if (previous?.[key] !== next?.[key]) {
-      throw new Error(`Native desktop sheet island replaced stable container ${key}`);
-    }
-  }
-  return next;
+  return assertStableIdentity(previous, next, { label: "Native desktop sheet island" });
 }
 
 export function mountNativeDesktopSheetIsland({
@@ -212,25 +206,15 @@ export function mountNativeDesktopSheetIsland({
   hydrateRootImpl = hydrateRoot,
 } = {}) {
   const containers = resolveNativeDesktopSheetIslandContainers({ documentRef, nativeSheet });
-  const handle = {
+  return mountHydratedStaticIsland({
     containers,
-    reactRoot: null,
-    render() {
-      const previousContainers = handle.containers;
-      handle.reactRoot?.render?.(h(NativeDesktopSheet));
-      handle.containers = assertStableNativeDesktopSheetIslandContainers(
-        previousContainers,
-        resolveNativeDesktopSheetIslandContainers({
-          documentRef,
-          nativeSheet: containers.nativeSheet,
-        }),
-      );
-      return handle;
-    },
-    unmount() {
-      handle.reactRoot?.unmount?.();
-    },
-  };
-  handle.reactRoot = hydrateRootImpl(containers.nativeSheet, h(NativeDesktopSheet));
-  return handle;
+    hydrateRootImpl,
+    root: containers.nativeSheet,
+    renderElement: () => h(NativeDesktopSheet),
+    refreshContainers: () => resolveNativeDesktopSheetIslandContainers({
+      documentRef,
+      nativeSheet: containers.nativeSheet,
+    }),
+    assertStableContainers: assertStableNativeDesktopSheetIslandContainers,
+  });
 }

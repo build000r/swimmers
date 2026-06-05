@@ -1,6 +1,9 @@
 import React from "react";
 import { hydrateRoot } from "react-dom/client";
 
+import { assertStableIdentity, elementFromRef } from "./react_island_identity.js";
+import { mountHydratedStaticIsland } from "./static_sheet_island.js";
+
 export const THOUGHT_CONFIG_SHEET_ISLAND_IDS = Object.freeze({
   thoughtConfigSheet: "thought-config-sheet",
   thoughtConfigTitle: "thought-config-title",
@@ -50,10 +53,6 @@ export const THOUGHT_CONFIG_DEFAULT_COPY = Object.freeze({
 });
 
 const h = React.createElement;
-
-function elementFromRef(ref) {
-  return ref?.current ?? ref;
-}
 
 export function createThoughtConfigSheetContents(createElement) {
   if (typeof createElement !== "function") {
@@ -205,12 +204,7 @@ export function resolveThoughtConfigSheetIslandContainers({
 }
 
 export function assertStableThoughtConfigSheetIslandContainers(previous, next) {
-  for (const key of Object.keys(previous || {})) {
-    if (previous?.[key] !== next?.[key]) {
-      throw new Error(`Thought config sheet island replaced stable container ${key}`);
-    }
-  }
-  return next;
+  return assertStableIdentity(previous, next, { label: "Thought config sheet island" });
 }
 
 export function mountThoughtConfigSheetIsland({
@@ -219,25 +213,15 @@ export function mountThoughtConfigSheetIsland({
   hydrateRootImpl = hydrateRoot,
 } = {}) {
   const containers = resolveThoughtConfigSheetIslandContainers({ documentRef, thoughtConfigSheet });
-  const handle = {
+  return mountHydratedStaticIsland({
     containers,
-    reactRoot: null,
-    render() {
-      const previousContainers = handle.containers;
-      handle.reactRoot?.render?.(h(ThoughtConfigSheet));
-      handle.containers = assertStableThoughtConfigSheetIslandContainers(
-        previousContainers,
-        resolveThoughtConfigSheetIslandContainers({
-          documentRef,
-          thoughtConfigSheet: containers.thoughtConfigSheet,
-        }),
-      );
-      return handle;
-    },
-    unmount() {
-      handle.reactRoot?.unmount?.();
-    },
-  };
-  handle.reactRoot = hydrateRootImpl(containers.thoughtConfigSheet, h(ThoughtConfigSheet));
-  return handle;
+    hydrateRootImpl,
+    root: containers.thoughtConfigSheet,
+    renderElement: () => h(ThoughtConfigSheet),
+    refreshContainers: () => resolveThoughtConfigSheetIslandContainers({
+      documentRef,
+      thoughtConfigSheet: containers.thoughtConfigSheet,
+    }),
+    assertStableContainers: assertStableThoughtConfigSheetIslandContainers,
+  });
 }

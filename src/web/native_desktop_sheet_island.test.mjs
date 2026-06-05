@@ -2,6 +2,12 @@ import test from "node:test";
 import assert from "node:assert/strict";
 
 import {
+  buttonIdsFor,
+  createElement,
+  fakeDocumentForIds,
+  keysFor,
+} from "./island_test_helpers.mjs";
+import {
   NATIVE_DESKTOP_APP_OPTIONS,
   NATIVE_DESKTOP_DEFAULT_COPY,
   NATIVE_DESKTOP_MODE_OPTIONS,
@@ -16,38 +22,8 @@ import {
   resolveNativeDesktopSheetIslandContainers,
 } from "./native_desktop_sheet_island.js";
 
-function fakeElement(id) {
-  return { id };
-}
-
-function createElement(type, props, ...children) {
-  return {
-    type,
-    props: { ...(props || {}), children },
-  };
-}
-
 function fakeDocument() {
-  const elements = new Map(Object.values(NATIVE_DESKTOP_SHEET_ISLAND_IDS).map((id) => [id, fakeElement(id)]));
-  return {
-    documentRef: {
-      getElementById(id) {
-        return elements.get(id) ?? null;
-      },
-    },
-    delete(id) {
-      elements.delete(id);
-    },
-    replace(id) {
-      const replacement = { id, replaced: true };
-      elements.set(id, replacement);
-      return replacement;
-    },
-  };
-}
-
-function keysFor(children) {
-  return children.map((child) => child?.props?.key).filter(Boolean);
+  return fakeDocumentForIds(NATIVE_DESKTOP_SHEET_ISLAND_IDS);
 }
 
 function optionPairsFor(select) {
@@ -55,10 +31,6 @@ function optionPairsFor(select) {
     option.props.value,
     option.props.children[0],
   ]);
-}
-
-function buttonIdsFor(children) {
-  return children.map((child) => child?.props?.id).filter(Boolean);
 }
 
 test("native desktop sheet island preserves sheet host and child DOM contract", () => {

@@ -1,6 +1,9 @@
 import React from "react";
 import { hydrateRoot } from "react-dom/client";
 
+import { assertStableIdentity, elementFromRef } from "./react_island_identity.js";
+import { mountHydratedStaticIsland } from "./static_sheet_island.js";
+
 export const AUTH_SHEET_ISLAND_IDS = Object.freeze({
   authSheet: "auth-sheet",
   authSheetTitle: "auth-sheet-title",
@@ -35,10 +38,6 @@ export const AUTH_SHEET_COPY =
   "Paste `AUTH_TOKEN` or `OBSERVER_TOKEN` when the API is running in token mode.";
 
 const h = React.createElement;
-
-function elementFromRef(ref) {
-  return ref?.current ?? ref;
-}
 
 export function createAuthSheetContents(createElement) {
   if (typeof createElement !== "function") {
@@ -138,12 +137,7 @@ export function resolveAuthSheetIslandContainers({
 }
 
 export function assertStableAuthSheetIslandContainers(previous, next) {
-  for (const key of Object.keys(previous || {})) {
-    if (previous?.[key] !== next?.[key]) {
-      throw new Error(`Auth sheet island replaced stable container ${key}`);
-    }
-  }
-  return next;
+  return assertStableIdentity(previous, next, { label: "Auth sheet island" });
 }
 
 export function mountAuthSheetIsland({
@@ -152,22 +146,15 @@ export function mountAuthSheetIsland({
   hydrateRootImpl = hydrateRoot,
 } = {}) {
   const containers = resolveAuthSheetIslandContainers({ documentRef, authSheet });
-  const handle = {
+  return mountHydratedStaticIsland({
     containers,
-    reactRoot: null,
-    render() {
-      const previousContainers = handle.containers;
-      handle.reactRoot?.render?.(h(AuthSheet));
-      handle.containers = assertStableAuthSheetIslandContainers(
-        previousContainers,
-        resolveAuthSheetIslandContainers({ documentRef, authSheet: containers.authSheet }),
-      );
-      return handle;
-    },
-    unmount() {
-      handle.reactRoot?.unmount?.();
-    },
-  };
-  handle.reactRoot = hydrateRootImpl(containers.authSheet, h(AuthSheet));
-  return handle;
+    hydrateRootImpl,
+    root: containers.authSheet,
+    renderElement: () => h(AuthSheet),
+    refreshContainers: () => resolveAuthSheetIslandContainers({
+      documentRef,
+      authSheet: containers.authSheet,
+    }),
+    assertStableContainers: assertStableAuthSheetIslandContainers,
+  });
 }

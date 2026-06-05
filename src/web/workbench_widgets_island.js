@@ -2,15 +2,13 @@ import React from "react";
 import { flushSync } from "react-dom";
 import { createRoot } from "react-dom/client";
 
+import { assertStableIdentity, elementFromRef } from "./react_island_identity.js";
+
 export const WORKBENCH_WIDGETS_ISLAND_IDS = Object.freeze({
   terminalWorkbenchWidgets: "terminal-workbench-widgets",
 });
 
 const h = React.createElement;
-
-function elementFromRef(ref) {
-  return ref?.current ?? ref;
-}
 
 function normalizeItems(model = {}) {
   return Array.isArray(model?.items) ? model.items : [];
@@ -81,12 +79,7 @@ export function resolveWorkbenchWidgetsIslandContainers({
 }
 
 export function assertStableWorkbenchWidgetsIslandContainers(previous, next) {
-  for (const key of Object.keys(previous || {})) {
-    if (previous?.[key] !== next?.[key]) {
-      throw new Error(`Workbench widgets island replaced stable container ${key}`);
-    }
-  }
-  return next;
+  return assertStableIdentity(previous, next, { label: "Workbench widgets island" });
 }
 
 export function mountWorkbenchWidgetsIsland({

@@ -8,6 +8,7 @@ import {
   dirEntryResolvedPath,
   renderDirGroupActionPlan,
 } from "./dir_browser.js";
+import { assertStableIdentity, elementFromRef } from "./react_island_identity.js";
 import { safeAnchorHref } from "./terminal_safety.js";
 
 export const DIR_BROWSER_VIEW_ISLAND_IDS = Object.freeze({
@@ -22,10 +23,6 @@ export const DIR_BROWSER_VIEW_ISLAND_KEYS = Object.freeze({
 });
 
 const h = React.createElement;
-
-function elementFromRef(ref) {
-  return ref?.current ?? ref;
-}
 
 function selectedPathSet(selectedPaths) {
   if (selectedPaths instanceof Set) {
@@ -289,12 +286,7 @@ export function resolveDirBrowserViewIslandContainers({
 }
 
 export function assertStableDirBrowserViewIslandContainers(previous, next) {
-  for (const key of Object.keys(previous || {})) {
-    if (previous?.[key] !== next?.[key]) {
-      throw new Error(`Directory browser view island replaced stable container ${key}`);
-    }
-  }
-  return next;
+  return assertStableIdentity(previous, next, { label: "Directory browser view island" });
 }
 
 export function mountDirBrowserViewIsland({
