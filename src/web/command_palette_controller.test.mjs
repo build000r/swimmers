@@ -55,7 +55,7 @@ class MockElement {
   }
 }
 
-function makeController() {
+function makeController(overrides = {}) {
   const calls = [];
   const rafQueue = [];
   const state = {
@@ -113,6 +113,7 @@ function makeController() {
     refreshThoughtConfig: async () => calls.push(["refreshThoughtConfig"]),
     refreshNativeStatus: async () => calls.push(["refreshNativeStatus"]),
     refreshMermaidArtifact: async () => calls.push(["refreshMermaidArtifact"]),
+    ...overrides,
   });
   return { calls, controller, documentRef, el, rafQueue, state };
 }
@@ -167,6 +168,40 @@ test("openSheet runs sheet-specific side effects and focus targets", () => {
   assert.ok(calls.some((call) => call[0] === "refreshNativeStatus"));
   assert.ok(calls.some((call) => call[0] === "refreshMermaidArtifact"));
   assert.equal(state.activeSheet, "mermaid");
+});
+
+test("renderCommandPalette delegates results to a mounted React island when present", () => {
+  const renderCalls = [];
+  const { controller, el, state } = makeController({
+    renderCommandPaletteResults(payload) {
+      renderCalls.push(payload);
+      return true;
+    },
+  });
+
+  el.paletteSearch.value = "beta";
+  state.paletteIndex = 7;
+
+  controller.renderCommandPalette();
+
+  assert.equal(renderCalls.length, 1);
+  assert.equal(renderCalls[0].target, el.paletteResults);
+  assert.equal(renderCalls[0].items[0].label, "Switch to beta");
+  assert.equal(renderCalls[0].activeIndex, 1);
+  assert.equal(el.paletteResults.innerHTML, "");
+});
+
+test("renderCommandPalette falls back to legacy HTML when React island declines", () => {
+  const { controller, el } = makeController({
+    renderCommandPaletteResults() {
+      return false;
+    },
+  });
+
+  controller.renderCommandPalette();
+
+  assert.ok(el.paletteResults.innerHTML.includes("Focus terminal"));
+  assert.ok(el.paletteResults.innerHTML.includes("data-palette-index=\"0\""));
 });
 
 test("closeSheets clears send and create state, hides modal, and refocuses terminal immediately", () => {

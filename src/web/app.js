@@ -323,6 +323,7 @@ const {
 
 const defaultDocumentTitle = document.title || "swimmers";
 let reactShell = null;
+let commandPaletteIsland = null;
 let terminalZoomInputController;
 let clearPendingTerminalBytes;
 let bufferTerminalBytes;
@@ -1576,6 +1577,9 @@ const commandPaletteController = createCommandPaletteController({
   refreshThoughtConfig,
   refreshNativeStatus,
   refreshMermaidArtifact,
+  renderCommandPaletteResults({ items, activeIndex }) {
+    return commandPaletteIsland?.renderResults?.({ items, activeIndex }) === true;
+  },
 });
 
 function renderCommandPalette() { return commandPaletteController.renderCommandPalette(); }
@@ -1912,8 +1916,28 @@ async function mountReactRootShell() {
   }
 }
 
+async function mountCommandPaletteReactIsland() {
+  if (!reactRootShellEnabled()) {
+    return null;
+  }
+  if (!el.paletteSheet) {
+    return null;
+  }
+  try {
+    const { mountCommandPaletteIsland } = await import("./command_palette_island.js");
+    return mountCommandPaletteIsland({
+      paletteSheet: el.paletteSheet,
+      documentRef: document,
+    });
+  } catch (error) {
+    console.warn("[swimmers-web] command palette React island mount skipped", error);
+    return null;
+  }
+}
+
 async function init() {
   reactShell = await mountReactRootShell();
+  commandPaletteIsland = await mountCommandPaletteReactIsland();
   loadInitialState();
   bindEvents();
   setUtilityStatus(defaultUtilityLabel(), true);
@@ -2008,7 +2032,9 @@ export const __swimmersWebTest = {
   syncLinkTools,
   reactRootShellEnabled,
   mountReactRootShell,
+  mountCommandPaletteReactIsland,
   reactShell: () => reactShell,
+  commandPaletteIsland: () => commandPaletteIsland,
 };
 
 if (!window.__SWIMMERS_DISABLE_AUTO_INIT__) {

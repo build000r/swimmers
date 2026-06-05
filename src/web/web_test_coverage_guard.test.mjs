@@ -110,7 +110,15 @@ test("focused helper suites keep migration-critical behavior coverage topics", a
       "src/web/command_palette_controller.test.mjs",
       [
         "openSheet runs sheet-specific side effects and focus targets",
+        "renderCommandPalette delegates results to a mounted React island when present",
         "closeSheets clears send and create state, hides modal, and refocuses terminal immediately",
+      ],
+    ],
+    [
+      "src/web/command_palette_island.test.mjs",
+      [
+        "command palette island preserves sheet host and child DOM contract",
+        "command palette island mounts, rerenders results, and guards stable nodes",
       ],
     ],
   ]);
@@ -154,4 +162,24 @@ test("Vite transforms the React shell path that owns React imports", async (t) =
   assert.ok(transformed?.code, "Vite did not transform react_shell.js");
   assert.match(transformed.code, /react/);
   assert.match(transformed.code, /react-dom/);
+});
+
+test("Vite transforms the command palette React island path", async (t) => {
+  const appSource = await readRepoFile("src/web/app.js");
+  const source = await readRepoFile("src/web/command_palette_island.js");
+  assert.match(appSource, /import\("\.\/command_palette_island\.js"\)/);
+  assert.match(source, /from "react"/);
+  assert.match(source, /from "react-dom\/client"/);
+
+  const server = await createServer({
+    configFile: path.join(repoRoot, "vite.config.js"),
+    logLevel: "silent",
+    server: { middlewareMode: true },
+  });
+  t.after(() => server.close());
+
+  const transformed = await server.transformRequest("/src/web/command_palette_island.js");
+
+  assert.ok(transformed?.code, "Vite did not transform command_palette_island.js");
+  assert.match(transformed.code, /CommandPaletteSheet/);
 });

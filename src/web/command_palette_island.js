@@ -1,0 +1,210 @@
+import React from "react";
+import { hydrateRoot } from "react-dom/client";
+
+export const COMMAND_PALETTE_ISLAND_IDS = Object.freeze({
+  paletteSheet: "palette-sheet",
+  paletteSheetTitle: "palette-sheet-title",
+  paletteSearch: "palette-search",
+  paletteResults: "palette-results",
+  paletteCloseButton: "palette-close-button",
+});
+
+export const COMMAND_PALETTE_ISLAND_KEYS = Object.freeze({
+  header: "palette-header",
+  field: "palette-field",
+  results: "palette-results",
+  actions: "palette-actions",
+});
+
+export const COMMAND_PALETTE_ISLAND_HOST_PROPS = Object.freeze({
+  className: "surface-sheet hidden palette-sheet",
+  id: COMMAND_PALETTE_ISLAND_IDS.paletteSheet,
+  "aria-labelledby": COMMAND_PALETTE_ISLAND_IDS.paletteSheetTitle,
+});
+
+export const COMMAND_PALETTE_RESULTS_PROPS = Object.freeze({
+  className: "palette-results",
+  id: COMMAND_PALETTE_ISLAND_IDS.paletteResults,
+  role: "listbox",
+  "aria-label": "Command palette results",
+});
+
+const h = React.createElement;
+
+function elementFromRef(ref) {
+  return ref?.current ?? ref;
+}
+
+function keyedProps(key, props = {}) {
+  return { ...props, key };
+}
+
+function commandPaletteItemKey(item, index) {
+  return String(item?.sessionId || item?.actionId || item?.label || index);
+}
+
+function commandPaletteItemMeta(item) {
+  return item?.disabled ? "unavailable" : item?.meta || "";
+}
+
+export function createCommandPaletteResultsElement(createElement, {
+  items = [],
+  activeIndex = 0,
+} = {}) {
+  if (typeof createElement !== "function") {
+    throw new TypeError("Command palette island requires a createElement function");
+  }
+  const children = Array.isArray(items) && items.length
+    ? items.map((item, index) => createElement(
+      "button",
+      {
+        className: `palette-item${index === activeIndex ? " is-active" : ""}`,
+        key: commandPaletteItemKey(item, index),
+        type: "button",
+        role: "option",
+        "aria-selected": index === activeIndex ? "true" : "false",
+        "data-palette-index": String(index),
+        disabled: item?.disabled ? true : undefined,
+      },
+      createElement("span", { className: "palette-item-title" }, item?.label || ""),
+      createElement("span", { className: "palette-item-meta" }, commandPaletteItemMeta(item)),
+    ))
+    : [createElement("div", { className: "sheet-copy", key: "empty" }, "No matching commands.")];
+  return createElement(
+    "div",
+    keyedProps(COMMAND_PALETTE_ISLAND_KEYS.results, COMMAND_PALETTE_RESULTS_PROPS),
+    ...children,
+  );
+}
+
+export function createCommandPaletteSheetContents(createElement, options = {}) {
+  if (typeof createElement !== "function") {
+    throw new TypeError("Command palette island requires a createElement function");
+  }
+  return [
+    createElement(
+      "div",
+      { className: "sheet-header", key: COMMAND_PALETTE_ISLAND_KEYS.header },
+      createElement("p", { className: "sheet-eyebrow" }, "Terminal Actions"),
+      createElement("h2", { id: COMMAND_PALETTE_ISLAND_IDS.paletteSheetTitle }, "Command Palette"),
+    ),
+    createElement(
+      "label",
+      { className: "field", key: COMMAND_PALETTE_ISLAND_KEYS.field },
+      createElement("span", null, "Command or session"),
+      createElement("input", {
+        id: COMMAND_PALETTE_ISLAND_IDS.paletteSearch,
+        type: "search",
+        placeholder: "Search actions and sessions",
+        autoComplete: "off",
+      }),
+    ),
+    createCommandPaletteResultsElement(createElement, options),
+    createElement(
+      "div",
+      { className: "sheet-actions", key: COMMAND_PALETTE_ISLAND_KEYS.actions },
+      createElement(
+        "button",
+        {
+          className: "ghost-button",
+          id: COMMAND_PALETTE_ISLAND_IDS.paletteCloseButton,
+          type: "button",
+        },
+        "Close",
+      ),
+    ),
+  ];
+}
+
+export function createCommandPaletteSheetElement(createElement, options = {}) {
+  if (typeof createElement !== "function") {
+    throw new TypeError("Command palette island requires a createElement function");
+  }
+  return createElement(
+    "section",
+    COMMAND_PALETTE_ISLAND_HOST_PROPS,
+    ...createCommandPaletteSheetContents(createElement, options),
+  );
+}
+
+export function CommandPaletteResults(props) {
+  return createCommandPaletteResultsElement(h, props);
+}
+
+export function CommandPaletteSheet(props) {
+  return createCommandPaletteSheetContents(h, props);
+}
+
+export function resolveCommandPaletteIslandContainers({
+  documentRef = globalThis.document,
+  paletteSheet,
+} = {}) {
+  const sheet = elementFromRef(paletteSheet)
+    ?? documentRef?.getElementById?.(COMMAND_PALETTE_ISLAND_IDS.paletteSheet)
+    ?? null;
+  const containers = {
+    paletteSheet: sheet,
+    paletteSearch: documentRef?.getElementById?.(COMMAND_PALETTE_ISLAND_IDS.paletteSearch) ?? null,
+    paletteResults: documentRef?.getElementById?.(COMMAND_PALETTE_ISLAND_IDS.paletteResults) ?? null,
+    paletteCloseButton: documentRef?.getElementById?.(COMMAND_PALETTE_ISLAND_IDS.paletteCloseButton) ?? null,
+  };
+  for (const [key, value] of Object.entries(containers)) {
+    if (!value) {
+      throw new Error(`Command palette island missing stable container ${key}`);
+    }
+  }
+  return containers;
+}
+
+export function assertStableCommandPaletteIslandContainers(previous, next) {
+  for (const key of Object.keys(previous || {})) {
+    if (previous?.[key] !== next?.[key]) {
+      throw new Error(`Command palette island replaced stable container ${key}`);
+    }
+  }
+  return next;
+}
+
+export function mountCommandPaletteIsland({
+  documentRef = globalThis.document,
+  paletteSheet,
+  hydrateRootImpl = hydrateRoot,
+  items = [],
+  activeIndex = 0,
+} = {}) {
+  const containers = resolveCommandPaletteIslandContainers({ documentRef, paletteSheet });
+  const handle = {
+    containers,
+    items,
+    activeIndex,
+    reactRoot: null,
+    render(next = {}) {
+      const previousContainers = handle.containers;
+      handle.items = Array.isArray(next.items) ? next.items : handle.items;
+      handle.activeIndex = Number.isFinite(next.activeIndex)
+        ? Math.trunc(next.activeIndex)
+        : handle.activeIndex;
+      handle.reactRoot?.render?.(h(CommandPaletteSheet, {
+        items: handle.items,
+        activeIndex: handle.activeIndex,
+      }));
+      handle.containers = assertStableCommandPaletteIslandContainers(
+        previousContainers,
+        resolveCommandPaletteIslandContainers({ documentRef, paletteSheet: containers.paletteSheet }),
+      );
+      return handle;
+    },
+    renderResults(next = {}) {
+      handle.render(next);
+      return true;
+    },
+    unmount() {
+      handle.reactRoot?.unmount?.();
+    },
+  };
+  handle.reactRoot = hydrateRootImpl(
+    containers.paletteSheet,
+    h(CommandPaletteSheet, { items: handle.items, activeIndex: handle.activeIndex }),
+  );
+  return handle;
+}

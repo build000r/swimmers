@@ -22,6 +22,7 @@ export function createCommandPaletteController({
   refreshThoughtConfig,
   refreshNativeStatus,
   refreshMermaidArtifact,
+  renderCommandPaletteResults,
 }) {
   function filteredCommandPaletteItems() {
     return filteredCommandPaletteItemsForState({
@@ -39,6 +40,13 @@ export function createCommandPaletteController({
     }
     state.paletteItems = filteredCommandPaletteItems();
     state.paletteIndex = clampInt(state.paletteIndex, 0, 0, Math.max(0, state.paletteItems.length - 1));
+    if (renderCommandPaletteResults?.({
+      target: el.paletteResults,
+      items: state.paletteItems,
+      activeIndex: state.paletteIndex,
+    }) === true) {
+      return;
+    }
     el.paletteResults.innerHTML = renderCommandPaletteResultsHtml(state.paletteItems, state.paletteIndex);
   }
 
