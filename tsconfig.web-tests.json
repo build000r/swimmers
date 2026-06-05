@@ -12,6 +12,7 @@
     "src/web/command_palette_controller.test.mjs",
     "src/web/command_palette_island.test.mjs",
     "src/web/contracts.test.mjs",
+    "src/web/create_sheet_island.test.mjs",
     "src/web/dir_browser.test.mjs",
     "src/web/global_shortcut_dispatch.test.mjs",
     "src/web/input_support.test.mjs",

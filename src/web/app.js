@@ -326,6 +326,7 @@ let reactShell = null;
 let commandPaletteIsland = null;
 let searchSheetIsland = null;
 let sendSheetIsland = null;
+let createSheetIsland = null;
 let terminalZoomInputController;
 let clearPendingTerminalBytes;
 let bufferTerminalBytes;
@@ -1975,11 +1976,31 @@ async function mountSendSheetReactIsland() {
   }
 }
 
+async function mountCreateSheetReactIsland() {
+  if (!reactRootShellEnabled()) {
+    return null;
+  }
+  if (!el.createSheet) {
+    return null;
+  }
+  try {
+    const { mountCreateSheetIsland } = await import("./create_sheet_island.js");
+    return mountCreateSheetIsland({
+      createSheet: el.createSheet,
+      documentRef: document,
+    });
+  } catch (error) {
+    console.warn("[swimmers-web] create sheet React island mount skipped", error);
+    return null;
+  }
+}
+
 async function init() {
   reactShell = await mountReactRootShell();
   commandPaletteIsland = await mountCommandPaletteReactIsland();
   searchSheetIsland = await mountSearchSheetReactIsland();
   sendSheetIsland = await mountSendSheetReactIsland();
+  createSheetIsland = await mountCreateSheetReactIsland();
   loadInitialState();
   bindEvents();
   setUtilityStatus(defaultUtilityLabel(), true);
@@ -2077,10 +2098,12 @@ export const __swimmersWebTest = {
   mountCommandPaletteReactIsland,
   mountSearchSheetReactIsland,
   mountSendSheetReactIsland,
+  mountCreateSheetReactIsland,
   reactShell: () => reactShell,
   commandPaletteIsland: () => commandPaletteIsland,
   searchSheetIsland: () => searchSheetIsland,
   sendSheetIsland: () => sendSheetIsland,
+  createSheetIsland: () => createSheetIsland,
 };
 
 if (!window.__SWIMMERS_DISABLE_AUTO_INIT__) {
