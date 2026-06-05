@@ -44,7 +44,7 @@ The cockpit is a terminal-first workbench, not a replacement for the live termin
 
 `/v1/sessions/{id}/git-diff` includes structured file and hunk summaries so the browser can render a useful diff overview without reparsing patches. The raw diff fields remain available for compatibility and for expanded views.
 
-The Skills panel calls `/v1/sessions/{id}/skills?source=sbp` only when the `personal-workflows` build exposes that route. The adapter runs a passive `sbp skills` lookup for the selected session cwd, reports unavailable states in the panel, and does not perform automatic skill hot-swap, sync, add, prune, or overlay mutation.
+The Skills panel calls `/v1/sessions/{id}/skills?source=sbp` only when runtime `SWIMMERS_PERSONAL_WORKFLOWS=1` exposes that route; the `personal-workflows` Cargo feature only changes the default. The adapter runs a passive `sbp skills` lookup for the selected session cwd, reports unavailable states in the panel, and does not perform automatic skill hot-swap, sync, add, prune, or overlay mutation.
 
 ## Reuse Contract
 

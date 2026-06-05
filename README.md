@@ -276,6 +276,23 @@ make release-acceptance-all
 make cargo-cov-lcov     # Generate lcov coverage report
 ```
 
+`make web` runs `scripts/run-web.sh`. The wrapper probes `/app.js` before
+declaring the server ready, prints both the root browser URL (`/`) and the
+focused selected-session URL (`/selected`), and defaults
+`SWIMMERS_PERSONAL_WORKFLOWS=1` for source-checkout browser workflows. Set that
+environment variable to `0` to hide local repo browsing, skills, group editing,
+and commit-helper routes.
+
+### Browser asset routes
+
+The Rust web server serves the Trogdor shell at `/` and the focused browser
+shell at `/selected`. Browser assets keep `/app.js` as a compatibility ES module
+route. When Vite build output is available, the HTML shell points at
+`/assets/vite/...` files from `target/web-vite` by default, or from
+`SWIMMERS_VITE_DIST_DIR` when that override is set. In debug/source workflows,
+set `SWIMMERS_VITE_DEV_ORIGIN` to point script and style tags at a running Vite
+dev server instead of the embedded or built asset set.
+
 ### Release acceptance profiles
 
 Release proof is split into profiles so optional local features do not block the default installed-binary contract:
@@ -418,6 +435,8 @@ Set `SWIMMERS_TUI_URL` to split the API into its own process. Multiple TUIs, hea
 | `GET` | `/v1/sessions/{id}/mermaid-artifact` | Mermaid/plan artifact metadata and source |
 | `GET` | `/v1/sessions/{id}/plan-file` | Read a plan or repo-doc artifact file |
 | `GET` | `/v1/sessions/{id}/skills?source=sbp` | Passive session-scoped Skillbox/SBP Skills discovery when `SWIMMERS_PERSONAL_WORKFLOWS=1` |
+| `POST` | `/v1/sessions/{id}/commit-grok` | Launch the UI commit-helper flow with Grok when `SWIMMERS_PERSONAL_WORKFLOWS=1` |
+| `POST` | `/v1/sessions/{id}/commit-codex` | Launch the UI commit-helper flow with Codex when `SWIMMERS_PERSONAL_WORKFLOWS=1` |
 | `POST` | `/v1/sessions/{id}/attention/dismiss` | Clear attention state |
 | `POST` | `/v1/sessions/{id}/input` | Send text input to a session |
 | `GET` | `/v1/selection` | Read the published selection |
@@ -428,11 +447,12 @@ Set `SWIMMERS_TUI_URL` to split the API into its own process. Multiple TUIs, hea
 | `PUT` | `/v1/native/mode` | Select native terminal open behavior |
 | `POST` | `/v1/native/open` | Open session in desktop terminal |
 | `POST` | `/v1/native/attention-group/open` | Open or refresh the managed native attention group |
-| `GET` | `/v1/dirs` | Repo/service directory browser |
-| `POST` | `/v1/dirs/restart` | Restart a mapped service |
-| `POST` | `/v1/dirs/actions` | Start a mapped repo action such as commit assistance |
-| `POST` | `/v1/dirs/group-memberships` | Add, remove, or move a project in directory groups |
-| `GET` | `/v1/skills?tool=...` | List available skills for a tool |
+| `GET` | `/v1/dirs` | Repo/service directory browser when `SWIMMERS_PERSONAL_WORKFLOWS=1` |
+| `GET` | `/v1/dirs/repositories` | Cached local repository search results when `SWIMMERS_PERSONAL_WORKFLOWS=1` |
+| `POST` | `/v1/dirs/restart` | Restart a mapped service when `SWIMMERS_PERSONAL_WORKFLOWS=1` |
+| `POST` | `/v1/dirs/actions` | Start a mapped repo action such as commit assistance when `SWIMMERS_PERSONAL_WORKFLOWS=1` |
+| `POST` | `/v1/dirs/group-memberships` | Add, remove, or move a project in directory groups when `SWIMMERS_PERSONAL_WORKFLOWS=1` |
+| `GET` | `/v1/skills?tool=...` | List available skills for a tool when `SWIMMERS_PERSONAL_WORKFLOWS=1` |
 | `GET` | `/v1/thought-config` | Read thought runtime config |
 | `PUT` | `/v1/thought-config` | Update thought runtime config |
 | `GET` | `/v1/thought/sync-preview` | Preview thought synchronization without mutating state |
