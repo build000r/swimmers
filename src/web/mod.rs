@@ -109,8 +109,9 @@ async fn render_index(focus_layout: bool) -> impl IntoResponse {
     } else {
         "app-body"
     };
-    let app_css_route = assets::APP_CSS_ROUTE;
-    let app_js_route = assets::APP_JS_ROUTE;
+    let frontend_assets = assets::frontend_asset_tags().await;
+    let stylesheet_tags = frontend_stylesheet_tags(&frontend_assets);
+    let module_script_tags = frontend_module_script_tags(&frontend_assets);
     let franken_term_font_route = assets::FRANKENTERM_FONT_ROUTE;
 
     let html = format!(
@@ -121,7 +122,7 @@ async fn render_index(focus_layout: bool) -> impl IntoResponse {
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>swimmers</title>
     <link rel="preload" href="{franken_term_font_route}" as="font" type="font/woff2" crossorigin />
-    <link rel="stylesheet" href="{app_css_route}" />
+    {stylesheet_tags}
   </head>
   <body class="{body_class}">
     <div class="shell">
@@ -502,12 +503,48 @@ async fn render_index(focus_layout: bool) -> impl IntoResponse {
     </div>
 
     <script>window.__SWIMMERS_BOOT__ = {boot_json};</script>
-    <script type="module" src="{app_js_route}"></script>
+    {module_script_tags}
   </body>
 </html>"#
     );
 
     ([(header::CACHE_CONTROL, "no-store")], Html(html))
+}
+
+fn frontend_stylesheet_tags(assets: &assets::FrontendAssetTags) -> String {
+    assets
+        .stylesheets
+        .iter()
+        .map(|href| {
+            format!(
+                r#"<link rel="stylesheet" href="{}" />"#,
+                escape_html_attr(href)
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n    ")
+}
+
+fn frontend_module_script_tags(assets: &assets::FrontendAssetTags) -> String {
+    assets
+        .module_scripts
+        .iter()
+        .map(|src| {
+            format!(
+                r#"<script type="module" src="{}"></script>"#,
+                escape_html_attr(src)
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n    ")
+}
+
+fn escape_html_attr(value: &str) -> String {
+    value
+        .replace('&', "&amp;")
+        .replace('"', "&quot;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
 }
 
 async fn session_ws(

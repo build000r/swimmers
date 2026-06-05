@@ -1,4 +1,4 @@
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 
 use axum::extract::Path as AxumPath;
@@ -6,7 +6,7 @@ use axum::http::{header, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use axum::Router;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::api::AppState;
 
@@ -57,9 +57,17 @@ pub(super) const WORKBENCH_REFRESH_JS_ROUTE: &str = "/workbench_refresh.js";
 pub(super) const WORKBENCH_RECORDS_JS_ROUTE: &str = "/workbench_records.js";
 pub(super) const TERMINAL_WORKBENCH_CONTROLLER_JS_ROUTE: &str = "/terminal_workbench_controller.js";
 pub(super) const APP_CSS_ROUTE: &str = "/app.css";
+pub(super) const VITE_ASSET_ROUTE_PREFIX: &str = "/assets/vite/";
 pub(super) const FRANKENTERM_JS_ROUTE: &str = "/assets/frankenterm/FrankenTerm.js";
 pub(super) const FRANKENTERM_WASM_ROUTE: &str = "/assets/frankenterm/FrankenTerm_bg.wasm";
 pub(super) const FRANKENTERM_FONT_ROUTE: &str = "/assets/frankenterm/pragmasevka-nf-subset.woff2";
+const VITE_ASSET_ROUTE: &str = "/assets/vite/{*path}";
+const VITE_APP_ENTRY: &str = "src/web/app.js";
+#[cfg(debug_assertions)]
+const VITE_DEV_ORIGIN_ENV: &str = "SWIMMERS_VITE_DEV_ORIGIN";
+const VITE_DIST_DIR_ENV: &str = "SWIMMERS_VITE_DIST_DIR";
+const DEFAULT_VITE_DIST_DIR: &str = "target/web-vite";
+const VITE_MANIFEST_PATH: &str = ".vite/manifest.json";
 const TROGDOR_DRAGON_ASSET_ROUTE: &str = "/assets/dragon/{pose}/{frame}";
 const DEFAULT_FRANKENTUI_PKG_CANDIDATES: &[&str] = &[];
 
@@ -154,10 +162,179 @@ pub(super) fn routes() -> Router<Arc<AppState>> {
             get(terminal_workbench_controller_js),
         )
         .route(APP_CSS_ROUTE, get(app_css))
+        .route(VITE_ASSET_ROUTE, get(vite_dist_asset))
         .route(FRANKENTERM_JS_ROUTE, get(franken_term_js))
         .route(FRANKENTERM_WASM_ROUTE, get(franken_term_wasm))
         .route(FRANKENTERM_FONT_ROUTE, get(franken_term_font))
         .route(TROGDOR_DRAGON_ASSET_ROUTE, get(trogdor_dragon_asset))
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct FrontendAssetTags {
+    pub(super) stylesheets: Vec<String>,
+    pub(super) module_scripts: Vec<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub(super) struct ViteManifestEntry {
+    file: String,
+    #[serde(default)]
+    css: Vec<String>,
+    #[serde(default, rename = "isEntry")]
+    is_entry: bool,
+}
+
+pub(super) async fn frontend_asset_tags() -> FrontendAssetTags {
+    if let Some(origin) = vite_dev_origin_from_env() {
+        return frontend_asset_tags_for_vite_dev_origin(&origin);
+    }
+
+    let dist_dir = vite_dist_dir();
+    match frontend_asset_tags_from_dist_dir(&dist_dir).await {
+        Ok(tags) => tags,
+        Err(err) => {
+            tracing::debug!(
+                vite_dist_dir = %dist_dir.display(),
+                "using compatibility web assets because Vite dist is unavailable: {err}"
+            );
+            compatibility_frontend_asset_tags()
+        }
+    }
+}
+
+pub(super) async fn frontend_asset_tags_from_dist_dir(
+    dist_dir: &Path,
+) -> Result<FrontendAssetTags, String> {
+    let manifest_path = dist_dir.join(VITE_MANIFEST_PATH);
+    let raw = tokio::fs::read_to_string(&manifest_path)
+        .await
+        .map_err(|err| format!("failed to read {}: {err}", manifest_path.display()))?;
+    let manifest =
+        serde_json::from_str::<std::collections::BTreeMap<String, ViteManifestEntry>>(&raw)
+            .map_err(|err| format!("failed to parse {}: {err}", manifest_path.display()))?;
+
+    frontend_asset_tags_from_manifest(&manifest)
+}
+
+pub(super) fn frontend_asset_tags_from_manifest(
+    manifest: &std::collections::BTreeMap<String, ViteManifestEntry>,
+) -> Result<FrontendAssetTags, String> {
+    let entry = manifest
+        .get(VITE_APP_ENTRY)
+        .or_else(|| {
+            manifest
+                .values()
+                .find(|entry| entry.is_entry && entry.file.ends_with(".js"))
+        })
+        .ok_or_else(|| format!("Vite manifest is missing {VITE_APP_ENTRY}"))?;
+
+    let app_script = vite_asset_route(&entry.file).ok_or_else(|| {
+        format!(
+            "Vite app entry has an unsupported file path: {}",
+            entry.file
+        )
+    })?;
+
+    let mut stylesheets = Vec::new();
+    for css in &entry.css {
+        push_unique_vite_asset_route(&mut stylesheets, css)?;
+    }
+    for entry in manifest.values() {
+        if entry.is_entry && entry.file.ends_with(".css") {
+            push_unique_vite_asset_route(&mut stylesheets, &entry.file)?;
+        }
+    }
+
+    if stylesheets.is_empty() {
+        stylesheets.push(APP_CSS_ROUTE.to_string());
+    }
+
+    Ok(FrontendAssetTags {
+        stylesheets,
+        module_scripts: vec![app_script],
+    })
+}
+
+pub(super) fn frontend_asset_tags_for_vite_dev_origin(origin: &str) -> FrontendAssetTags {
+    let Some(origin) = normalize_vite_dev_origin(origin) else {
+        return compatibility_frontend_asset_tags();
+    };
+    FrontendAssetTags {
+        stylesheets: vec![APP_CSS_ROUTE.to_string()],
+        module_scripts: vec![
+            format!("{origin}/@vite/client"),
+            format!("{origin}/src/web/app.js"),
+        ],
+    }
+}
+
+fn compatibility_frontend_asset_tags() -> FrontendAssetTags {
+    FrontendAssetTags {
+        stylesheets: vec![APP_CSS_ROUTE.to_string()],
+        module_scripts: vec![APP_JS_ROUTE.to_string()],
+    }
+}
+
+fn push_unique_vite_asset_route(routes: &mut Vec<String>, file: &str) -> Result<(), String> {
+    let route = vite_asset_route(file)
+        .ok_or_else(|| format!("Vite manifest has an unsupported asset path: {file}"))?;
+    if !routes.iter().any(|existing| existing == &route) {
+        routes.push(route);
+    }
+    Ok(())
+}
+
+fn vite_asset_route(file: &str) -> Option<String> {
+    let route_path = sanitize_vite_asset_path(file)?
+        .to_string_lossy()
+        .replace('\\', "/");
+    Some(format!("{VITE_ASSET_ROUTE_PREFIX}{route_path}"))
+}
+
+fn vite_dist_dir() -> PathBuf {
+    std::env::var(VITE_DIST_DIR_ENV)
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+        .map(|path| {
+            if path.is_absolute() {
+                path
+            } else {
+                Path::new(env!("CARGO_MANIFEST_DIR")).join(path)
+            }
+        })
+        .unwrap_or_else(|| Path::new(env!("CARGO_MANIFEST_DIR")).join(DEFAULT_VITE_DIST_DIR))
+}
+
+#[cfg(debug_assertions)]
+fn vite_dev_origin_from_env() -> Option<String> {
+    std::env::var(VITE_DEV_ORIGIN_ENV)
+        .ok()
+        .and_then(|value| normalize_vite_dev_origin(&value))
+}
+
+#[cfg(not(debug_assertions))]
+fn vite_dev_origin_from_env() -> Option<String> {
+    None
+}
+
+pub(super) fn normalize_vite_dev_origin(raw: &str) -> Option<String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let origin = trimmed.trim_end_matches('/');
+    if !(origin.starts_with("http://") || origin.starts_with("https://")) {
+        return None;
+    }
+    if origin
+        .bytes()
+        .any(|byte| byte.is_ascii_whitespace() || matches!(byte, b'"' | b'\'' | b'<' | b'>'))
+    {
+        return None;
+    }
+    Some(origin.to_string())
 }
 
 #[derive(Debug, Serialize)]
@@ -487,6 +664,105 @@ pub(super) async fn app_css() -> impl IntoResponse {
     )
 }
 
+async fn vite_dist_asset(AxumPath(path): AxumPath<String>) -> Response {
+    serve_vite_dist_asset(&vite_dist_dir(), &path).await
+}
+
+pub(super) async fn serve_vite_dist_asset(dist_dir: &Path, route_path: &str) -> Response {
+    let Some(relative_path) = sanitize_vite_asset_path(route_path) else {
+        return super::json_error(
+            StatusCode::NOT_FOUND,
+            "VITE_ASSET_NOT_FOUND",
+            "The requested Vite asset is not available",
+        );
+    };
+    let path = dist_dir.join(&relative_path);
+
+    match tokio::fs::read(&path).await {
+        Ok(bytes) => (
+            [
+                (header::CONTENT_TYPE, vite_asset_content_type(route_path)),
+                (header::CACHE_CONTROL, vite_asset_cache_control(route_path)),
+            ],
+            bytes,
+        )
+            .into_response(),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => super::json_error(
+            StatusCode::NOT_FOUND,
+            "VITE_ASSET_NOT_FOUND",
+            &format!("Vite asset was not found in {}", dist_dir.display()),
+        ),
+        Err(err) => super::json_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "VITE_ASSET_READ_FAILED",
+            &format!("failed to read Vite asset: {err}"),
+        ),
+    }
+}
+
+fn sanitize_vite_asset_path(route_path: &str) -> Option<PathBuf> {
+    let route_path = route_path.trim_start_matches('/');
+    if !route_path.starts_with("assets/") || route_path.ends_with(".map") {
+        return None;
+    }
+
+    let mut relative_path = PathBuf::new();
+    for component in Path::new(route_path).components() {
+        match component {
+            Component::Normal(part) => relative_path.push(part),
+            _ => return None,
+        }
+    }
+
+    if relative_path.as_os_str().is_empty() {
+        None
+    } else {
+        Some(relative_path)
+    }
+}
+
+fn vite_asset_content_type(route_path: &str) -> &'static str {
+    match Path::new(route_path)
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .unwrap_or_default()
+    {
+        "css" => "text/css; charset=utf-8",
+        "js" | "mjs" => "application/javascript; charset=utf-8",
+        "json" => "application/json; charset=utf-8",
+        "png" => "image/png",
+        "svg" => "image/svg+xml",
+        "wasm" => "application/wasm",
+        "woff" => "font/woff",
+        "woff2" => "font/woff2",
+        _ => "application/octet-stream",
+    }
+}
+
+fn vite_asset_cache_control(route_path: &str) -> &'static str {
+    if route_path_has_vite_hash(route_path) {
+        "public, max-age=31536000, immutable"
+    } else {
+        "no-store"
+    }
+}
+
+fn route_path_has_vite_hash(route_path: &str) -> bool {
+    let Some(stem) = Path::new(route_path)
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+    else {
+        return false;
+    };
+    let Some((_, hash)) = stem.rsplit_once('-') else {
+        return false;
+    };
+    hash.len() >= 8
+        && hash
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
+}
+
 pub(super) async fn trogdor_dragon_asset(
     AxumPath((pose, frame)): AxumPath<(String, String)>,
 ) -> Response {
@@ -637,7 +913,7 @@ async fn serve_frankentui_asset(file_name: &str, content_type: &'static str) -> 
     read_frankentui_asset_response(file_name, content_type, &pkg_dir).await
 }
 
-async fn read_frankentui_asset_response(
+pub(super) async fn read_frankentui_asset_response(
     file_name: &str,
     content_type: &'static str,
     pkg_dir: &Path,

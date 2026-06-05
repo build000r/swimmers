@@ -34,6 +34,21 @@ async fn response_json(response: Response) -> serde_json::Value {
     serde_json::from_slice(&body).expect("json response")
 }
 
+async fn response_text(response: Response) -> String {
+    let body = to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("text body");
+    String::from_utf8(body.to_vec()).expect("utf8 text")
+}
+
+fn boot_payload_from_html(html: &str) -> serde_json::Value {
+    let marker = "window.__SWIMMERS_BOOT__ = ";
+    let start = html.find(marker).expect("boot assignment") + marker.len();
+    let rest = &html[start..];
+    let end = rest.find(";</script>").expect("boot script close");
+    serde_json::from_str(&rest[..end]).expect("boot json")
+}
+
 #[test]
 fn valid_pkg_dir_requires_js_and_wasm() {
     let dir = tempdir().expect("tempdir");
@@ -376,6 +391,203 @@ async fn index_boot_payload_includes_frankenterm_asset_manifest_fields() {
 }
 
 #[tokio::test]
+async fn document_routes_preserve_boot_payload_no_store_and_script_order() {
+    let index_response = index().await.into_response();
+    assert_eq!(index_response.status(), StatusCode::OK);
+    assert_eq!(
+        index_response.headers().get(header::CACHE_CONTROL).unwrap(),
+        "no-store"
+    );
+    let index_html = response_text(index_response).await;
+    let index_boot = boot_payload_from_html(&index_html);
+    assert_eq!(index_boot["follow_published_selection"], false);
+    assert_eq!(index_boot["focus_layout"], false);
+    assert_eq!(
+        index_boot["franken_term_js_url"],
+        serde_json::Value::String(FRANKENTERM_JS_ROUTE.to_string())
+    );
+    assert_eq!(
+        index_boot["franken_term_wasm_url"],
+        serde_json::Value::String(FRANKENTERM_WASM_ROUTE.to_string())
+    );
+    assert_eq!(
+        index_boot["franken_term_font_url"],
+        serde_json::Value::String(FRANKENTERM_FONT_ROUTE.to_string())
+    );
+    assert!(
+        index_html.find("window.__SWIMMERS_BOOT__").unwrap()
+            < index_html.find("<script type=\"module\"").unwrap()
+    );
+
+    let selected_response = selected_index().await.into_response();
+    assert_eq!(selected_response.status(), StatusCode::OK);
+    assert_eq!(
+        selected_response
+            .headers()
+            .get(header::CACHE_CONTROL)
+            .unwrap(),
+        "no-store"
+    );
+    let selected_html = response_text(selected_response).await;
+    let selected_boot = boot_payload_from_html(&selected_html);
+    assert_eq!(selected_boot["follow_published_selection"], true);
+    assert_eq!(selected_boot["focus_layout"], true);
+    assert!(selected_html.contains("app-body published-focus"));
+}
+
+#[tokio::test]
+async fn vite_manifest_tags_select_built_entry_css_and_compatibility_css_boundary() {
+    let dir = tempdir().expect("tempdir");
+    std::fs::create_dir_all(dir.path().join(".vite")).expect("manifest dir");
+    std::fs::write(
+        dir.path().join(".vite/manifest.json"),
+        r#"{
+  "src/web/app.js": {
+    "file": "assets/app-12345678.js",
+    "src": "src/web/app.js",
+    "isEntry": true,
+    "css": ["assets/app-87654321.css"]
+  },
+  "virtual:swimmers-app-css.css": {
+    "file": "assets/appCss-abcdef12.css",
+    "src": "virtual:swimmers-app-css.css",
+    "isEntry": true
+  }
+}"#,
+    )
+    .expect("write manifest");
+
+    let tags = frontend_asset_tags_from_dist_dir(dir.path())
+        .await
+        .expect("vite tags");
+    assert_eq!(
+        tags.stylesheets,
+        [
+            "/assets/vite/assets/app-87654321.css",
+            "/assets/vite/assets/appCss-abcdef12.css"
+        ]
+    );
+    assert_eq!(tags.module_scripts, ["/assets/vite/assets/app-12345678.js"]);
+
+    std::fs::write(
+        dir.path().join(".vite/manifest.json"),
+        r#"{
+  "src/web/app.js": {
+    "file": "assets/app-12345678.js",
+    "src": "src/web/app.js",
+    "isEntry": true
+  }
+}"#,
+    )
+    .expect("write manifest without css");
+    let tags = frontend_asset_tags_from_dist_dir(dir.path())
+        .await
+        .expect("vite tags without css");
+    assert_eq!(tags.stylesheets, [APP_CSS_ROUTE]);
+    assert_eq!(tags.module_scripts, ["/assets/vite/assets/app-12345678.js"]);
+}
+
+#[tokio::test]
+async fn vite_dist_asset_route_serves_built_js_css_and_chunks_with_cache_policy() {
+    let dir = tempdir().expect("tempdir");
+    let assets_dir = dir.path().join("assets");
+    std::fs::create_dir_all(&assets_dir).expect("assets dir");
+    std::fs::write(
+        assets_dir.join("app-12345678.js"),
+        "import './chunk-abcdef12.js';",
+    )
+    .expect("write app js");
+    std::fs::write(assets_dir.join("appCss-12345678.css"), ".terminal-stage{}").expect("write css");
+    std::fs::write(
+        assets_dir.join("chunk-abcdef12.js"),
+        "export const chunk = true;",
+    )
+    .expect("write chunk");
+    std::fs::write(assets_dir.join("app.js"), "console.log('alias');").expect("write alias");
+    std::fs::write(assets_dir.join("app-12345678.js.map"), "{}").expect("write map");
+
+    let cases = [
+        (
+            "assets/app-12345678.js",
+            "application/javascript; charset=utf-8",
+            "public, max-age=31536000, immutable",
+            "chunk-abcdef12",
+        ),
+        (
+            "assets/appCss-12345678.css",
+            "text/css; charset=utf-8",
+            "public, max-age=31536000, immutable",
+            "terminal-stage",
+        ),
+        (
+            "assets/chunk-abcdef12.js",
+            "application/javascript; charset=utf-8",
+            "public, max-age=31536000, immutable",
+            "export const chunk",
+        ),
+        (
+            "assets/app.js",
+            "application/javascript; charset=utf-8",
+            "no-store",
+            "alias",
+        ),
+    ];
+    for (route, content_type, cache_control, needle) in cases {
+        let response = serve_vite_dist_asset(dir.path(), route).await;
+        assert_eq!(response.status(), StatusCode::OK, "{route}");
+        assert_eq!(
+            response.headers().get(header::CONTENT_TYPE).unwrap(),
+            content_type,
+            "{route}"
+        );
+        assert_eq!(
+            response.headers().get(header::CACHE_CONTROL).unwrap(),
+            cache_control,
+            "{route}"
+        );
+        let body = response_text(response).await;
+        assert!(body.contains(needle), "{route}");
+    }
+
+    for route in [
+        "../secrets.js",
+        "assets/../secrets.js",
+        "assets/app-12345678.js.map",
+        ".vite/manifest.json",
+    ] {
+        let response = serve_vite_dist_asset(dir.path(), route).await;
+        assert_eq!(response.status(), StatusCode::NOT_FOUND, "{route}");
+        let body = response_json(response).await;
+        assert_eq!(body["code"], "VITE_ASSET_NOT_FOUND", "{route}");
+    }
+}
+
+#[test]
+fn vite_dev_origin_tags_use_vite_modules_without_replacing_backend_css() {
+    assert_eq!(
+        normalize_vite_dev_origin(" http://127.0.0.1:5173/ "),
+        Some("http://127.0.0.1:5173".to_string())
+    );
+    assert!(normalize_vite_dev_origin("ftp://127.0.0.1:5173").is_none());
+    assert!(normalize_vite_dev_origin("http://127.0.0.1:5173\"").is_none());
+
+    let tags = frontend_asset_tags_for_vite_dev_origin("http://127.0.0.1:5173/");
+    assert_eq!(tags.stylesheets, [APP_CSS_ROUTE]);
+    assert_eq!(
+        tags.module_scripts,
+        [
+            "http://127.0.0.1:5173/@vite/client",
+            "http://127.0.0.1:5173/src/web/app.js"
+        ]
+    );
+    assert!(tags
+        .module_scripts
+        .iter()
+        .chain(tags.stylesheets.iter())
+        .all(|route| !route.contains("/assets/frankenterm/")));
+}
+
+#[tokio::test]
 async fn browser_js_asset_handlers_cover_app_module_graph() {
     let assets = [
         (APP_JS_ROUTE, app_js().await, "from \"./api_client.js\""),
@@ -635,6 +847,11 @@ async fn browser_js_asset_handlers_cover_app_module_graph() {
             "application/javascript; charset=utf-8",
             "{route}"
         );
+        assert_eq!(
+            response.headers().get(header::CACHE_CONTROL).unwrap(),
+            "no-store",
+            "{route}"
+        );
         let body = to_bytes(response.into_body(), usize::MAX)
             .await
             .expect("js body");
@@ -826,6 +1043,51 @@ async fn frankentui_asset_response_helpers_preserve_headers_and_error_payloads()
         .as_str()
         .expect("message")
         .contains("FrankenTerm_bg.wasm"));
+}
+
+#[tokio::test]
+async fn frankenterm_backend_asset_readers_serve_js_and_wasm_without_vite_routes() {
+    let dir = tempdir().expect("tempdir");
+    std::fs::write(
+        dir.path().join("FrankenTerm.js"),
+        "export default async function init() {}",
+    )
+    .expect("write js");
+    std::fs::write(dir.path().join("FrankenTerm_bg.wasm"), b"\0asm").expect("write wasm");
+
+    let js_response = read_frankentui_asset_response(
+        "FrankenTerm.js",
+        "application/javascript; charset=utf-8",
+        dir.path(),
+    )
+    .await;
+    assert_eq!(js_response.status(), StatusCode::OK);
+    assert_eq!(
+        js_response.headers().get(header::CONTENT_TYPE).unwrap(),
+        "application/javascript; charset=utf-8"
+    );
+    assert_eq!(
+        js_response.headers().get(header::CACHE_CONTROL).unwrap(),
+        "no-store"
+    );
+    let js = response_text(js_response).await;
+    assert!(js.contains("export default"));
+
+    let wasm_response =
+        read_frankentui_asset_response("FrankenTerm_bg.wasm", "application/wasm", dir.path()).await;
+    assert_eq!(wasm_response.status(), StatusCode::OK);
+    assert_eq!(
+        wasm_response.headers().get(header::CONTENT_TYPE).unwrap(),
+        "application/wasm"
+    );
+    assert_eq!(
+        wasm_response.headers().get(header::CACHE_CONTROL).unwrap(),
+        "no-store"
+    );
+    let body = to_bytes(wasm_response.into_body(), usize::MAX)
+        .await
+        .expect("wasm body");
+    assert_eq!(&body[..], b"\0asm");
 }
 
 #[tokio::test]
