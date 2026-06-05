@@ -731,6 +731,31 @@ async fn browser_js_asset_handlers_cover_app_module_graph() {
             "export async function initializeTerminalSurface",
         ),
         (
+            APP_JS_ROUTE,
+            app_js().await,
+            "from \"./terminal_island.js\"",
+        ),
+        (
+            TERMINAL_ISLAND_JS_ROUTE,
+            terminal_island_js().await,
+            "export function createTerminalSurfaceIsland",
+        ),
+        (
+            TERMINAL_ISLAND_JS_ROUTE,
+            terminal_island_js().await,
+            "from \"./terminal_surface_controller.js\"",
+        ),
+        (
+            TERMINAL_SURFACE_CONTROLLER_JS_ROUTE,
+            terminal_surface_controller_js().await,
+            "export function createFrankenTermRuntimeAdapter",
+        ),
+        (
+            TERMINAL_SURFACE_CONTROLLER_JS_ROUTE,
+            terminal_surface_controller_js().await,
+            "from \"./terminal_surface_setup.js\"",
+        ),
+        (
             TERMINAL_RESIZE_JS_ROUTE,
             terminal_resize_js().await,
             "export function runTerminalSurfaceResize",
@@ -1232,7 +1257,10 @@ fn app_js_exposes_terminal_viewer_ergonomics() {
     assert!(js.contains("focusMobileKeyboard"));
     assert!(js.contains("mobileKeyboardProxy"));
     assert!(js.contains("function openCommandPalette()"));
-    assert!(js.contains("createFrankenTermRuntimeAdapter"));
+    let terminal_island = include_str!("terminal_island.js");
+    assert!(js.contains("createTerminalSurfaceIsland"));
+    assert!(terminal_island.contains("createFrankenTermRuntimeAdapter"));
+    assert!(terminal_island.contains("createTerminalSurfaceIslandElements"));
     assert!(terminal_surface_controller.contains("createTerminalSurfaceRuntimeHelpers"));
     assert!(js.contains("syncTerminalAccessibilityMirror,"));
     assert!(terminal_surface_setup.contains("function syncTerminalAccessibilityMirror"));

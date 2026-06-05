@@ -5,6 +5,7 @@ import {
   SWIMMERS_REACT_ROOT_ID,
   SWIMMERS_STABLE_CONTAINER_IDS,
   SwimmersRootShell,
+  TerminalSurface,
   mountSwimmersRootShell,
   resolveStableShellContainers,
 } from "./react_shell.js";
@@ -120,6 +121,28 @@ test("React shell identity guard catches synchronous container replacement", () 
   );
 });
 
+test("React shell identity guard catches fallback and mirror replacement", () => {
+  for (const key of ["terminalFallback", "terminalA11yMirror"]) {
+    const { documentRef, replace } = fakeDocument();
+    const handle = mountSwimmersRootShell({
+      documentRef,
+      root: documentRef.getElementById(SWIMMERS_REACT_ROOT_ID),
+      hydrateRootImpl() {
+        return {
+          render() {
+            replace(SWIMMERS_STABLE_CONTAINER_IDS[key]);
+          },
+        };
+      },
+    });
+
+    assert.throws(
+      () => handle.render({ franken_term_available: true }),
+      new RegExp(`replaced stable container ${key}`),
+    );
+  }
+});
+
 test("React shell element declares the stable terminal and Trogdor island host", () => {
   const element = SwimmersRootShell({
     boot: { franken_term_available: true, focus_layout: true },
@@ -127,14 +150,19 @@ test("React shell element declares the stable terminal and Trogdor island host",
   const childIds = element.props.children
     .map((child) => child?.props?.id)
     .filter(Boolean);
+  const terminalSurface = element.props.children.find((child) => child?.type === TerminalSurface);
+  const terminalSurfaceIds = TerminalSurface()
+    .map((child) => child?.props?.id)
+    .filter(Boolean);
 
   assert.equal(element.type, "main");
   assert.equal(element.props.id, SWIMMERS_STABLE_CONTAINER_IDS.terminalStage);
   assert.equal(element.props["data-franken-term-available"], "true");
   assert.equal(element.props["data-focus-layout"], "true");
-  assert.ok(childIds.includes(SWIMMERS_STABLE_CONTAINER_IDS.terminalCanvas));
-  assert.ok(childIds.includes(SWIMMERS_STABLE_CONTAINER_IDS.hudCanvas));
-  assert.ok(childIds.includes(SWIMMERS_STABLE_CONTAINER_IDS.terminalFallback));
-  assert.ok(childIds.includes(SWIMMERS_STABLE_CONTAINER_IDS.terminalA11yMirror));
+  assert.equal(terminalSurface.type, TerminalSurface);
+  assert.ok(terminalSurfaceIds.includes(SWIMMERS_STABLE_CONTAINER_IDS.terminalCanvas));
+  assert.ok(terminalSurfaceIds.includes(SWIMMERS_STABLE_CONTAINER_IDS.hudCanvas));
+  assert.ok(terminalSurfaceIds.includes(SWIMMERS_STABLE_CONTAINER_IDS.terminalFallback));
+  assert.ok(terminalSurfaceIds.includes(SWIMMERS_STABLE_CONTAINER_IDS.terminalA11yMirror));
   assert.ok(childIds.includes(SWIMMERS_STABLE_CONTAINER_IDS.trogdorSurface));
 });

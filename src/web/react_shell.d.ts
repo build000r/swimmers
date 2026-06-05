@@ -25,6 +25,7 @@ export interface SwimmersRootShellHandle {
 export const SWIMMERS_REACT_ROOT_ID: "swimmers-react-root";
 export const SWIMMERS_STABLE_CONTAINER_IDS: Readonly<Record<keyof StableShellContainers, string>>;
 
+export function TerminalSurface(): unknown;
 export function SwimmersRootShell(props: SwimmersRootShellProps): unknown;
 export function resolveSwimmersReactRoot(documentRef?: Document): HTMLElement | null;
 export function resolveStableShellContainers(documentRef?: Document): StableShellContainers;

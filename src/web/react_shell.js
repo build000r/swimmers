@@ -3,6 +3,10 @@ import { hydrateRoot } from "react-dom/client";
 
 import { normalizeBootPayload } from "./contracts.js";
 import {
+  TERMINAL_SURFACE_ISLAND_IDS,
+  createTerminalSurfaceIslandElements,
+} from "./terminal_island.js";
+import {
   TROGDOR_ATLAS_ISLAND_ID,
   createTrogdorAtlasIslandElement,
 } from "./trogdor_island.js";
@@ -11,11 +15,11 @@ export const SWIMMERS_REACT_ROOT_ID = "swimmers-react-root";
 
 export const SWIMMERS_STABLE_CONTAINER_IDS = Object.freeze({
   terminalStage: "terminal-stage",
-  terminalCanvas: "terminal-canvas",
-  hudCanvas: "hud-canvas",
-  terminalFallback: "terminal-fallback",
-  terminalA11yMirror: "terminal-a11y-mirror",
-  terminalAnnouncer: "terminal-announcer",
+  terminalCanvas: TERMINAL_SURFACE_ISLAND_IDS.terminalCanvas,
+  hudCanvas: TERMINAL_SURFACE_ISLAND_IDS.hudCanvas,
+  terminalFallback: TERMINAL_SURFACE_ISLAND_IDS.terminalFallback,
+  terminalA11yMirror: TERMINAL_SURFACE_ISLAND_IDS.terminalA11yMirror,
+  terminalAnnouncer: TERMINAL_SURFACE_ISLAND_IDS.terminalAnnouncer,
   trogdorSurface: TROGDOR_ATLAS_ISLAND_ID,
 });
 
@@ -23,6 +27,10 @@ const h = React.createElement;
 
 function boolAttr(value) {
   return value ? "true" : "false";
+}
+
+export function TerminalSurface() {
+  return createTerminalSurfaceIslandElements(h);
 }
 
 export function SwimmersRootShell({ boot }) {
@@ -38,58 +46,7 @@ export function SwimmersRootShell({ boot }) {
       "data-franken-term-available": boolAttr(normalizedBoot.franken_term_available),
       "data-focus-layout": boolAttr(normalizedBoot.focus_layout),
     },
-    h("canvas", { className: "terminal-canvas hidden", id: "terminal-canvas" }),
-    h("canvas", {
-      className: "hud-canvas hidden",
-      id: "hud-canvas",
-      "aria-hidden": "true",
-    }),
-    h("pre", {
-      className: "terminal-fallback hidden",
-      id: "terminal-fallback",
-      tabIndex: 0,
-      "aria-label": "Live terminal text fallback",
-    }),
-    h("textarea", {
-      className: "terminal-a11y-mirror",
-      id: "terminal-a11y-mirror",
-      "aria-label": "Live terminal text mirror",
-      readOnly: true,
-      tabIndex: -1,
-    }),
-    h("div", {
-      className: "terminal-announcer",
-      id: "terminal-announcer",
-      "aria-live": "polite",
-      "aria-atomic": "false",
-    }),
-    h("div", {
-      className: "terminal-status-strip",
-      id: "terminal-status-strip",
-      "aria-live": "polite",
-    }),
-    h(
-      "div",
-      {
-        className: "terminal-link-tools hidden",
-        id: "terminal-link-tools",
-        role: "group",
-        "aria-label": "Terminal link actions",
-      },
-      h("span", { id: "terminal-link-text" }),
-      h("button", { id: "terminal-link-open", type: "button" }, "Open"),
-      h("button", { id: "terminal-link-copy", type: "button" }, "Copy"),
-    ),
-    h(
-      "div",
-      {
-        className: "loading-overlay visible",
-        id: "loading-overlay",
-        "aria-hidden": "true",
-      },
-      h("div", { className: "loading-label", id: "loading-label" }, "Loading FrankenTerm…"),
-      h("div", { className: "loading-bar" }, h("div", { className: "loading-bar-fill" })),
-    ),
+    h(TerminalSurface),
     createTrogdorAtlasIslandElement(h),
   );
 }

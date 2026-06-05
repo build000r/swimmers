@@ -19,8 +19,8 @@ import {
   createNativeDesktopSheetController,
 } from "./native_desktop_sheet.js";
 import {
-  createFrankenTermRuntimeAdapter,
-} from "./terminal_surface_controller.js";
+  createTerminalSurfaceIsland,
+} from "./terminal_island.js";
 import {
   assertFrankenTermModule,
   canvasHasVisiblePixels,
@@ -728,11 +728,11 @@ const {
   applyTerminalPaintVerificationPlan,
   verifyTerminalPaintOrFallback,
   terminalCanvasHasVisiblePixels,
-} = createFrankenTermRuntimeAdapter({
+} = createTerminalSurfaceIsland({
   state,
   el,
   boot,
-  canvases: {
+  refs: {
     terminalCanvas: el.terminalCanvas,
     hudCanvas: el.hudCanvas,
   },
