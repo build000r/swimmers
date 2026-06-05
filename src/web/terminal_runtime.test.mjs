@@ -315,7 +315,7 @@ function baseAdapterRuntime(overrides = {}) {
       refreshSnapshotFallback: async () => false,
       canvasHasVisiblePixels: () => false,
       windowRef: { location: { href: "http://swimmers.test/app" } },
-      documentRef: {},
+      documentRef: { body: element("body") },
       URLImpl: URL,
       WebSocketClass: { OPEN: 1 },
       Uint8ArrayClass: Uint8Array,
@@ -490,5 +490,288 @@ test("FrankenTerm adapter initializes terminal surface and flushes buffered byte
     ["flushEncodedInputBytes"],
     ["drainTerminalLinkClicks"],
     ["render"],
+  ]);
+});
+
+test("FrankenTerm adapter activates snapshot fallback when renderer assets are unavailable", async () => {
+  const { calls, runtime, state, el } = baseAdapterRuntime({
+    boot: { franken_term_available: false },
+  });
+  let adapter = null;
+  runtime.importModule = async () => {
+    throw new Error("asset import should not run");
+  };
+  runtime.refreshSnapshotFallback = async () => {
+    calls.push([
+      "refreshSnapshotFallback",
+      state.terminalFallbackActive,
+      el.terminalFallback["aria-hidden"],
+    ]);
+    adapter.updateTerminalFallbackText("snapshot prompt\n$ cargo test");
+    return true;
+  };
+  adapter = createFrankenTermRuntimeAdapter(runtime);
+
+  assert.equal(await adapter.ensureFrankenTerm(), null);
+  await adapter.setupTerminalSurface();
+
+  assert.equal(state.terminalFallbackActive, true);
+  assert.equal(el.terminalFallback["aria-hidden"], "false");
+  assert.equal(el.terminalFallback.textContent, "snapshot prompt\n$ cargo test");
+  assert.equal(el.terminalA11yMirror.value, "snapshot prompt\n$ cargo test");
+  assert.deepEqual(
+    calls.find((call) => call[0] === "refreshSnapshotFallback"),
+    ["refreshSnapshotFallback", true, "false"],
+  );
+  assert.equal(calls.some((call) => call[0] === "import"), false);
+});
+
+test("FrankenTerm adapter records module validation errors and allows load retry", async () => {
+  const { calls, runtime, state } = baseAdapterRuntime();
+  runtime.importModule = async () => ({ default: async () => calls.push(["wasm"]) });
+  const adapter = createFrankenTermRuntimeAdapter(runtime);
+
+  await assert.rejects(
+    () => adapter.ensureFrankenTerm(),
+    /FrankenTerm module is missing FrankenTermWeb/,
+  );
+  assert.equal(state.frankenInit, null);
+  assert.equal(state.frankenModule, null);
+  assert.match(state.frankenLoadError, /missing FrankenTermWeb/);
+
+  const mod = {
+    default: async () => calls.push(["wasm-retry"]),
+    FrankenTermWeb: function FrankenTermWeb() {},
+  };
+  runtime.importModule = async () => mod;
+  assert.equal(await adapter.ensureFrankenTerm(), mod);
+  assert.equal(state.frankenModule, mod);
+  assert.equal(state.frankenLoadError, "");
+  assert.deepEqual(calls, [["wasm-retry"]]);
+});
+
+test("FrankenTerm adapter falls back when terminal surface init fails", async () => {
+  const { calls, runtime, state, el } = baseAdapterRuntime();
+
+  class FailingSurface {
+    async init() {
+      throw new Error("init exploded");
+    }
+
+    destroy() {
+      calls.push(["destroy"]);
+    }
+
+    feed() {}
+
+    render() {}
+
+    fitToContainer() {
+      return { cols: 80, rows: 24 };
+    }
+
+    resize() {}
+  }
+
+  runtime.importModule = async () => ({
+    default: async () => calls.push(["wasm"]),
+    FrankenTermWeb: FailingSurface,
+  });
+  runtime.refreshSnapshotFallback = async () => {
+    calls.push(["refreshSnapshotFallback", state.terminalFallbackActive]);
+    return false;
+  };
+  const adapter = createFrankenTermRuntimeAdapter(runtime);
+
+  await adapter.setupTerminalSurface();
+
+  assert.equal(state.terminal, null);
+  assert.equal(state.terminalFallbackActive, true);
+  assert.equal(el.terminalFallback["aria-hidden"], "false");
+  assert.deepEqual(
+    calls.find((call) => call[0] === "refreshSnapshotFallback"),
+    ["refreshSnapshotFallback", true],
+  );
+  assert.deepEqual(
+    calls.find((call) => call[0] === "setUtilityStatus"),
+    [
+      "setUtilityStatus",
+      "Live terminal renderer unavailable: init exploded",
+      true,
+      3600,
+    ],
+  );
+  assert.deepEqual(calls.at(-2), ["setLoadingState", false]);
+});
+
+test("FrankenTerm adapter reuses same-session terminal without reinitializing", async () => {
+  const { calls, runtime, state, el } = baseAdapterRuntime({
+    state: adapterState({
+      frankenModule: {
+        default: async () => calls.push(["wasm"]),
+        FrankenTermWeb: function FrankenTermWeb() {},
+      },
+      terminalSessionId: "sess-1",
+    }),
+  });
+  state.frankenInit = Promise.resolve(state.frankenModule);
+  state.terminal = {
+    destroy() {
+      calls.push(["destroy"]);
+    },
+    init() {
+      calls.push(["init"]);
+    },
+    render() {
+      calls.push(["render"]);
+    },
+    screenReaderMirrorText() {
+      return "same-session";
+    },
+  };
+  el.terminalCanvas.classList.add("hidden");
+  el.terminalFallback.classList.add("hidden");
+  const adapter = createFrankenTermRuntimeAdapter(runtime);
+
+  await adapter.setupTerminalSurface();
+
+  assert.equal(state.terminalSessionId, "sess-1");
+  assert.equal(state.terminalMirrorText, "same-session");
+  assert.equal(el.terminalA11yMirror.value, "same-session");
+  assert.equal(el.terminalCanvas.classList.contains("hidden"), false);
+  assert.equal(el.terminalFallback.classList.contains("hidden"), true);
+  assert.deepEqual(calls, [
+    ["stopSnapshotPolling"],
+    ["refreshTerminalSearch"],
+    ["syncTerminalTools"],
+    ["setLoadingState", false],
+  ]);
+});
+
+test("FrankenTerm adapter defers resize and render work while a surface is busy", () => {
+  const timers = [];
+  const { calls, runtime, state } = baseAdapterRuntime({
+    state: adapterState({ surfaceInitInProgress: 1 }),
+    runtime: {
+      setTimeoutRef: (callback) => {
+        timers.push(callback);
+        return timers.length;
+      },
+    },
+  });
+  state.terminal = {
+    render() {
+      calls.push(["render"]);
+    },
+  };
+  const adapter = createFrankenTermRuntimeAdapter(runtime);
+
+  adapter.queueMeasureAndResizeSurface(true, true);
+  assert.equal(state.resizeQueued, true);
+  assert.equal(state.resizePushResize, true);
+  assert.equal(state.resizeForce, true);
+  timers.shift()();
+  assert.equal(state.resizeQueued, true);
+  assert.equal(calls.some((call) => call[0] === "runTerminalSurfaceResize"), false);
+
+  state.surfaceInitInProgress = 0;
+  adapter.queueMeasureAndResizeSurface(false, false);
+  timers.shift()();
+  assert.equal(state.resizeQueued, false);
+  assert.equal(state.resizePushResize, false);
+  assert.equal(state.resizeForce, false);
+  assert.deepEqual(calls, [["runTerminalSurfaceResize"]]);
+
+  calls.length = 0;
+  state.surfaceInitInProgress = 1;
+  adapter.scheduleRender();
+  assert.equal(state.renderQueued, false);
+  assert.equal(state.renderRetryQueued, true);
+  timers.shift()();
+  assert.equal(state.renderRetryQueued, false);
+  assert.deepEqual(calls, []);
+
+  state.surfaceInitInProgress = 0;
+  adapter.scheduleRender();
+  assert.deepEqual(calls, [["render"]]);
+});
+
+test("FrankenTerm adapter syncs accessibility mirror and announcements", () => {
+  const { runtime, state, el } = baseAdapterRuntime();
+  state.terminal = {
+    screenReaderMirrorText() {
+      return "visible terminal text";
+    },
+    drainAccessibilityAnnouncements() {
+      return ["build started", "build passed"];
+    },
+  };
+  const adapter = createFrankenTermRuntimeAdapter(runtime);
+
+  adapter.syncTerminalAccessibilityMirror();
+
+  assert.equal(state.terminalMirrorText, "visible terminal text");
+  assert.equal(el.terminalA11yMirror.value, "visible terminal text");
+  assert.equal(el.terminalAnnouncer.textContent, "build started\nbuild passed");
+});
+
+test("FrankenTerm adapter preserves fallback snapshot ordering during paint verification", async () => {
+  const { calls, runtime, state, el } = baseAdapterRuntime({
+    state: adapterState({
+      terminal: {
+        render() {},
+      },
+    }),
+  });
+  let phase = 0;
+  let adapter = null;
+  runtime.terminalPaintVerificationPlan = (context) => {
+    calls.push([
+      "paintPlan",
+      phase,
+      context.terminalFallbackActive,
+      context.afterSnapshotRefresh ?? false,
+      context.hasSnapshotText ?? null,
+    ]);
+    phase += 1;
+    if (phase === 1) {
+      return { type: "check_canvas", done: false };
+    }
+    if (phase === 2) {
+      return { type: "refresh_snapshot", done: false };
+    }
+    if (phase === 3) {
+      return {
+        type: "activate_fallback",
+        done: true,
+        fallbackActive: true,
+        clearText: false,
+      };
+    }
+    return { type: "ignore", done: true };
+  };
+  runtime.refreshSnapshotFallback = async () => {
+    calls.push(["refreshSnapshotFallback", state.terminalFallbackActive]);
+    adapter.updateTerminalFallbackText("snapshot after blank canvas");
+    return true;
+  };
+  adapter = createFrankenTermRuntimeAdapter(runtime);
+
+  await adapter.verifyTerminalPaintOrFallback();
+
+  assert.equal(state.terminalFallbackActive, true);
+  assert.equal(el.terminalFallback.textContent, "snapshot after blank canvas");
+  assert.equal(el.terminalA11yMirror.value, "snapshot after blank canvas");
+  assert.deepEqual(calls, [
+    ["paintPlan", 0, false, false, null],
+    ["paintPlan", 1, false, false, null],
+    ["refreshSnapshotFallback", false],
+    ["paintPlan", 2, false, true, null],
+    ["startSnapshotPolling"],
+    ["focusTerminalInputSurface"],
+    ["syncTerminalStatusStrip"],
+    ["syncTerminalInputDock"],
+    ["syncTrogdorBackButton"],
+    ["syncTerminalWorkbench"],
   ]);
 });
