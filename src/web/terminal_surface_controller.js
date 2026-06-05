@@ -1,5 +1,22 @@
-export function createTerminalSurfaceController(runtime) {
-  const { state, el, boot } = runtime;
+import { createTerminalSurfaceRuntimeHelpers } from "./terminal_surface_setup.js";
+
+export function resolveStableFrankenTermCanvases(canvases = {}) {
+  const terminalCanvas = canvases.terminalCanvas?.current ?? canvases.terminalCanvas;
+  const hudCanvas = canvases.hudCanvas?.current ?? canvases.hudCanvas;
+  if (!terminalCanvas) {
+    throw new Error("FrankenTerm runtime adapter requires a stable terminalCanvas element or ref");
+  }
+  if (!hudCanvas) {
+    throw new Error("FrankenTerm runtime adapter requires a stable hudCanvas element or ref");
+  }
+  return { terminalCanvas, hudCanvas };
+}
+
+export function createFrankenTermRuntimeAdapter(runtime) {
+  const { state, boot } = runtime;
+  const canvases = resolveStableFrankenTermCanvases(runtime.canvases);
+  const el = { ...runtime.el, ...canvases };
+  let controller = null;
 
   async function loadFrankenTermFont() {
     if (!boot.franken_term_font_url || !runtime.documentRef.fonts?.load) {
@@ -48,6 +65,45 @@ export function createTerminalSurfaceController(runtime) {
 
     return state.frankenInit;
   }
+
+  const adapterRuntime = {
+    ...runtime,
+    el,
+    loadFrankenTermFont,
+    ensureFrankenTerm,
+    teardownTerminal: (...args) => controller.teardownTerminal(...args),
+    destroyTerminalInstance: (...args) => controller.destroyTerminalInstance(...args),
+    measureAndResizeSurface: (...args) => controller.measureAndResizeSurface(...args),
+    feedTerminalBytes: (...args) => controller.feedTerminalBytes(...args),
+  };
+  const helpers = createTerminalSurfaceRuntimeHelpers(adapterRuntime);
+  Object.assign(adapterRuntime, helpers);
+  adapterRuntime.terminalResizeRuntime = {
+    state,
+    el,
+    surfaceBusy: (...args) => controller.surfaceBusy(...args),
+    queueMeasureAndResizeSurface: (...args) => controller.queueMeasureAndResizeSurface(...args),
+    withSurfaceOperation: (...args) => controller.withSurfaceOperation(...args),
+    renderHudSurface: (...args) => controller.renderHudSurface(...args),
+    scheduleRender: (...args) => controller.scheduleRender(...args),
+    sendResize: (...args) => controller.sendResize(...args),
+    captureTerminalRendererDiagnostic: (...args) => controller.captureTerminalRendererDiagnostic(...args),
+    devicePixelRatio: runtime.devicePixelRatio,
+  };
+  controller = createTerminalSurfaceController(adapterRuntime);
+  return {
+    ...helpers,
+    ...controller,
+    loadFrankenTermFont,
+    ensureFrankenTerm,
+    canvases,
+    terminalResizeRuntime: adapterRuntime.terminalResizeRuntime,
+  };
+}
+
+export function createTerminalSurfaceController(runtime) {
+  const { state, el, boot } = runtime;
+  const { loadFrankenTermFont, ensureFrankenTerm } = runtime;
 
   async function setupHudSurface() {
     const mod = await ensureFrankenTerm();

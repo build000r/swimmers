@@ -1182,6 +1182,7 @@ fn app_js_exposes_terminal_viewer_ergonomics() {
     let js = include_str!("app.js");
     let terminal_search_links = include_str!("terminal_search_links.js");
     let terminal_surface_setup = include_str!("terminal_surface_setup.js");
+    let terminal_surface_controller = include_str!("terminal_surface_controller.js");
     let terminal_zoom_input = include_str!("terminal_zoom_input.js");
     let agent_context_refresh = include_str!("agent_context_refresh.js");
     let workbench_render = include_str!("workbench_render.js");
@@ -1193,7 +1194,8 @@ fn app_js_exposes_terminal_viewer_ergonomics() {
     assert!(js.contains("focusMobileKeyboard"));
     assert!(js.contains("mobileKeyboardProxy"));
     assert!(js.contains("function openCommandPalette()"));
-    assert!(js.contains("createTerminalSurfaceRuntimeHelpers"));
+    assert!(js.contains("createFrankenTermRuntimeAdapter"));
+    assert!(terminal_surface_controller.contains("createTerminalSurfaceRuntimeHelpers"));
     assert!(js.contains("syncTerminalAccessibilityMirror,"));
     assert!(terminal_surface_setup.contains("function syncTerminalAccessibilityMirror"));
     assert!(js.contains("createTerminalSearchLinksController"));

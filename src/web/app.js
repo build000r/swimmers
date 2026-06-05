@@ -19,10 +19,7 @@ import {
   createNativeDesktopSheetController,
 } from "./native_desktop_sheet.js";
 import {
-  createTerminalSurfaceRuntimeHelpers,
-} from "./terminal_surface_setup.js";
-import {
-  createTerminalSurfaceController,
+  createFrankenTermRuntimeAdapter,
 } from "./terminal_surface_controller.js";
 import {
   assertFrankenTermModule,
@@ -326,6 +323,15 @@ const {
 
 const defaultDocumentTitle = document.title || "swimmers";
 let terminalZoomInputController;
+let clearPendingTerminalBytes;
+let bufferTerminalBytes;
+let flushPendingTerminalBytes;
+let setTerminalTextFallbackActive;
+let terminalFallbackIsNearBottom;
+let updateTerminalFallbackText;
+let syncTerminalAccessibilityMirror;
+let syncTerminalFallbackFromLiveFrame;
+let setupTerminalSurface;
 let loadFrankenTermFont;
 let ensureFrankenTerm;
 let setupHudSurface;
@@ -654,60 +660,13 @@ const {
   shouldCaptureKey,
 } = terminalFocusController;
 
-const terminalSurfaceRuntime = {
-  state,
-  el,
-  requiredTerminalMethods: FRANKENTERM_TERMINAL_METHODS,
-  maxPendingTerminalBytes: MAX_PENDING_TERMINAL_BYTES,
-  validateFrankenTermSurface,
-  teardownTerminal: (...args) => teardownTerminal(...args),
-  destroyTerminalInstance: (...args) => destroyTerminalInstance(...args),
-  currentSession,
-  ensureFrankenTerm: (...args) => ensureFrankenTerm(...args),
-  stopSnapshotPolling,
-  startSnapshotPolling,
-  focusTerminalInputSurface,
-  refreshSnapshotFallback,
-  setLoadingState,
-  setUtilityStatus,
-  setConnectionStatus,
-  terminalSupports,
-  frankenTermLinkPolicy,
-  applyZoomToSurface,
-  clearTerminalSelection,
-  refreshTerminalSearch,
-  syncTerminalTools,
-  syncTerminalStatusStrip,
-  measureAndResizeSurface: (...args) => measureAndResizeSurface(...args),
-  feedTerminalBytes: (...args) => feedTerminalBytes(...args),
-  prefersReducedMotion: () => window.matchMedia?.("(prefers-reduced-motion: reduce)")?.matches ?? false,
-};
-
-const {
-  clearPendingTerminalBytes,
-  bufferTerminalBytes,
-  flushPendingTerminalBytes,
-  setTerminalTextFallbackActive,
-  terminalFallbackIsNearBottom,
-  updateTerminalFallbackText,
-  syncTerminalAccessibilityMirror,
-  syncTerminalFallbackFromLiveFrame,
-  setupTerminalSurface,
-} = createTerminalSurfaceRuntimeHelpers(terminalSurfaceRuntime);
-
-Object.assign(terminalSurfaceRuntime, {
-  flushPendingTerminalBytes,
-  setTerminalTextFallbackActive,
-  syncTerminalAccessibilityMirror,
-});
-
 const sessionSocketRuntime = {
   state,
   window,
   WebSocketClass: window.WebSocket,
   currentSession,
   setupHudSurface: (...args) => setupHudSurface(...args),
-  setupTerminalSurface,
+  setupTerminalSurface: (...args) => setupTerminalSurface(...args),
   teardownTerminal: (...args) => teardownTerminal(...args),
   disconnectSocket: (...args) => disconnectSocket(...args),
   measureAndResizeSurface: (...args) => measureAndResizeSurface(...args),
@@ -733,20 +692,16 @@ const {
   handleSocketText,
 } = createSessionSocketController(sessionSocketRuntime);
 
-const terminalResizeRuntime = {
-  state,
-  el,
-  surfaceBusy: (...args) => surfaceBusy(...args),
-  queueMeasureAndResizeSurface: (...args) => queueMeasureAndResizeSurface(...args),
-  withSurfaceOperation: (...args) => withSurfaceOperation(...args),
-  renderHudSurface: (...args) => renderHudSurface(...args),
-  scheduleRender: (...args) => scheduleRender(...args),
-  sendResize: (...args) => sendResize(...args),
-  captureTerminalRendererDiagnostic: (...args) => captureTerminalRendererDiagnostic(...args),
-  devicePixelRatio: () => window.devicePixelRatio || 1,
-};
-
 ({
+  clearPendingTerminalBytes,
+  bufferTerminalBytes,
+  flushPendingTerminalBytes,
+  setTerminalTextFallbackActive,
+  terminalFallbackIsNearBottom,
+  updateTerminalFallbackText,
+  syncTerminalAccessibilityMirror,
+  syncTerminalFallbackFromLiveFrame,
+  setupTerminalSurface,
   loadFrankenTermFont,
   ensureFrankenTerm,
   setupHudSurface,
@@ -772,10 +727,16 @@ const terminalResizeRuntime = {
   applyTerminalPaintVerificationPlan,
   verifyTerminalPaintOrFallback,
   terminalCanvasHasVisiblePixels,
-} = createTerminalSurfaceController({
+} = createFrankenTermRuntimeAdapter({
   state,
   el,
   boot,
+  canvases: {
+    terminalCanvas: el.terminalCanvas,
+    hudCanvas: el.hudCanvas,
+  },
+  requiredTerminalMethods: FRANKENTERM_TERMINAL_METHODS,
+  maxPendingTerminalBytes: MAX_PENDING_TERMINAL_BYTES,
   hudMethods: FRANKENTERM_HUD_METHODS,
   assertFrankenTermModule,
   canvasHasVisiblePixels,
@@ -785,7 +746,6 @@ const terminalResizeRuntime = {
   validateFrankenTermSurface,
   runSurfaceOperation,
   runTerminalSurfaceResize,
-  terminalResizeRuntime,
   terminalDestroyStatePatch,
   terminalPaintProbeSchedulePlan,
   terminalPaintVerificationPlan,
@@ -797,16 +757,20 @@ const terminalResizeRuntime = {
   sessionBurnt: trogdorSessionBurnt,
   normalizeSessionId,
   terminalSupports,
+  frankenTermLinkPolicy,
   clearReconnectTimer,
   clearHoveredLink,
-  clearPendingTerminalBytes,
-  bufferTerminalBytes,
   flushEncodedInputBytes,
-  setTerminalTextFallbackActive,
+  startSnapshotPolling,
+  focusTerminalInputSurface,
   syncTerminalTools,
+  syncTerminalStatusStrip,
   stopSnapshotPolling,
   applyZoomToSurface,
+  clearTerminalSelection,
   setLoadingState,
+  setUtilityStatus,
+  setConnectionStatus,
   renderTrogdorSurface,
   advanceTrogdorReaderProgressForCurrentHover,
   syncTerminalInputDock,
@@ -827,6 +791,7 @@ const terminalResizeRuntime = {
   setTimeoutRef: (callback, delay) => window.setTimeout(callback, delay),
   clearTimeoutRef: (timer) => window.clearTimeout(timer),
   prefersReducedMotion: () => window.matchMedia?.("(prefers-reduced-motion: reduce)")?.matches ?? false,
+  devicePixelRatio: () => window.devicePixelRatio || 1,
   isoTimestamp: () => new Date().toISOString(),
   now: () => performance.now(),
 }));
