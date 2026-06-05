@@ -330,6 +330,7 @@ let authSheetIsland = null;
 let thoughtConfigSheetIsland = null;
 let nativeDesktopSheetIsland = null;
 let createSheetIsland = null;
+let mermaidSheetIsland = null;
 let terminalZoomInputController;
 let clearPendingTerminalBytes;
 let bufferTerminalBytes;
@@ -2055,6 +2056,25 @@ async function mountCreateSheetReactIsland() {
   }
 }
 
+async function mountMermaidSheetReactIsland() {
+  if (!reactRootShellEnabled()) {
+    return null;
+  }
+  if (!el.mermaidSheet) {
+    return null;
+  }
+  try {
+    const { mountMermaidSheetIsland } = await import("./mermaid_sheet_island.js");
+    return mountMermaidSheetIsland({
+      mermaidSheet: el.mermaidSheet,
+      documentRef: document,
+    });
+  } catch (error) {
+    console.warn("[swimmers-web] Mermaid sheet React island mount skipped", error);
+    return null;
+  }
+}
+
 async function init() {
   reactShell = await mountReactRootShell();
   commandPaletteIsland = await mountCommandPaletteReactIsland();
@@ -2064,6 +2084,7 @@ async function init() {
   thoughtConfigSheetIsland = await mountThoughtConfigSheetReactIsland();
   nativeDesktopSheetIsland = await mountNativeDesktopSheetReactIsland();
   createSheetIsland = await mountCreateSheetReactIsland();
+  mermaidSheetIsland = await mountMermaidSheetReactIsland();
   loadInitialState();
   bindEvents();
   setUtilityStatus(defaultUtilityLabel(), true);
@@ -2165,6 +2186,7 @@ export const __swimmersWebTest = {
   mountThoughtConfigSheetReactIsland,
   mountNativeDesktopSheetReactIsland,
   mountCreateSheetReactIsland,
+  mountMermaidSheetReactIsland,
   reactShell: () => reactShell,
   commandPaletteIsland: () => commandPaletteIsland,
   searchSheetIsland: () => searchSheetIsland,
@@ -2173,6 +2195,7 @@ export const __swimmersWebTest = {
   thoughtConfigSheetIsland: () => thoughtConfigSheetIsland,
   nativeDesktopSheetIsland: () => nativeDesktopSheetIsland,
   createSheetIsland: () => createSheetIsland,
+  mermaidSheetIsland: () => mermaidSheetIsland,
 };
 
 if (!window.__SWIMMERS_DISABLE_AUTO_INIT__) {

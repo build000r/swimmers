@@ -18,6 +18,7 @@
     "src/web/global_shortcut_dispatch.test.mjs",
     "src/web/input_support.test.mjs",
     "src/web/mermaid_artifact.test.mjs",
+    "src/web/mermaid_sheet_island.test.mjs",
     "src/web/native_desktop_sheet.test.mjs",
     "src/web/native_desktop_sheet_island.test.mjs",
     "src/web/rendered_surface.test.mjs",
