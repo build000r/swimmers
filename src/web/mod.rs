@@ -111,6 +111,7 @@ async fn render_index(focus_layout: bool) -> impl IntoResponse {
     };
     let frontend_assets = assets::frontend_asset_tags().await;
     let stylesheet_tags = frontend_stylesheet_tags(&frontend_assets);
+    let module_preload_tags = frontend_module_preload_tags(&frontend_assets);
     let module_script_tags = frontend_module_script_tags(&frontend_assets);
     let franken_term_font_route = assets::FRANKENTERM_FONT_ROUTE;
     let franken_term_available = boot.franken_term_available;
@@ -124,6 +125,7 @@ async fn render_index(focus_layout: bool) -> impl IntoResponse {
     <title>swimmers</title>
     <link rel="preload" href="{franken_term_font_route}" as="font" type="font/woff2" crossorigin />
     {stylesheet_tags}
+    {module_preload_tags}
   </head>
   <body class="{body_class}">
     <div class="shell">
@@ -523,6 +525,20 @@ fn frontend_stylesheet_tags(assets: &assets::FrontendAssetTags) -> String {
         .map(|href| {
             format!(
                 r#"<link rel="stylesheet" href="{}" />"#,
+                escape_html_attr(href)
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n    ")
+}
+
+fn frontend_module_preload_tags(assets: &assets::FrontendAssetTags) -> String {
+    assets
+        .module_preloads
+        .iter()
+        .map(|href| {
+            format!(
+                r#"<link rel="modulepreload" crossorigin href="{}" />"#,
                 escape_html_attr(href)
             )
         })
