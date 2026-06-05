@@ -146,7 +146,7 @@ export function decodeTerminalOutputFrame(bytes) {
   const seq = readUint64Decimal(high, low);
   return {
     seq,
-    payload: bytes.slice(9),
+    payload: bytes.subarray(9),
   };
 }
 

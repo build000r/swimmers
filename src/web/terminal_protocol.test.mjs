@@ -274,8 +274,19 @@ test("decodeTerminalOutputFrame parses opcode, sequence, and payload", () => {
 
   assert.equal(decoded.seq, "5");
   assert.deepEqual(Array.from(decoded.payload), [65, 66]);
+  assert.equal(decoded.payload.buffer, frame.buffer);
+  assert.equal(decoded.payload.byteOffset, frame.byteOffset + 9);
   assert.equal(decodeTerminalOutputFrame(new Uint8Array([65, 66])), null);
   assert.equal(readUint64Decimal(0, 7), "7");
+
+  const backing = new Uint8Array(24);
+  const offsetFrame = backing.subarray(4, 15);
+  offsetFrame.set(frame);
+  const offsetDecoded = decodeTerminalOutputFrame(offsetFrame);
+  assert.equal(offsetDecoded.seq, "5");
+  assert.deepEqual(Array.from(offsetDecoded.payload), [65, 66]);
+  assert.equal(offsetDecoded.payload.buffer, backing.buffer);
+  assert.equal(offsetDecoded.payload.byteOffset, offsetFrame.byteOffset + 9);
 });
 
 test("fallbackTextForKeyEvent encodes printable, control, and navigation keys", () => {
