@@ -328,6 +328,7 @@ let searchSheetIsland = null;
 let sendSheetIsland = null;
 let authSheetIsland = null;
 let thoughtConfigSheetIsland = null;
+let nativeDesktopSheetIsland = null;
 let createSheetIsland = null;
 let terminalZoomInputController;
 let clearPendingTerminalBytes;
@@ -2016,6 +2017,25 @@ async function mountThoughtConfigSheetReactIsland() {
   }
 }
 
+async function mountNativeDesktopSheetReactIsland() {
+  if (!reactRootShellEnabled()) {
+    return null;
+  }
+  if (!el.nativeSheet) {
+    return null;
+  }
+  try {
+    const { mountNativeDesktopSheetIsland } = await import("./native_desktop_sheet_island.js");
+    return mountNativeDesktopSheetIsland({
+      nativeSheet: el.nativeSheet,
+      documentRef: document,
+    });
+  } catch (error) {
+    console.warn("[swimmers-web] native desktop sheet React island mount skipped", error);
+    return null;
+  }
+}
+
 async function mountCreateSheetReactIsland() {
   if (!reactRootShellEnabled()) {
     return null;
@@ -2042,6 +2062,7 @@ async function init() {
   sendSheetIsland = await mountSendSheetReactIsland();
   authSheetIsland = await mountAuthSheetReactIsland();
   thoughtConfigSheetIsland = await mountThoughtConfigSheetReactIsland();
+  nativeDesktopSheetIsland = await mountNativeDesktopSheetReactIsland();
   createSheetIsland = await mountCreateSheetReactIsland();
   loadInitialState();
   bindEvents();
@@ -2142,6 +2163,7 @@ export const __swimmersWebTest = {
   mountSendSheetReactIsland,
   mountAuthSheetReactIsland,
   mountThoughtConfigSheetReactIsland,
+  mountNativeDesktopSheetReactIsland,
   mountCreateSheetReactIsland,
   reactShell: () => reactShell,
   commandPaletteIsland: () => commandPaletteIsland,
@@ -2149,6 +2171,7 @@ export const __swimmersWebTest = {
   sendSheetIsland: () => sendSheetIsland,
   authSheetIsland: () => authSheetIsland,
   thoughtConfigSheetIsland: () => thoughtConfigSheetIsland,
+  nativeDesktopSheetIsland: () => nativeDesktopSheetIsland,
   createSheetIsland: () => createSheetIsland,
 };
 

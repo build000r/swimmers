@@ -19,6 +19,7 @@
     "src/web/input_support.test.mjs",
     "src/web/mermaid_artifact.test.mjs",
     "src/web/native_desktop_sheet.test.mjs",
+    "src/web/native_desktop_sheet_island.test.mjs",
     "src/web/rendered_surface.test.mjs",
     "src/web/rendered_surface_draw.test.mjs",
     "src/web/react_shell.test.mjs",
