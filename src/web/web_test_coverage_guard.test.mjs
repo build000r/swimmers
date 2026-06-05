@@ -1,0 +1,138 @@
+import test from "node:test";
+import assert from "node:assert/strict";
+import { readFile, readdir } from "node:fs/promises";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+import { createServer } from "vite";
+
+const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
+const webDir = path.join(repoRoot, "src/web");
+
+async function readRepoFile(relativePath) {
+  return readFile(path.join(repoRoot, relativePath), "utf8");
+}
+
+async function readRepoJson(relativePath) {
+  return JSON.parse(await readRepoFile(relativePath));
+}
+
+async function webTestPaths() {
+  const entries = await readdir(webDir);
+  return entries
+    .filter((entry) => entry.endsWith(".test.mjs"))
+    .map((entry) => `src/web/${entry}`)
+    .sort();
+}
+
+test("web test TypeScript config pins every Node web behavior test", async () => {
+  const config = await readRepoJson("tsconfig.web-tests.json");
+  const configured = [...config.files].sort();
+
+  assert.deepEqual(configured, await webTestPaths());
+});
+
+test("package scripts keep web behavior tests and TypeScript guard wired", async () => {
+  const packageJson = await readRepoJson("package.json");
+
+  assert.equal(packageJson.scripts.test, "node --test src/web/*.test.mjs");
+  assert.match(packageJson.scripts.typecheck, /tsc -p tsconfig\.web-tests\.json/);
+});
+
+test("app behavior suite keeps migration-critical app.js coverage topics", async () => {
+  const source = await readRepoFile("src/web/app_behavior.test.mjs");
+  const requiredSnippets = [
+    'await import("./app.js?behavior-test")',
+    "FrankenTerm surface validation reports missing methods",
+    "FrankenTerm resize waits while another surface operation is active",
+    "terminal bytes are buffered until FrankenTerm accepts input",
+    "Trogdor atlas renders dragon sprite assets and flames burnt swordsmen",
+    "terminal workbench fetches and renders selected agent context",
+    "send form submit handler preserves line send side effects and cleanup",
+    "auth token button action preserves save, clear, and refresh side effects",
+    "accessibility mirror syncs FrankenTerm screen-reader text and announcements",
+    "visible directory batch action preserves selection, cwd fallback, and status",
+    "command palette filters existing actions without touching terminal input",
+  ];
+
+  for (const snippet of requiredSnippets) {
+    assert.ok(source.includes(snippet), `missing app_behavior guard: ${snippet}`);
+  }
+});
+
+test("focused helper suites keep migration-critical behavior coverage topics", async () => {
+  const requiredSnippetsByFile = new Map([
+    [
+      "src/web/input_support.test.mjs",
+      [
+        "eventCell maps touch coordinates into the rendered grid",
+        "surfaceActionDispatchPlan preserves open_send and open_create gates",
+        "terminalResizeGeometryPlan preserves resize geometry and side-effect decisions",
+        "terminalPendingByteBufferPlan preserves pending byte acceptance and drops",
+      ],
+    ],
+    [
+      "src/web/rendered_surface.test.mjs",
+      [
+        "surface frame emits flat patch payload invariants",
+        "surface exposes parity actions for the selected session",
+        "surface renders trogdor pressure atlas with hover speed reader",
+      ],
+    ],
+    [
+      "src/web/terminal_protocol.test.mjs",
+      [
+        "buildSessionSocketUrl opts into framed resume without leaking auth",
+        "decodeTerminalOutputFrame parses opcode, sequence, and payload",
+      ],
+    ],
+    [
+      "src/web/terminal_safety.test.mjs",
+      [
+        "FrankenTerm link policy allows HTTP only for loopback hosts",
+        "terminal paste budget measures UTF-8 bytes",
+      ],
+    ],
+    [
+      "src/web/dir_browser.test.mjs",
+      [
+        "directory path helpers preserve legacy root joining and explicit paths",
+        "visibleDirBatchPlan preserves paths, fallbacks, and status copy",
+      ],
+    ],
+    [
+      "src/web/command_palette.test.mjs",
+      [
+        "command palette state helper combines built-in commands, sessions, and scores",
+        "command palette execution plan helper preserves no-ops and dispatch ordering",
+      ],
+    ],
+    [
+      "src/web/command_palette_controller.test.mjs",
+      [
+        "openSheet runs sheet-specific side effects and focus targets",
+        "closeSheets clears send and create state, hides modal, and refocuses terminal immediately",
+      ],
+    ],
+  ]);
+
+  for (const [relativePath, snippets] of requiredSnippetsByFile) {
+    const source = await readRepoFile(relativePath);
+    for (const snippet of snippets) {
+      assert.ok(source.includes(snippet), `missing ${relativePath} guard: ${snippet}`);
+    }
+  }
+});
+
+test("Vite can transform the app.js behavior-test entry with public test exports", async (t) => {
+  const server = await createServer({
+    configFile: path.join(repoRoot, "vite.config.js"),
+    logLevel: "silent",
+    server: { middlewareMode: true },
+  });
+  t.after(() => server.close());
+
+  const transformed = await server.transformRequest("/src/web/app.js?behavior-test");
+
+  assert.ok(transformed?.code, "Vite did not transform app.js?behavior-test");
+  assert.match(transformed.code, /__swimmersWebTest/);
+});

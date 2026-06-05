@@ -5,7 +5,7 @@
   "description": "Frontend tooling for the swimmers web surface",
   "type": "module",
   "scripts": {
-    "typecheck": "tsc --noEmit",
+    "typecheck": "tsc --noEmit && tsc -p tsconfig.web-tests.json",
     "build": "vite build",
     "test": "node --test src/web/*.test.mjs"
   },

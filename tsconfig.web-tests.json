@@ -1,0 +1,43 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noEmit": true
+  },
+  "files": [
+    "src/web/agent_context_refresh.test.mjs",
+    "src/web/api_client.test.mjs",
+    "src/web/app_behavior.test.mjs",
+    "src/web/app_event_bindings.test.mjs",
+    "src/web/command_palette.test.mjs",
+    "src/web/command_palette_controller.test.mjs",
+    "src/web/dir_browser.test.mjs",
+    "src/web/global_shortcut_dispatch.test.mjs",
+    "src/web/input_support.test.mjs",
+    "src/web/mermaid_artifact.test.mjs",
+    "src/web/native_desktop_sheet.test.mjs",
+    "src/web/rendered_surface.test.mjs",
+    "src/web/rendered_surface_draw.test.mjs",
+    "src/web/send_controller.test.mjs",
+    "src/web/send_sheet.test.mjs",
+    "src/web/session_persistence.test.mjs",
+    "src/web/session_refresh.test.mjs",
+    "src/web/surface_action_plans.test.mjs",
+    "src/web/surface_model.test.mjs",
+    "src/web/terminal_protocol.test.mjs",
+    "src/web/terminal_resize.test.mjs",
+    "src/web/terminal_runtime.test.mjs",
+    "src/web/terminal_safety.test.mjs",
+    "src/web/terminal_search_links.test.mjs",
+    "src/web/terminal_status.test.mjs",
+    "src/web/terminal_zoom_input.test.mjs",
+    "src/web/thought_config_sheet.test.mjs",
+    "src/web/trogdor_event_bindings.test.mjs",
+    "src/web/trogdor_logic.test.mjs",
+    "src/web/trogdor_render.test.mjs",
+    "src/web/web_test_coverage_guard.test.mjs",
+    "src/web/workbench_dom.test.mjs",
+    "src/web/workbench_log_lens.test.mjs",
+    "src/web/workbench_refresh.test.mjs",
+    "src/web/workbench_render.test.mjs"
+  ]
+}
