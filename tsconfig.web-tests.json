@@ -22,6 +22,7 @@
     "src/web/react_shell.test.mjs",
     "src/web/search_sheet_island.test.mjs",
     "src/web/send_controller.test.mjs",
+    "src/web/send_sheet_island.test.mjs",
     "src/web/send_sheet.test.mjs",
     "src/web/session_persistence.test.mjs",
     "src/web/session_refresh.test.mjs",

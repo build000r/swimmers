@@ -325,6 +325,7 @@ const defaultDocumentTitle = document.title || "swimmers";
 let reactShell = null;
 let commandPaletteIsland = null;
 let searchSheetIsland = null;
+let sendSheetIsland = null;
 let terminalZoomInputController;
 let clearPendingTerminalBytes;
 let bufferTerminalBytes;
@@ -1955,10 +1956,30 @@ async function mountSearchSheetReactIsland() {
   }
 }
 
+async function mountSendSheetReactIsland() {
+  if (!reactRootShellEnabled()) {
+    return null;
+  }
+  if (!el.sendSheet) {
+    return null;
+  }
+  try {
+    const { mountSendSheetIsland } = await import("./send_sheet_island.js");
+    return mountSendSheetIsland({
+      sendSheet: el.sendSheet,
+      documentRef: document,
+    });
+  } catch (error) {
+    console.warn("[swimmers-web] send sheet React island mount skipped", error);
+    return null;
+  }
+}
+
 async function init() {
   reactShell = await mountReactRootShell();
   commandPaletteIsland = await mountCommandPaletteReactIsland();
   searchSheetIsland = await mountSearchSheetReactIsland();
+  sendSheetIsland = await mountSendSheetReactIsland();
   loadInitialState();
   bindEvents();
   setUtilityStatus(defaultUtilityLabel(), true);
@@ -2055,9 +2076,11 @@ export const __swimmersWebTest = {
   mountReactRootShell,
   mountCommandPaletteReactIsland,
   mountSearchSheetReactIsland,
+  mountSendSheetReactIsland,
   reactShell: () => reactShell,
   commandPaletteIsland: () => commandPaletteIsland,
   searchSheetIsland: () => searchSheetIsland,
+  sendSheetIsland: () => sendSheetIsland,
 };
 
 if (!window.__SWIMMERS_DISABLE_AUTO_INIT__) {
