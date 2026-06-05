@@ -13,6 +13,7 @@ import {
   sessionSocketOpenStatusPlan,
   sessionSocketReconnectPlan,
 } from "./terminal_protocol.js";
+import { normalizeTerminalServerFrame } from "./contracts.js";
 
 export function createSessionSocketController(runtime) {
   const { state } = runtime;
@@ -173,7 +174,7 @@ export function createSessionSocketController(runtime) {
 
   function handleSocketText(raw) {
     try {
-      const message = JSON.parse(raw);
+      const message = normalizeTerminalServerFrame(JSON.parse(raw));
       switch (message.type) {
         case "ready":
           state.readOnly = Boolean(message.readOnly);

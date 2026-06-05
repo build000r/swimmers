@@ -104,9 +104,13 @@ import {
   surfaceSession as buildSurfaceSession,
 } from "./surface_model.js";
 import { createApiClient } from "./api_client.js";
+import {
+  normalizeBootPayload,
+  normalizeTerminalSnapshotResponse,
+} from "./contracts.js";
 import { createSessionPersistenceController } from "./session_persistence.js";
 
-const boot = window.__SWIMMERS_BOOT__ ?? {
+const boot = normalizeBootPayload(window.__SWIMMERS_BOOT__ ?? {
   franken_term_available: false,
   franken_term_js_url: "",
   franken_term_wasm_url: "",
@@ -114,7 +118,7 @@ const boot = window.__SWIMMERS_BOOT__ ?? {
   franken_term_asset_info: null,
   follow_published_selection: false,
   focus_layout: false,
-};
+});
 
 const TOKEN_STORAGE_KEY = "swimmers.web.token";
 const SESSION_STORAGE_KEY = "swimmers.web.session";
@@ -1544,7 +1548,7 @@ async function refreshSnapshotFallback() {
 
   try {
     const response = await apiFetch(`/v1/sessions/${encodeURIComponent(session.session_id)}/snapshot`);
-    const payload = await response.json();
+    const payload = normalizeTerminalSnapshotResponse(await response.json());
     updateTerminalFallbackText(payload.screen_text || "");
     syncTerminalTools();
     return Boolean(payload.screen_text);

@@ -4,6 +4,7 @@ import {
   mermaidPlanTabClickPlan,
   planFileLabel,
 } from "./mermaid_artifact.js";
+import { normalizeMermaidArtifactResponse } from "./contracts.js";
 
 export function createMermaidArtifactController({
   state,
@@ -119,7 +120,7 @@ export function createMermaidArtifactController({
     el.mermaidSource.textContent = "";
     try {
       const artifactResponse = await apiMaybeFetch(`/v1/sessions/${encodeURIComponent(session.session_id)}/mermaid-artifact`);
-      const payload = await responseJsonOrNull(artifactResponse);
+      const payload = normalizeMermaidArtifactResponse(await responseJsonOrNull(artifactResponse));
       artifact.artifact = payload;
       if (payload?.available) {
         const svgResponse = await apiMaybeFetch(`/v1/sessions/${encodeURIComponent(session.session_id)}/mermaid-artifact/svg`);

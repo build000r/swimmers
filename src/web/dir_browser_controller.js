@@ -12,6 +12,7 @@ import {
   visibleDirBatchPlan,
   visibleSelectableDirPaths as dirBrowserVisibleSelectableDirPaths,
 } from "./dir_browser.js";
+import { normalizeDirListResponse } from "./contracts.js";
 
 export function shouldRetryDirListingFromBase(error, targetPath, groupName, options = {}) {
   if (options.retriedFromBase || !targetPath || groupName) {
@@ -174,7 +175,7 @@ export function createDirBrowserController(runtime) {
         url.searchParams.set("group", groupName);
       }
       const response = await apiFetch(url.pathname + url.search);
-      const payload = await response.json();
+      const payload = normalizeDirListResponse(await response.json());
       renderDirEntries(payload);
     } catch (error) {
       if (shouldRetryDirListingFromBase(error, targetPath, groupName, options)) {

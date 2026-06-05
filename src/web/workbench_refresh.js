@@ -3,6 +3,7 @@ import {
   buildWorkbenchWidgetRequestPlan,
   shouldThrottleWorkbenchWidgets,
 } from "./workbench_render.js";
+import { normalizeWorkbenchWidgetResults } from "./contracts.js";
 
 export function workbenchRefreshStartPlan(context = {}) {
   if (!context.hasSession || context.trogdorAtlasOpen) {
@@ -66,7 +67,7 @@ export async function runWorkbenchWidgetRefresh(options = {}, runtime) {
     widgets: runtime.state.workbenchWidgets,
     force: Boolean(options.force),
   });
-  const results = await fetchWorkbenchWidgetResults(requestPlan.paths, runtime);
+  const results = normalizeWorkbenchWidgetResults(await fetchWorkbenchWidgetResults(requestPlan.paths, runtime));
   const stalePlan = workbenchRefreshStalePlan({
     requestSeq: startPlan.requestSeq,
     currentRequestSeq: runtime.state.workbenchWidgets.requestSeq,

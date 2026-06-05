@@ -1,3 +1,5 @@
+import { normalizePlanFileResponse } from "./contracts.js";
+
 export const MERMAID_SOURCE_DISPLAY_MAX_CHARS = 64 * 1024;
 export const MERMAID_PLAN_CONTENT_DISPLAY_MAX_CHARS = 128 * 1024;
 export const MERMAID_PLAN_FILES_MAX = 32;
@@ -94,7 +96,7 @@ export async function loadMermaidPlanFileWithRuntime(name, runtime) {
     const url = new URL(`/v1/sessions/${encodeURIComponent(session.session_id)}/plan-file`, origin);
     url.searchParams.set("name", fileName);
     const response = await runtime.apiMaybeFetch(url.pathname + url.search);
-    const payload = await runtime.responseJsonOrNull(response);
+    const payload = normalizePlanFileResponse(await runtime.responseJsonOrNull(response));
     const contentResult = boundedArtifactText(
       payload?.content || "",
       MERMAID_PLAN_CONTENT_DISPLAY_MAX_CHARS,

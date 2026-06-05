@@ -13,6 +13,6 @@
     "isolatedModules": true,
     "verbatimModuleSyntax": true
   },
-  "include": ["src/web/**/*.js", "src/web/**/*.mjs", "vite.config.js"],
+  "include": ["src/web/**/*.js", "src/web/**/*.mjs", "src/web/**/*.d.ts", "vite.config.js"],
   "exclude": ["node_modules", "target"]
 }

@@ -1,3 +1,8 @@
+import {
+  normalizeNativeDesktopOpenResponse,
+  normalizeNativeDesktopStatusResponse,
+} from "./contracts.js";
+
 export function formatNativeStatus(status) {
   if (!status) {
     return "Native status unavailable.";
@@ -58,7 +63,7 @@ export function createNativeDesktopSheetController(runtime = {}) {
     state.nativeDesktop.loading = true;
     try {
       const response = await apiFetch("/v1/native/status");
-      const payload = await response.json();
+      const payload = normalizeNativeDesktopStatusResponse(await response.json());
       renderNativeStatusForm(payload);
       setNativeResult(formatNativeStatus(payload));
     } catch (error) {
@@ -81,7 +86,7 @@ export function createNativeDesktopSheetController(runtime = {}) {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ app }),
       });
-      const appPayload = await appResponse.json();
+      const appPayload = normalizeNativeDesktopStatusResponse(await appResponse.json());
       renderNativeStatusForm(appPayload);
 
       if (app === "ghostty") {
@@ -90,7 +95,7 @@ export function createNativeDesktopSheetController(runtime = {}) {
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ mode }),
         });
-        const modePayload = await modeResponse.json();
+        const modePayload = normalizeNativeDesktopStatusResponse(await modeResponse.json());
         renderNativeStatusForm(modePayload);
       }
 
@@ -117,7 +122,7 @@ export function createNativeDesktopSheetController(runtime = {}) {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ session_id: session.session_id }),
       });
-      const payload = await response.json();
+      const payload = normalizeNativeDesktopOpenResponse(await response.json());
       setNativeResult(`Opened ${payload.session_id} in native app${payload.pane_id ? ` (${payload.pane_id})` : ""}.`);
     } catch (error) {
       setNativeResult(`Failed to open session natively: ${error.message}`, true);

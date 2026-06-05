@@ -1,3 +1,8 @@
+import {
+  normalizePublishedSelectionResponse,
+  normalizeSessionListResponse,
+} from "./contracts.js";
+
 export function sessionRefreshRequestPlan(followPublishedSelection) {
   return {
     sessionsPath: "/v1/sessions",
@@ -107,7 +112,7 @@ export async function runSessionRefresh(runtime) {
       runtime.apiMaybeFetch(requestPlan.healthPath),
       publishedRequest,
     ]);
-    const payload = await response.json();
+    const payload = normalizeSessionListResponse(await response.json());
     const pressurePayload = await runtime.responseJsonOrNull(pressureResponse);
     const healthPayload = await runtime.responseJsonOrNull(healthResponse);
     runtime.state.sessions = Array.isArray(payload.sessions) ? payload.sessions : [];
@@ -122,7 +127,9 @@ export async function runSessionRefresh(runtime) {
 }
 
 async function applySessionRefreshSelection(publishedResponse, runtime) {
-  const publishedSelection = publishedResponse ? await publishedResponse.json() : null;
+  const publishedSelection = publishedResponse
+    ? normalizePublishedSelectionResponse(await publishedResponse.json())
+    : null;
   const publishedSessionId = publishedResponse
     ? runtime.normalizeSessionId(publishedSelection?.session_id)
     : null;

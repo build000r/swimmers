@@ -1,3 +1,5 @@
+import { normalizeSessionAgentContextResponse } from "./contracts.js";
+
 export function agentContextRequestPath(sessionId) {
   return `/v1/sessions/${encodeURIComponent(sessionId)}/agent-context`;
 }
@@ -60,7 +62,7 @@ export async function runAgentContextRefresh(options = {}, runtime) {
 
   try {
     const response = await runtime.apiFetch(agentContextRequestPath(startPlan.sessionId));
-    const payload = await response.json();
+    const payload = normalizeSessionAgentContextResponse(await response.json());
     if (agentContextRefreshStalePlan({
       requestSeq: startPlan.requestSeq,
       currentRequestSeq: runtime.state.agentContextRequestSeq,

@@ -1,3 +1,8 @@
+import {
+  normalizeThoughtConfigProbeResponse,
+  normalizeThoughtConfigResponse,
+} from "./contracts.js";
+
 const FALLBACK_THOUGHT_BACKENDS = [
   { key: "", label: "auto" },
   { key: "openrouter", label: "openrouter" },
@@ -150,7 +155,7 @@ export function createThoughtConfigSheetController(runtime = {}) {
     state.thoughtConfig.loading = true;
     try {
       const response = await apiFetch("/v1/thought-config");
-      const payload = await response.json();
+      const payload = normalizeThoughtConfigResponse(await response.json());
       applyToForm(payload);
       setResult("Thought config loaded.");
     } catch (error) {
@@ -175,7 +180,7 @@ export function createThoughtConfigSheetController(runtime = {}) {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(nextDraft),
       });
-      const payload = await response.json();
+      const payload = normalizeThoughtConfigProbeResponse(await response.json());
       const message = payload?.message || "Thought config probe succeeded.";
       setResult(
         `${message}\n` +

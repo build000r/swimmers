@@ -144,6 +144,19 @@ test("runAgentContextRefresh preserves Atlas unsupported reset behavior", async 
 
 test("runAgentContextRefresh preserves successful payload and loading transitions", async () => {
   const payload = { available: true, session_id: "sess_0", user_task: "build" };
+  const expectedPayload = {
+    available: true,
+    session_id: "sess_0",
+    tool: null,
+    cwd: "",
+    user_task: "build",
+    turns: [],
+    current_tool: null,
+    recent_actions: [],
+    token_count: 0,
+    context_limit: 0,
+    message: null,
+  };
   const renderStates = [];
   const { calls, runtime } = buildRuntime({
     payload,
@@ -159,12 +172,12 @@ test("runAgentContextRefresh preserves successful payload and loading transition
   assert.equal(runtime.state.agentContextRequestSeq, 1);
   assert.equal(runtime.state.agentContextSessionId, "sess_0");
   assert.equal(runtime.state.agentContextLoading, false);
-  assert.deepEqual(runtime.state.agentContextPayload, payload);
+  assert.deepEqual(runtime.state.agentContextPayload, expectedPayload);
   assert.equal(runtime.state.agentContextError, "");
   assert.equal(runtime.state.agentContextLastLoadedAt, 4242);
   assert.deepEqual(renderStates, [
     { loading: true, payload: null, error: "" },
-    { loading: false, payload, error: "" },
+    { loading: false, payload: expectedPayload, error: "" },
   ]);
   assert.deepEqual(calls, [
     ["renderTerminalWorkbench"],

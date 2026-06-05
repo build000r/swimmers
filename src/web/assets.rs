@@ -11,6 +11,7 @@ use serde::{Deserialize, Serialize};
 use crate::api::AppState;
 
 pub(super) const APP_JS_ROUTE: &str = "/app.js";
+pub(super) const CONTRACTS_JS_ROUTE: &str = "/contracts.js";
 pub(super) const API_CLIENT_JS_ROUTE: &str = "/api_client.js";
 pub(super) const SESSION_PERSISTENCE_JS_ROUTE: &str = "/session_persistence.js";
 pub(super) const APP_EVENT_HANDLERS_JS_ROUTE: &str = "/app_event_handlers.js";
@@ -74,6 +75,7 @@ const DEFAULT_FRANKENTUI_PKG_CANDIDATES: &[&str] = &[];
 pub(super) fn routes() -> Router<Arc<AppState>> {
     Router::new()
         .route(APP_JS_ROUTE, get(app_js))
+        .route(CONTRACTS_JS_ROUTE, get(contracts_js))
         .route(API_CLIENT_JS_ROUTE, get(api_client_js))
         .route(SESSION_PERSISTENCE_JS_ROUTE, get(session_persistence_js))
         .route(APP_EVENT_HANDLERS_JS_ROUTE, get(app_event_handlers_js))
@@ -440,6 +442,7 @@ macro_rules! javascript_route {
 }
 
 javascript_route!(app_js, "src/web/app.js", "app.js");
+javascript_route!(contracts_js, "src/web/contracts.js", "contracts.js");
 javascript_route!(api_client_js, "src/web/api_client.js", "api_client.js");
 javascript_route!(
     session_persistence_js,
