@@ -1,3 +1,4 @@
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 
@@ -178,6 +179,7 @@ pub(super) fn routes() -> Router<Arc<AppState>> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct FrontendAssetTags {
     pub(super) stylesheets: Vec<String>,
+    pub(super) module_preloads: Vec<String>,
     pub(super) module_scripts: Vec<String>,
 }
 
@@ -188,6 +190,8 @@ pub(super) struct ViteManifestEntry {
     css: Vec<String>,
     #[serde(default, rename = "isEntry")]
     is_entry: bool,
+    #[serde(default)]
+    imports: Vec<String>,
 }
 
 pub(super) async fn frontend_asset_tags() -> FrontendAssetTags {
@@ -223,7 +227,7 @@ pub(super) async fn frontend_asset_tags_from_dist_dir(
 }
 
 pub(super) fn frontend_asset_tags_from_manifest(
-    manifest: &std::collections::BTreeMap<String, ViteManifestEntry>,
+    manifest: &BTreeMap<String, ViteManifestEntry>,
 ) -> Result<FrontendAssetTags, String> {
     let entry = manifest
         .get(VITE_APP_ENTRY)
@@ -255,8 +259,12 @@ pub(super) fn frontend_asset_tags_from_manifest(
         stylesheets.push(APP_CSS_ROUTE.to_string());
     }
 
+    let mut module_preloads = Vec::new();
+    push_vite_module_preload_imports(&mut module_preloads, manifest, entry)?;
+
     Ok(FrontendAssetTags {
         stylesheets,
+        module_preloads,
         module_scripts: vec![app_script],
     })
 }
@@ -267,6 +275,7 @@ pub(super) fn frontend_asset_tags_for_vite_dev_origin(origin: &str) -> FrontendA
     };
     FrontendAssetTags {
         stylesheets: vec![APP_CSS_ROUTE.to_string()],
+        module_preloads: Vec::new(),
         module_scripts: vec![
             format!("{origin}/@vite/client"),
             format!("{origin}/src/web/app.js"),
@@ -277,8 +286,42 @@ pub(super) fn frontend_asset_tags_for_vite_dev_origin(origin: &str) -> FrontendA
 fn compatibility_frontend_asset_tags() -> FrontendAssetTags {
     FrontendAssetTags {
         stylesheets: vec![APP_CSS_ROUTE.to_string()],
+        module_preloads: Vec::new(),
         module_scripts: vec![APP_JS_ROUTE.to_string()],
     }
+}
+
+fn push_vite_module_preload_imports(
+    routes: &mut Vec<String>,
+    manifest: &BTreeMap<String, ViteManifestEntry>,
+    entry: &ViteManifestEntry,
+) -> Result<(), String> {
+    let mut seen = BTreeSet::new();
+    for import in &entry.imports {
+        push_vite_module_preload_import(routes, manifest, import, &mut seen)?;
+    }
+    Ok(())
+}
+
+fn push_vite_module_preload_import(
+    routes: &mut Vec<String>,
+    manifest: &BTreeMap<String, ViteManifestEntry>,
+    import: &str,
+    seen: &mut BTreeSet<String>,
+) -> Result<(), String> {
+    if !seen.insert(import.to_string()) {
+        return Ok(());
+    }
+    let entry = manifest
+        .get(import)
+        .ok_or_else(|| format!("Vite manifest import is missing: {import}"))?;
+    if entry.file.ends_with(".js") {
+        push_unique_vite_asset_route(routes, &entry.file)?;
+    }
+    for nested_import in &entry.imports {
+        push_vite_module_preload_import(routes, manifest, nested_import, seen)?;
+    }
+    Ok(())
 }
 
 fn push_unique_vite_asset_route(routes: &mut Vec<String>, file: &str) -> Result<(), String> {

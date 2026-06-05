@@ -448,7 +448,15 @@ async fn vite_manifest_tags_select_built_entry_css_and_compatibility_css_boundar
     "file": "assets/app-12345678.js",
     "src": "src/web/app.js",
     "isEntry": true,
-    "css": ["assets/app-87654321.css"]
+    "css": ["assets/app-87654321.css"],
+    "imports": ["_surface-aaaaaaaa.js", "_trogdor-bbbbbbbb.js"]
+  },
+  "_surface-aaaaaaaa.js": {
+    "file": "assets/surface-aaaaaaaa.js"
+  },
+  "_trogdor-bbbbbbbb.js": {
+    "file": "assets/trogdor-bbbbbbbb.js",
+    "imports": ["_surface-aaaaaaaa.js"]
   },
   "virtual:swimmers-app-css.css": {
     "file": "assets/appCss-abcdef12.css",
@@ -469,6 +477,13 @@ async fn vite_manifest_tags_select_built_entry_css_and_compatibility_css_boundar
             "/assets/vite/assets/appCss-abcdef12.css"
         ]
     );
+    assert_eq!(
+        tags.module_preloads,
+        [
+            "/assets/vite/assets/surface-aaaaaaaa.js",
+            "/assets/vite/assets/trogdor-bbbbbbbb.js"
+        ]
+    );
     assert_eq!(tags.module_scripts, ["/assets/vite/assets/app-12345678.js"]);
 
     std::fs::write(
@@ -486,6 +501,7 @@ async fn vite_manifest_tags_select_built_entry_css_and_compatibility_css_boundar
         .await
         .expect("vite tags without css");
     assert_eq!(tags.stylesheets, [APP_CSS_ROUTE]);
+    assert!(tags.module_preloads.is_empty());
     assert_eq!(tags.module_scripts, ["/assets/vite/assets/app-12345678.js"]);
 }
 
@@ -575,6 +591,7 @@ fn vite_dev_origin_tags_use_vite_modules_without_replacing_backend_css() {
 
     let tags = frontend_asset_tags_for_vite_dev_origin("http://127.0.0.1:5173/");
     assert_eq!(tags.stylesheets, [APP_CSS_ROUTE]);
+    assert!(tags.module_preloads.is_empty());
     assert_eq!(
         tags.module_scripts,
         [
@@ -585,8 +602,26 @@ fn vite_dev_origin_tags_use_vite_modules_without_replacing_backend_css() {
     assert!(tags
         .module_scripts
         .iter()
+        .chain(tags.module_preloads.iter())
         .chain(tags.stylesheets.iter())
         .all(|route| !route.contains("/assets/frankenterm/")));
+}
+
+#[test]
+fn frontend_module_preload_tags_render_initial_vite_import_hints() {
+    let tags = assets::FrontendAssetTags {
+        stylesheets: vec![],
+        module_preloads: vec![
+            "/assets/vite/assets/surface-aaaaaaaa.js".to_string(),
+            "/assets/vite/assets/trogdor-bbbbbbbb.js".to_string(),
+        ],
+        module_scripts: vec![],
+    };
+    assert_eq!(
+        frontend_module_preload_tags(&tags),
+        r#"<link rel="modulepreload" crossorigin href="/assets/vite/assets/surface-aaaaaaaa.js" />
+    <link rel="modulepreload" crossorigin href="/assets/vite/assets/trogdor-bbbbbbbb.js" />"#
+    );
 }
 
 #[tokio::test]
