@@ -47,6 +47,10 @@ function buildRuntime(overrides = {}) {
         },
       };
     },
+    responseJson: async (response, normalizer) => {
+      calls.push(["responseJson"]);
+      return normalizer(await response.json());
+    },
   };
   return { calls, runtime };
 }
@@ -182,6 +186,7 @@ test("runAgentContextRefresh preserves successful payload and loading transition
   assert.deepEqual(calls, [
     ["renderTerminalWorkbench"],
     ["apiFetch", "/v1/sessions/sess_0/agent-context"],
+    ["responseJson"],
     ["json"],
     ["renderTerminalWorkbench"],
   ]);
@@ -227,6 +232,7 @@ test("runAgentContextRefresh preserves stale selected-session guard", async () =
   assert.deepEqual(calls, [
     ["renderTerminalWorkbench"],
     ["apiFetch", "/v1/sessions/sess_0/agent-context"],
+    ["responseJson"],
     ["json"],
     ["renderTerminalWorkbench"],
   ]);

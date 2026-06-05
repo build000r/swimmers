@@ -6,6 +6,7 @@ import {
   apiHeaders,
   apiMaybeFetch,
   createApiClient,
+  responseJson,
   responseJsonOrNull,
 } from "./api_client.js";
 
@@ -170,5 +171,53 @@ test("responseJsonOrNull returns null for empty responses and parses present res
   assert.deepEqual(
     await responseJsonOrNull(jsonResponse({ body: { ok: true } })),
     { ok: true },
+  );
+});
+
+test("responseJson applies a normalizer after parsing JSON", async () => {
+  const calls = [];
+  const result = await responseJson(
+    jsonResponse({ body: { count: "7", label: "sessions" } }),
+    (payload) => {
+      calls.push(payload);
+      return { ...payload, count: Number(payload.count) };
+    },
+  );
+
+  assert.deepEqual(result, { count: 7, label: "sessions" });
+  assert.deepEqual(calls, [{ count: "7", label: "sessions" }]);
+});
+
+test("responseJsonOrNull applies normalizers only for present responses", async () => {
+  let normalizeCalls = 0;
+  const normalize = (payload) => {
+    normalizeCalls += 1;
+    return { ok: Boolean(payload?.ok), normalized: true };
+  };
+
+  assert.equal(await responseJsonOrNull(null, normalize), null);
+  assert.deepEqual(
+    await responseJsonOrNull(jsonResponse({ body: { ok: 1 } }), normalize),
+    { ok: true, normalized: true },
+  );
+  assert.equal(normalizeCalls, 1);
+});
+
+test("createApiClient exposes typed JSON response helpers", async () => {
+  const client = createApiClient();
+
+  assert.deepEqual(
+    await client.responseJson(
+      jsonResponse({ body: { value: "42" } }),
+      (payload) => ({ value: Number(payload.value) }),
+    ),
+    { value: 42 },
+  );
+  assert.deepEqual(
+    await client.responseJsonOrNull(
+      jsonResponse({ body: { enabled: 1 } }),
+      (payload) => ({ enabled: Boolean(payload.enabled) }),
+    ),
+    { enabled: true },
   );
 });

@@ -13,6 +13,7 @@ import {
   visibleSelectableDirPaths as dirBrowserVisibleSelectableDirPaths,
 } from "./dir_browser.js";
 import { normalizeDirListResponse } from "./contracts.js";
+import { responseJson as defaultResponseJson } from "./api_client.js";
 
 export function shouldRetryDirListingFromBase(error, targetPath, groupName, options = {}) {
   if (options.retriedFromBase || !targetPath || groupName) {
@@ -39,6 +40,7 @@ export function createDirBrowserController(runtime) {
     state,
     el,
     apiFetch,
+    responseJson = defaultResponseJson,
     setDirStatus,
     syncSheetActionAvailability,
     currentSession = () => null,
@@ -175,7 +177,7 @@ export function createDirBrowserController(runtime) {
         url.searchParams.set("group", groupName);
       }
       const response = await apiFetch(url.pathname + url.search);
-      const payload = normalizeDirListResponse(await response.json());
+      const payload = await responseJson(response, normalizeDirListResponse);
       renderDirEntries(payload);
     } catch (error) {
       if (shouldRetryDirListingFromBase(error, targetPath, groupName, options)) {

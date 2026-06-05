@@ -2,6 +2,10 @@ function defaultFetch(...args) {
   return globalThis.fetch(...args);
 }
 
+function identity(value) {
+  return value;
+}
+
 export function apiHeaders(extra = {}, token = "") {
   const headers = { ...extra };
   if (token) {
@@ -47,11 +51,15 @@ export async function apiMaybeFetch(path, init = {}, options = {}) {
   }
 }
 
-export async function responseJsonOrNull(response) {
+export async function responseJson(response, normalizer = identity) {
+  return normalizer(await response.json());
+}
+
+export async function responseJsonOrNull(response, normalizer = identity) {
   if (!response) {
     return null;
   }
-  return response.json();
+  return responseJson(response, normalizer);
 }
 
 export function createApiClient(options = {}) {
@@ -59,6 +67,7 @@ export function createApiClient(options = {}) {
     apiHeaders: (extra = {}) => apiHeaders(extra, options.getToken?.() ?? ""),
     apiFetch: (path, init = {}) => apiFetch(path, init, options),
     apiMaybeFetch: (path, init = {}) => apiMaybeFetch(path, init, options),
+    responseJson,
     responseJsonOrNull,
   };
 }

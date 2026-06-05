@@ -2,6 +2,7 @@ import {
   normalizeNativeDesktopOpenResponse,
   normalizeNativeDesktopStatusResponse,
 } from "./contracts.js";
+import { responseJson as defaultResponseJson } from "./api_client.js";
 
 export function formatNativeStatus(status) {
   if (!status) {
@@ -28,6 +29,7 @@ export function createNativeDesktopSheetController(runtime = {}) {
     state,
     el,
     apiFetch,
+    responseJson = defaultResponseJson,
     currentSession = () => null,
     refreshSessions = async () => {},
     syncSheetActionAvailability = () => {},
@@ -63,7 +65,7 @@ export function createNativeDesktopSheetController(runtime = {}) {
     state.nativeDesktop.loading = true;
     try {
       const response = await apiFetch("/v1/native/status");
-      const payload = normalizeNativeDesktopStatusResponse(await response.json());
+      const payload = await responseJson(response, normalizeNativeDesktopStatusResponse);
       renderNativeStatusForm(payload);
       setNativeResult(formatNativeStatus(payload));
     } catch (error) {
@@ -86,7 +88,7 @@ export function createNativeDesktopSheetController(runtime = {}) {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ app }),
       });
-      const appPayload = normalizeNativeDesktopStatusResponse(await appResponse.json());
+      const appPayload = await responseJson(appResponse, normalizeNativeDesktopStatusResponse);
       renderNativeStatusForm(appPayload);
 
       if (app === "ghostty") {
@@ -95,7 +97,7 @@ export function createNativeDesktopSheetController(runtime = {}) {
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ mode }),
         });
-        const modePayload = normalizeNativeDesktopStatusResponse(await modeResponse.json());
+        const modePayload = await responseJson(modeResponse, normalizeNativeDesktopStatusResponse);
         renderNativeStatusForm(modePayload);
       }
 
@@ -122,7 +124,7 @@ export function createNativeDesktopSheetController(runtime = {}) {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ session_id: session.session_id }),
       });
-      const payload = normalizeNativeDesktopOpenResponse(await response.json());
+      const payload = await responseJson(response, normalizeNativeDesktopOpenResponse);
       setNativeResult(`Opened ${payload.session_id} in native app${payload.pane_id ? ` (${payload.pane_id})` : ""}.`);
     } catch (error) {
       setNativeResult(`Failed to open session natively: ${error.message}`, true);

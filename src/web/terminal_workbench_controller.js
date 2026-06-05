@@ -23,6 +23,7 @@ export function createTerminalWorkbenchController({
   summarizeThought = (session) => session?.thought || "",
   apiFetch,
   apiMaybeFetch,
+  responseJson,
   responseJsonOrNull,
   openSheet = () => {},
   focusTerminalInputSurface = () => {},
@@ -121,6 +122,7 @@ export function createTerminalWorkbenchController({
       now: () => Date.now(),
       currentSession,
       apiFetch,
+      responseJson,
       renderTerminalWorkbench,
     });
   }

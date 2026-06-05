@@ -112,7 +112,7 @@ export async function runSessionRefresh(runtime) {
       runtime.apiMaybeFetch(requestPlan.healthPath),
       publishedRequest,
     ]);
-    const payload = normalizeSessionListResponse(await response.json());
+    const payload = await runtime.responseJson(response, normalizeSessionListResponse);
     const pressurePayload = await runtime.responseJsonOrNull(pressureResponse);
     const healthPayload = await runtime.responseJsonOrNull(healthResponse);
     runtime.state.sessions = Array.isArray(payload.sessions) ? payload.sessions : [];
@@ -128,7 +128,7 @@ export async function runSessionRefresh(runtime) {
 
 async function applySessionRefreshSelection(publishedResponse, runtime) {
   const publishedSelection = publishedResponse
-    ? normalizePublishedSelectionResponse(await publishedResponse.json())
+    ? await runtime.responseJson(publishedResponse, normalizePublishedSelectionResponse)
     : null;
   const publishedSessionId = publishedResponse
     ? runtime.normalizeSessionId(publishedSelection?.session_id)

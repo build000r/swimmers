@@ -96,7 +96,7 @@ export async function loadMermaidPlanFileWithRuntime(name, runtime) {
     const url = new URL(`/v1/sessions/${encodeURIComponent(session.session_id)}/plan-file`, origin);
     url.searchParams.set("name", fileName);
     const response = await runtime.apiMaybeFetch(url.pathname + url.search);
-    const payload = normalizePlanFileResponse(await runtime.responseJsonOrNull(response));
+    const payload = await runtime.responseJsonOrNull(response, normalizePlanFileResponse);
     const contentResult = boundedArtifactText(
       payload?.content || "",
       MERMAID_PLAN_CONTENT_DISPLAY_MAX_CHARS,

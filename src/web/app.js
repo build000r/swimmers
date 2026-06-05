@@ -355,6 +355,7 @@ let terminalCanvasHasVisiblePixels;
 const {
   apiFetch,
   apiMaybeFetch,
+  responseJson,
   responseJsonOrNull,
 } = createApiClient({
   getToken: () => state.token,
@@ -536,6 +537,7 @@ const thoughtConfigSheet = createThoughtConfigSheetController({
   state,
   el,
   apiFetch,
+  responseJson,
   refreshSessions,
   syncSheetActionAvailability,
 });
@@ -544,6 +546,7 @@ const nativeDesktopSheet = createNativeDesktopSheetController({
   state,
   el,
   apiFetch,
+  responseJson,
   currentSession,
   refreshSessions,
   syncSheetActionAvailability,
@@ -857,6 +860,7 @@ const terminalWorkbenchController = createTerminalWorkbenchController({
   summarizeThought,
   apiFetch,
   apiMaybeFetch,
+  responseJson,
   responseJsonOrNull,
   openSheet,
   focusTerminalInputSurface,
@@ -868,6 +872,7 @@ const sessionRefreshRuntime = {
   state,
   apiFetch,
   apiMaybeFetch,
+  responseJson,
   responseJsonOrNull,
   applyOperatorPressure,
   applyBackendHealth,
@@ -1244,6 +1249,7 @@ const dirBrowserController = createDirBrowserController({
   state,
   el,
   apiFetch,
+  responseJson,
   setDirStatus,
   syncSheetActionAvailability,
   currentSession,
@@ -1548,7 +1554,7 @@ async function refreshSnapshotFallback() {
 
   try {
     const response = await apiFetch(`/v1/sessions/${encodeURIComponent(session.session_id)}/snapshot`);
-    const payload = normalizeTerminalSnapshotResponse(await response.json());
+    const payload = await responseJson(response, normalizeTerminalSnapshotResponse);
     updateTerminalFallbackText(payload.screen_text || "");
     syncTerminalTools();
     return Boolean(payload.screen_text);

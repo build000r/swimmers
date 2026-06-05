@@ -174,3 +174,129 @@ Examples:
 
 - `2026-06-05`: no source simplification was accepted in this bead. This bead
   only created the proof discipline and recorded the current baseline.
+- `2026-06-05`: rejected a blanket `apiJson` or raw response replacement for
+  `swimmers-simplify-after-typescript-contracts-t8jb`; raw POST response bodies
+  in send/launch/open/create/save flows keep their existing parse semantics.
+- `2026-06-05`: rejected per-response workbench widget normalizers for
+  `swimmers-simplify-after-typescript-contracts-t8jb`; workbench widget
+  normalization intentionally stays at the settled aggregate result boundary.
+- `2026-06-05`: rejected edits to `session_socket_controller.js`,
+  `trogdor_*`, Rust routes, Vite/tooling, CSS/layout, and terminal lifecycle
+  modules for `swimmers-simplify-after-typescript-contracts-t8jb`.
+
+## Accepted Simplification Cards
+
+### Typed HTTP Response Normalization
+
+Run id: `web-migration-2026-06-05`
+Artifact path: `refactor/artifacts/web-migration-2026-06-05/`
+Bead: `swimmers-simplify-after-typescript-contracts-t8jb`
+
+Candidate: centralize typed HTTP JSON normalization in
+`src/web/api_client.js` with normalizer-aware `responseJson(response,
+normalizer)` and `responseJsonOrNull(response, normalizer)`.
+
+Touched files:
+
+- `src/web/api_client.js`
+- `src/web/api_client.test.mjs`
+- `src/web/app.js`
+- `src/web/terminal_workbench_controller.js`
+- `src/web/agent_context_refresh.js`
+- `src/web/agent_context_refresh.test.mjs`
+- `src/web/session_refresh.js`
+- `src/web/session_refresh.test.mjs`
+- `src/web/dir_browser_controller.js`
+- `src/web/mermaid_artifact.js`
+- `src/web/mermaid_artifact_controller.js`
+- `src/web/native_desktop_sheet.js`
+- `src/web/thought_config_sheet.js`
+
+High-risk island: sheets and workbench-adjacent refresh paths. No
+FrankenTerm, Trogdor, WebSocket, Rust route/schema, CSS/layout, Vite/tooling,
+or raw POST response contract changes.
+
+Current behavior: proven HTTP callsites parsed JSON with `await
+response.json()` or `await responseJsonOrNull(response)` and then immediately
+applied a `normalize*Response` contract helper at the callsite.
+
+Target behavior: the same response objects are parsed in the same order, but
+the contract normalizer is passed into `responseJson` or `responseJsonOrNull`.
+`responseJsonOrNull(null, normalizer)` still returns `null` without invoking
+the normalizer.
+
+Behavior invariants:
+
+- `apiFetch` and `apiMaybeFetch` error handling and 404-to-null behavior are
+  unchanged.
+- `runSessionRefresh` still starts the same fetches in the same `Promise.all`,
+  parses sessions before pressure/health, applies operator pressure and
+  backend health before Trogdor cue sync, and applies selection before success
+  side effects.
+- Agent-context stale guards still run after JSON parse and before state
+  replacement.
+- Mermaid, directory, native desktop, thought config, and terminal snapshot
+  normalizers keep the same backend vocabulary and tolerant defaults.
+- Raw POST response bodies remain raw where the caller only needs operation
+  output text or save/create/open results.
+
+Route/asset invariants: no Rust route, schema, asset manifest, content type, or
+served file change.
+
+Protocol/DOM/storage invariants: no WebSocket, terminal lifecycle, DOM layout,
+CSS, storage key, fetch ordering, or Trogdor behavior change.
+
+Proof before edit:
+
+- Start gate `git status --short --branch` reported clean `main` at
+  `origin/main`; after claim the only dirty file was `.beads/issues.jsonl`.
+- Static callsite scan found 13 proven normalized wrappers and 5 raw response
+  parses that were intentionally left untouched.
+- Before LOC command:
+  `wc -l src/web/api_client.js src/web/api_client.test.mjs src/web/app.js src/web/terminal_workbench_controller.js src/web/agent_context_refresh.js src/web/session_refresh.js src/web/workbench_refresh.js src/web/dir_browser_controller.js src/web/mermaid_artifact.js src/web/mermaid_artifact_controller.js src/web/native_desktop_sheet.js src/web/thought_config_sheet.js`
+  reported `4155` total lines.
+
+Proof after edit:
+
+- Focused validation:
+  `node --test src/web/api_client.test.mjs src/web/contracts.test.mjs src/web/agent_context_refresh.test.mjs src/web/session_refresh.test.mjs src/web/workbench_refresh.test.mjs`
+  passed `34/34`.
+- Post-edit scan leaves only raw response bodies in intentional POST result
+  paths: thought config save, directory create/batch, commit launch, and
+  Mermaid open.
+- After LOC command over the same files reported `4227` total lines.
+
+Validation commands:
+
+- Focused command above passed `34/34`.
+- `npm run typecheck` passed.
+- `node --test src/web/*.test.mjs` passed `385/385`.
+- `npm test` passed `385/385`.
+- `git diff --check` passed.
+- `br dep cycles --json` reported `{"cycles":[],"count":0}`.
+- `br sync --flush-only` passed.
+- `rg -n 'as any|as unknown as|: any\b' src/web --glob '*.js' --glob '*.mjs' --glob '*.ts'`
+  returned no matches.
+
+Observed deltas:
+
+- Scoped file LOC: `4155` before, `4227` after, net `+72`.
+- Runtime source LOC excluding `api_client.test.mjs`: `3981` before, `4004`
+  after, net `+23`.
+- Test LOC: `174` before, `223` after, net `+49`.
+- Centralized 13 duplicate normalizer-wrapper callsites while adding the
+  explicit parser seam and focused normalizer tests.
+
+LOC saved: scout counted 13 proven wrapper callsites centralized; measured net
+source LOC is `+23` because explicit dependency injection and the shared helper
+were added.
+Confidence: `0.8`, backed by focused contract/refresh tests and raw-callsite
+scan.
+Risk: `4.0`, because the accepted callsites include sheet and workbench-adjacent
+refresh paths.
+Simplify score: scout recommendation `13 x 0.8 / 4.0 = 2.6`.
+
+Decision: accept.
+Reason: behavior is held at the existing contracts, parsing/null/error
+semantics are centralized in `api_client.js`, and raw/aggregate response paths
+that would change semantics were explicitly rejected.

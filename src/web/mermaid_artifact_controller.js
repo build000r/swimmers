@@ -120,7 +120,7 @@ export function createMermaidArtifactController({
     el.mermaidSource.textContent = "";
     try {
       const artifactResponse = await apiMaybeFetch(`/v1/sessions/${encodeURIComponent(session.session_id)}/mermaid-artifact`);
-      const payload = normalizeMermaidArtifactResponse(await responseJsonOrNull(artifactResponse));
+      const payload = await responseJsonOrNull(artifactResponse, normalizeMermaidArtifactResponse);
       artifact.artifact = payload;
       if (payload?.available) {
         const svgResponse = await apiMaybeFetch(`/v1/sessions/${encodeURIComponent(session.session_id)}/mermaid-artifact/svg`);

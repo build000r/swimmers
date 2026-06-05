@@ -2,6 +2,7 @@ import {
   normalizeThoughtConfigProbeResponse,
   normalizeThoughtConfigResponse,
 } from "./contracts.js";
+import { responseJson as defaultResponseJson } from "./api_client.js";
 
 const FALLBACK_THOUGHT_BACKENDS = [
   { key: "", label: "auto" },
@@ -70,6 +71,7 @@ export function createThoughtConfigSheetController(runtime = {}) {
     state,
     el,
     apiFetch,
+    responseJson = defaultResponseJson,
     refreshSessions = async () => {},
     syncSheetActionAvailability = () => {},
     documentRef = globalThis.document,
@@ -155,7 +157,7 @@ export function createThoughtConfigSheetController(runtime = {}) {
     state.thoughtConfig.loading = true;
     try {
       const response = await apiFetch("/v1/thought-config");
-      const payload = normalizeThoughtConfigResponse(await response.json());
+      const payload = await responseJson(response, normalizeThoughtConfigResponse);
       applyToForm(payload);
       setResult("Thought config loaded.");
     } catch (error) {
@@ -180,7 +182,7 @@ export function createThoughtConfigSheetController(runtime = {}) {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(nextDraft),
       });
-      const payload = normalizeThoughtConfigProbeResponse(await response.json());
+      const payload = await responseJson(response, normalizeThoughtConfigProbeResponse);
       const message = payload?.message || "Thought config probe succeeded.";
       setResult(
         `${message}\n` +

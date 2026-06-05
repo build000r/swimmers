@@ -62,7 +62,7 @@ export async function runAgentContextRefresh(options = {}, runtime) {
 
   try {
     const response = await runtime.apiFetch(agentContextRequestPath(startPlan.sessionId));
-    const payload = normalizeSessionAgentContextResponse(await response.json());
+    const payload = await runtime.responseJson(response, normalizeSessionAgentContextResponse);
     if (agentContextRefreshStalePlan({
       requestSeq: startPlan.requestSeq,
       currentRequestSeq: runtime.state.agentContextRequestSeq,

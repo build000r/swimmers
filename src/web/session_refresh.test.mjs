@@ -106,11 +106,22 @@ test("runSessionRefresh preserves successful refresh ordering and status side ef
     },
     apiFetch: async (path) => {
       calls.push(["apiFetch", path]);
-      return { json: async () => ({ sessions: [{ session_id: "agent-1" }] }) };
+      return {
+        path,
+        json: async () => (
+          path === "/v1/selection"
+            ? { session_id: "agent-1" }
+            : { sessions: [{ session_id: "agent-1" }] }
+        ),
+      };
     },
     apiMaybeFetch: async (path) => {
       calls.push(["apiMaybeFetch", path]);
       return { path };
+    },
+    responseJson: async (response, normalizer) => {
+      calls.push(["responseJson", response.path]);
+      return normalizer(await response.json());
     },
     responseJsonOrNull: async (response) => {
       calls.push(["responseJsonOrNull", response.path]);
@@ -141,6 +152,7 @@ test("runSessionRefresh preserves successful refresh ordering and status side ef
     ["apiFetch", "/v1/sessions"],
     ["apiMaybeFetch", "/v1/operator-pressure"],
     ["apiMaybeFetch", "/health"],
+    ["responseJson", "/v1/sessions"],
     ["responseJsonOrNull", "/v1/operator-pressure"],
     ["responseJsonOrNull", "/health"],
     ["applyOperatorPressure", "/v1/operator-pressure"],
