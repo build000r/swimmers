@@ -179,10 +179,12 @@ pub(super) fn resolve_tmux_terminal_env(
 pub(super) fn resolve_tmux_term(inherited_term: Option<&str>) -> (String, bool) {
     let term = inherited_term.map(str::trim).unwrap_or_default();
     let needs_term_fallback = tmux_term_needs_fallback(term);
-    let resolved_term = needs_term_fallback
-        .then_some(TMUX_FALLBACK_TERM)
-        .unwrap_or(term)
-        .to_string();
+    let resolved_term = if needs_term_fallback {
+        TMUX_FALLBACK_TERM
+    } else {
+        term
+    }
+    .to_string();
 
     (resolved_term, needs_term_fallback)
 }

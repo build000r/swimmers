@@ -49,9 +49,7 @@ fn require_native_write_scope(auth: &AuthInfo) -> Result<(), Response> {
 }
 
 fn reject_remote_native_session(session_id: &str) -> Option<Response> {
-    if remote_sessions::split_remote_session_id(session_id).is_none() {
-        return None;
-    }
+    remote_sessions::split_remote_session_id(session_id)?;
 
     Some(api_error_msg(
         &NATIVE_DESKTOP_UNAVAILABLE,

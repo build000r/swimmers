@@ -453,7 +453,7 @@ fn dir_entry_modified_secs(entry: &std::fs::DirEntry) -> u64 {
 }
 
 fn sort_group_entries(entries: &mut [(DirEntry, u64)]) {
-    entries.sort_by(|(a, _), (b, _)| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+    entries.sort_by_key(|(a, _)| a.name.to_lowercase());
 }
 
 pub fn list_effective_group_entries_sync(
@@ -468,7 +468,7 @@ pub fn list_effective_group_entries_sync(
     let mut entries = effective_entries_after_excludes(group, delta, &mut seen_names);
     append_included_delta_entries(delta, &mut seen_names, &mut entries);
 
-    entries.sort_by(|(a, _), (b, _)| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+    entries.sort_by_key(|(a, _)| a.name.to_lowercase());
     entries.into_iter().map(|(entry, _)| entry).collect()
 }
 

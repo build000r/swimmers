@@ -179,7 +179,7 @@ pub(super) fn repo_search_visit(path: &Path, depth: usize, max_depth: usize) -> 
 
 fn repo_search_child_dir_path(child: std::fs::DirEntry) -> Option<PathBuf> {
     let file_type = child.file_type().ok()?;
-    file_type.is_dir().then(|| ())?;
+    file_type.is_dir().then_some(())?;
     let name = child.file_name().to_string_lossy().into_owned();
     should_descend_for_repo_search(&name).then(|| child.path())
 }

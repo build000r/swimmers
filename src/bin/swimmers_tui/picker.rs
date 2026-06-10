@@ -503,9 +503,11 @@ impl PickerState {
         previous: &PickerResponseSnapshot,
         preserve_selection: bool,
     ) {
-        let position = preserve_selection
-            .then(|| preserved_response_position(self, previous))
-            .unwrap_or_default();
+        let position = if preserve_selection {
+            preserved_response_position(self, previous)
+        } else {
+            Default::default()
+        };
         self.selection = position.selection;
         self.scroll = position.scroll;
         snap_response_selection_to_search(self);
@@ -793,9 +795,11 @@ fn parent_path_for(path: &str) -> Option<String> {
 
 fn parent_path_string(parent: &std::path::Path) -> String {
     let raw = parent.to_string_lossy().into_owned();
-    (!raw.is_empty())
-        .then_some(raw)
-        .unwrap_or_else(|| "/".to_string())
+    if !raw.is_empty() {
+        raw
+    } else {
+        "/".to_string()
+    }
 }
 
 pub(crate) fn join_path(base: &str, name: &str) -> String {
@@ -1408,10 +1412,10 @@ impl Default for PickerPosition {
     }
 }
 
-fn preserved_launch_target<'a>(
+fn preserved_launch_target(
     preserve_selection: bool,
-    previous_launch_target: Option<&'a str>,
-) -> Option<&'a str> {
+    previous_launch_target: Option<&str>,
+) -> Option<&str> {
     preserve_selection
         .then_some(previous_launch_target)
         .flatten()

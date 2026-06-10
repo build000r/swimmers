@@ -11,7 +11,7 @@ pub(super) fn handle_picker_priority_key<C: TuiApi>(
 }
 
 pub(super) fn handle_picker_search_key<C: TuiApi>(app: &mut App<C>, key: KeyEvent) -> Option<bool> {
-    if !app.picker.is_some() || !picker_search_accepts_modifiers(key.modifiers) {
+    if app.picker.is_none() || !picker_search_accepts_modifiers(key.modifiers) {
         return None;
     }
 

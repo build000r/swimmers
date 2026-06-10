@@ -1197,7 +1197,7 @@ fn plan_restart_action(path: &str) -> Result<RestartActionPlan, ApiServiceError>
     let target = PathBuf::from(requested_path);
     let (canonical_base, canonical) = resolve_target_path(dirs_base_path(), target)?;
     let config = restart_action_config(&canonical_base)?;
-    let commands = restart_commands_for_path(&canonical, &config)?;
+    let commands = restart_commands_for_path(&canonical, config)?;
 
     Ok(RestartActionPlan {
         canonical,

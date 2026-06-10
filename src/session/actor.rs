@@ -1250,8 +1250,8 @@ impl SessionActor {
     }
 
     fn check_subscriber_cap(&self, client_id: ClientId) -> Result<(), SubscribeRejection> {
-        apply_subscriber_cap(self.subscribers.len(), MAX_OUTPUT_SUBSCRIBERS_PER_SESSION).map_err(
-            |rejection| {
+        apply_subscriber_cap(self.subscribers.len(), MAX_OUTPUT_SUBSCRIBERS_PER_SESSION)
+            .inspect_err(|_rejection| {
                 warn!(
                     session_id = %self.session_id,
                     client_id,
@@ -1259,9 +1259,7 @@ impl SessionActor {
                     "subscriber cap reached (SESSION_OVERLOADED), rejecting browser attach"
                 );
                 crate::metrics::increment_overload(&self.session_id);
-                rejection
-            },
-        )
+            })
     }
 
     async fn finish_subscribe(&mut self, acceptance: SubscribeAcceptance) -> SubscribeOutcome {

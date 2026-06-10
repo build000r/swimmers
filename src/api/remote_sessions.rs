@@ -143,10 +143,10 @@ fn denamespace_for_configured_target(
     denamespace_for_configured_targets(session_id, overlay.all_launch_targets())
 }
 
-fn denamespace_for_configured_targets<'a>(
-    session_id: &'a str,
+fn denamespace_for_configured_targets(
+    session_id: &str,
     targets: Vec<LaunchTargetSummary>,
-) -> Result<Option<(LaunchTargetSummary, &'a str)>, RemoteSessionError> {
+) -> Result<Option<(LaunchTargetSummary, &str)>, RemoteSessionError> {
     let mut targets = targets
         .into_iter()
         .filter_map(|target| {

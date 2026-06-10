@@ -323,7 +323,7 @@ impl SupervisorProvider {
                         drain_coalesced_persist_requests(&persist_supervisor, &worker_overflow).await;
                     }
                     _ = worker_overflow.notify.notified() => {
-                        if persist_rx.len() == 0 {
+                        if persist_rx.is_empty() {
                             drain_coalesced_persist_requests(&persist_supervisor, &worker_overflow).await;
                         }
                     }

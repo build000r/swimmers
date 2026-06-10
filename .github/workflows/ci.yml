@@ -56,3 +56,16 @@ jobs:
 
       - name: Run clippy
         run: cargo clippy -- -D warnings --allow clippy::too_many_arguments --allow clippy::result_large_err --allow clippy::large_enum_variant --allow clippy::type_complexity --allow clippy::explicit_counter_loop
+
+  fmt:
+    name: Format
+    runs-on: ubuntu-latest
+    container:
+      image: rust:1-bookworm
+    timeout-minutes: 5
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check formatting
+        run: cargo fmt --check

@@ -88,9 +88,11 @@ async fn handle_empty_attention_group_plan(
 fn empty_attention_group_plan_outcome(
     request: &NativeAttentionGroupOpenRequest,
 ) -> EmptyAttentionGroupPlanOutcome {
-    (!request.focus && !request.current_session_ids.is_empty())
-        .then_some(EmptyAttentionGroupPlanOutcome::ClearNative)
-        .unwrap_or(EmptyAttentionGroupPlanOutcome::NoAttentionSessions)
+    if !request.focus && !request.current_session_ids.is_empty() {
+        EmptyAttentionGroupPlanOutcome::ClearNative
+    } else {
+        EmptyAttentionGroupPlanOutcome::NoAttentionSessions
+    }
 }
 
 async fn open_visible_native_attention_group(
@@ -212,12 +214,12 @@ fn fill_attention_group_candidates(
     limit: usize,
 ) {
     if visible.is_empty() {
-        let anchor_index = best_attention_anchor_index(&candidates);
+        let anchor_index = best_attention_anchor_index(candidates);
         visible.push(candidates.remove(anchor_index));
     }
 
     while visible.len() < limit && !candidates.is_empty() {
-        let next_index = best_attention_fill_index(&visible, &candidates);
+        let next_index = best_attention_fill_index(visible, candidates);
         visible.push(candidates.remove(next_index));
     }
 }

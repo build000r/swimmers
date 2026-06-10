@@ -345,7 +345,7 @@ fn resolve_server_log_path(
     log_override: Option<&Path>,
 ) -> Result<PathBuf, String> {
     if let Some(path) = explicit_server_log_path(log_override) {
-        return Ok(PathBuf::from(path));
+        return Ok(path);
     }
 
     let port = startup_url_port(base_url)?;

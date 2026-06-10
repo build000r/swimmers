@@ -611,7 +611,7 @@ fn mermaid_er_connected_components(
             }
         }
         component.sort_by(|left, right| {
-            mermaid_er_compare_seed_nodes(left, right, &positions, &adjacency, centroid)
+            mermaid_er_compare_seed_nodes(left, right, positions, adjacency, centroid)
         });
         components.push(component);
     }
@@ -628,9 +628,7 @@ fn mermaid_er_sort_components(
         let size_cmp = right.len().cmp(&left.len());
         match (left.first(), right.first()) {
             (Some(left_seed), Some(right_seed)) => size_cmp.then_with(|| {
-                mermaid_er_compare_seed_nodes(
-                    left_seed, right_seed, &positions, &adjacency, centroid,
-                )
+                mermaid_er_compare_seed_nodes(left_seed, right_seed, positions, adjacency, centroid)
             }),
             (Some(_), None) => Ordering::Less,
             (None, Some(_)) => Ordering::Greater,
