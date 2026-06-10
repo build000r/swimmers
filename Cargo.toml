@@ -94,3 +94,8 @@ tokio-tungstenite = "0.28"
 # to on for older source-build wrappers.
 personal-workflows = []
 voice = ["dep:cpal", "dep:whisper-rs"]
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = true
