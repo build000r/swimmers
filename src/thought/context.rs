@@ -494,7 +494,7 @@ fn discover_latest_claude_jsonl(
         .filter_map(|entry| claude_discovery_candidate(entry.ok()?, cwd, excluded_paths))
         .collect();
 
-    files.sort_by(|a, b| b.1.cmp(&a.1));
+    files.sort_by_key(|item| std::cmp::Reverse(item.1));
     files.into_iter().next().map(|(path, _)| path)
 }
 

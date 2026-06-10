@@ -60,9 +60,11 @@ fn plan_attention_group_error(
     err: String,
 ) -> AttentionGroupResultPlan {
     AttentionGroupResultPlan {
-        session_ids: focus
-            .then_some(previous_session_ids.to_vec())
-            .unwrap_or_default(),
+        session_ids: if focus {
+            previous_session_ids.to_vec()
+        } else {
+            Vec::new()
+        },
         message: Some(err),
     }
 }
@@ -72,9 +74,7 @@ fn should_show_attention_group_message(
     previous_session_ids: &[String],
     next_session_ids: &[String],
 ) -> bool {
-    focus
-        .then_some(true)
-        .unwrap_or(previous_session_ids != next_session_ids)
+    focus || previous_session_ids != next_session_ids
 }
 
 fn attention_group_success_message(

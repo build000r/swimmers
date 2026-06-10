@@ -249,9 +249,7 @@ fn apply_env_bind(load: &mut ConfigLoad) {
 }
 
 fn parse_env_non_empty_string(load: &mut ConfigLoad, key: &'static str) -> Option<String> {
-    let Some(value) = env_value(load, key) else {
-        return None;
-    };
+    let value = env_value(load, key)?;
     let trimmed = value.trim();
     if trimmed.is_empty() {
         push_warning(load, key, "empty value ignored; using the default");

@@ -510,7 +510,7 @@ fn mermaid_er_attribute_columns(attr_lines: &[(usize, &str)]) -> Option<MermaidE
     let mut attrs = Vec::new();
     let mut max_type_chars = 0usize;
     for (idx, line) in attr_lines {
-        let mut parts = line.trim().split_whitespace();
+        let mut parts = line.split_whitespace();
         let data_type = parts.next()?;
         let name = parts.next()?;
         let suffix = parts.collect::<Vec<_>>().join(" ");
@@ -930,7 +930,7 @@ fn push_plain_node_semantic_lines(
         center_y,
         MermaidTextAnchor::Center,
         MermaidSemanticKind::NodeSummary,
-        &owner_key,
+        owner_key,
         outline_eligible,
         node.width,
         node.height,
@@ -944,7 +944,7 @@ fn push_plain_node_semantic_lines(
         line_height,
         MermaidTextAnchor::Center,
         MermaidSemanticKind::NodeTitle,
-        &owner_key,
+        owner_key,
         false,
         node.width,
         node.height,
@@ -1009,14 +1009,14 @@ pub(crate) fn mermaid_display_text_for_view(
     match view_state {
         MermaidViewState::Outline => match line.kind {
             MermaidSemanticKind::SubgraphSummary | MermaidSemanticKind::NodeSummary => {
-                let budget = owner_cols.floor().max(8.0).min(18.0) as usize;
+                let budget = owner_cols.floor().clamp(8.0, 18.0) as usize;
                 mermaid_fit_whole_words(&line.text, budget)
             }
             _ => line.text.clone(),
         },
         MermaidViewState::L1 => match line.kind {
             MermaidSemanticKind::SubgraphSummary | MermaidSemanticKind::NodeSummary => {
-                let budget = owner_cols.floor().max(8.0).min(18.0) as usize;
+                let budget = owner_cols.floor().clamp(8.0, 18.0) as usize;
                 mermaid_fit_whole_words(&line.text, budget)
             }
             _ => line.text.clone(),
@@ -1024,7 +1024,7 @@ pub(crate) fn mermaid_display_text_for_view(
         MermaidViewState::L2 | MermaidViewState::L3 => line.text.clone(),
         MermaidViewState::ErEntities => match line.kind {
             MermaidSemanticKind::NodeSummary => {
-                let budget = owner_cols.floor().max(8.0).min(18.0) as usize;
+                let budget = owner_cols.floor().clamp(8.0, 18.0) as usize;
                 mermaid_fit_whole_words(&line.text, budget)
             }
             _ => line.text.clone(),
@@ -1258,7 +1258,7 @@ fn compact_candidate_owner_rows(
         });
     compact_owner_rows
         .values_mut()
-        .for_each(|rows| compact_candidate_rows_sort_dedup(rows));
+        .for_each(compact_candidate_rows_sort_dedup);
     compact_owner_rows
 }
 

@@ -136,11 +136,7 @@ fn render_plan_text_scroll_indicator(
 }
 
 fn plan_text_scroll_percent(scroll: usize, max_scroll: usize) -> usize {
-    if max_scroll == 0 {
-        100
-    } else {
-        (scroll * 100) / max_scroll
-    }
+    (scroll * 100).checked_div(max_scroll).unwrap_or(100)
 }
 
 fn render_mermaid_viewer_header(
