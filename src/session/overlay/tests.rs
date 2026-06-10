@@ -26,7 +26,6 @@ fn test_launch_target(id: &str, label: &str, kind: &str) -> LaunchTargetSummary 
 
 fn test_launch_client(label: &str, targets: Vec<LaunchTargetSummary>) -> ClientOverlay {
     ClientOverlay {
-        client_dir: PathBuf::from(format!("/tmp/{label}")),
         label: label.to_string(),
         cwd_patterns: Vec::new(),
         cwd_match_count: 0,
@@ -53,7 +52,6 @@ fn test_dir_client(
     has_dir_config: bool,
 ) -> ClientOverlay {
     ClientOverlay {
-        client_dir: PathBuf::from(format!("/tmp/{label}")),
         label: label.to_string(),
         cwd_patterns,
         cwd_match_count: 0,
@@ -303,7 +301,6 @@ fn all_launch_targets_preserves_first_client_order_and_first_duplicate() {
 fn all_launch_targets_returns_empty_when_no_clients_have_dir_config() {
     let overlay = SkillboxOverlay {
         clients: vec![ClientOverlay {
-            client_dir: PathBuf::from("/tmp/no-config"),
             label: "no-config".to_string(),
             cwd_patterns: Vec::new(),
             cwd_match_count: 0,
@@ -693,7 +690,6 @@ fn list_all_plans_sorts_by_mtime_desc() {
     set_mtime(&draft_schema, earlier);
 
     let client = ClientOverlay {
-        client_dir,
         label: "personal".to_string(),
         cwd_patterns: Vec::new(),
         cwd_match_count: 0,
@@ -730,7 +726,6 @@ fn list_all_plans_skips_archived_and_missing_schema() {
     std::fs::write(archived.join("schema.mmd"), "stale").unwrap();
 
     let client = ClientOverlay {
-        client_dir: client_dir.clone(),
         label: "personal".to_string(),
         cwd_patterns: Vec::new(),
         cwd_match_count: 0,
@@ -758,7 +753,6 @@ fn overlay_health_reports_load_age_and_remote_target_count_without_probe() {
         path_mappings: Vec::new(),
     };
     let client = ClientOverlay {
-        client_dir: PathBuf::from("/tmp/overlay_health"),
         label: "health".to_string(),
         cwd_patterns: Vec::new(),
         cwd_match_count: 0,
@@ -837,7 +831,6 @@ fn make_plan_client(
     plan_draft: Option<PathBuf>,
 ) -> ClientOverlay {
     ClientOverlay {
-        client_dir: PathBuf::from("/tmp/find_plan_dirs_test"),
         label: "test".to_string(),
         cwd_patterns,
         cwd_match_count,

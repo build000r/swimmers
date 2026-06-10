@@ -1673,8 +1673,6 @@ pub fn rest_state_from_idle(
 mod rest_state_tests;
 
 // --- WebSocket Push Protocol Types ---
-// FIXME(2026-04-21): Typed WS control envelopes are retained for protocol hardening.
-// Current handlers in `src/web/mod.rs` still emit and parse ad-hoc JSON payloads.
 
 #[allow(dead_code)]
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1764,16 +1762,9 @@ pub struct ResizePayload {
     pub rows: u16,
 }
 
-#[allow(dead_code)]
-#[derive(Debug, Clone, Deserialize)]
-pub struct DismissAttentionPayload {
-    pub session_id: String,
-}
-
 // --- Binary Frame Constants ---
 
 pub mod opcodes {
-    // FIXME(2026-04-21): WS transport currently uses text JSON frames; binary opcodes stay reserved.
     #[allow(dead_code)]
     pub const TERMINAL_INPUT: u8 = 0x10;
     #[allow(dead_code)]

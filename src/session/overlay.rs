@@ -120,9 +120,6 @@ pub struct OverlayDirConfig {
 }
 
 struct ClientOverlay {
-    #[allow(dead_code)]
-    // FIXME(2026-04-21): Retained for overlay diagnostics/export metadata that is not surfaced yet.
-    client_dir: PathBuf,
     label: String,
     cwd_patterns: Vec<String>,
     /// Number of explicit cwd_match entries (not repo_landscape paths).
@@ -596,7 +593,6 @@ fn parse_client_overlay(client_dir: &Path, overlay_path: &Path) -> Option<Client
         .and_then(|ds| parse_dir_config(ds, &client_label, client_repos, &scan_roots));
 
     Some(ClientOverlay {
-        client_dir: client_dir.to_path_buf(),
         label: client_label,
         cwd_patterns,
         cwd_match_count,

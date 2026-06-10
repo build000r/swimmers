@@ -13,9 +13,7 @@ use crate::thought::protocol::{SyncResponse, SyncUpdate, ThoughtDeliveryState};
 use crate::thought::runtime_config::ThoughtConfig;
 use crate::types::{ControlEvent, ThoughtSource, ThoughtUpdatePayload};
 
-// FIXME(2026-04-21): `BridgeRunner::new` is retained for tests/simple callers;
-// production startup uses `BridgeRunner::with_tick(...)`.
-#[allow(dead_code)]
+#[cfg(test)]
 const DEFAULT_BRIDGE_TICK: Duration = Duration::from_secs(2);
 
 type DeliveryStateMap = std::collections::HashMap<String, ThoughtDeliveryState>;
@@ -82,8 +80,7 @@ impl ThoughtMetricRecorder for RuntimeThoughtMetricRecorder {
 }
 
 impl BridgeRunner {
-    // FIXME(2026-04-21): Production wiring uses `with_tick`; this convenience ctor is currently exercised in tests.
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub fn new(
         event_tx: broadcast::Sender<ControlEvent>,
         runtime_config: Arc<RwLock<ThoughtConfig>>,

@@ -73,17 +73,6 @@ impl ThoughtConfig {
         self.validate()?;
         Ok(self)
     }
-
-    // FIXME(2026-04-21): Sync request wiring still reads `model` directly; this helper is kept for future call sites.
-    #[allow(dead_code)]
-    pub fn model_override(&self) -> Option<&str> {
-        let trimmed = self.model.trim();
-        if trimmed.is_empty() {
-            None
-        } else {
-            Some(trimmed)
-        }
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

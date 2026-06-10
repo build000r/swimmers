@@ -4,8 +4,6 @@
 //! All file I/O in this module is blocking (`std::fs`). Callers must run
 //! reads from `spawn_blocking` to avoid stalling the async runtime.
 
-// FIXME(2026-04-21): The web/API workbench can consume these readers, but the
-// thought loop still runs without consuming this context-reader subsystem.
 #![allow(dead_code)]
 
 use std::fs;
