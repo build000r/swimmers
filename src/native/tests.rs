@@ -1992,6 +1992,9 @@ async fn front_tab_empty_tc3_tc4_no_stale_cache_write_when_tab_id_missing() {
 // the pre-script tab query was missing. Purely tests the cache shape.
 #[test]
 fn front_tab_empty_tc5_post_script_recovery_writes_cache() {
+    let _env_guard = crate::test_support::ENV_LOCK
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
     clear_ghostty_preview_term_cache();
     // No entry pre-call.
     assert!(cached_ghostty_preview_term_id(Some("tab-recovered")).is_none());

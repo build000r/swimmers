@@ -8,6 +8,22 @@ All notable changes to swimmers are documented here. The format is based on [Kee
 
 - Added a managed `[attention group]` queue for the TUI that opens related local sessions together, prefers project adjacency over raw recency, and refreshes the `swimmers-attention` tmux group in place as visible panes stop waiting.
 
+### Test reliability
+
+- Fixed flaky test failures caused by missing `ENV_LOCK` guards on native cache-mutating tests and non-blocking file lock contention under heavy test parallelism.
+- Hardened `write_executable_script` test helper against ETXTBSY races using atomic rename.
+
+### Build and CI
+
+- Added CI workflow (`.github/workflows/ci.yml`) that runs `cargo test` and `cargo clippy` on every push to main and every pull request.
+- Added release profile with thin LTO, symbol stripping, and single codegen unit for smaller binaries.
+
+### Code quality
+
+- Cleaned up clippy warnings: replaced clamp-like patterns, redundant closures, and needless borrows.
+- Boxed oversized enum variants (`FishBowlMode::Mermaid`, `SessionWsEvent::Lifecycle`) to reduce stack frame sizes.
+- Added brief retry to file-lock acquisition for resilience under IO contention.
+
 ## [0.3.0] — 2026-05-02
 
 ### Trustworthy glance state evidence
