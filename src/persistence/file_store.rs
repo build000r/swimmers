@@ -981,13 +981,22 @@ fn write_thoughts_locked(
 fn acquire_persistence_lock(path: &Path) -> anyhow::Result<std::fs::File> {
     let lock_path = lock_path_for(path)?;
     let lock_file = open_lock_file(&lock_path)?;
-    lock_exclusive_nonblocking(lock_file, lock_path)
+    lock_exclusive_with_retry(lock_file, lock_path)
 }
 
-fn lock_exclusive_nonblocking(
+fn lock_exclusive_with_retry(
     lock_file: std::fs::File,
     lock_path: PathBuf,
 ) -> anyhow::Result<std::fs::File> {
+    for _ in 0..3 {
+        match lock_file.try_lock_exclusive() {
+            Ok(()) => return Ok(lock_file),
+            Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
+                std::thread::sleep(std::time::Duration::from_millis(1));
+            }
+            Err(err) => return lock_error(lock_path, err),
+        }
+    }
     match lock_file.try_lock_exclusive() {
         Ok(()) => Ok(lock_file),
         Err(err) => lock_error(lock_path, err),

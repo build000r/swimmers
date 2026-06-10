@@ -1586,6 +1586,9 @@ async fn open_or_focus_ghostty_rejects_older_versions_before_running_script() {
 
 #[test]
 fn ghostty_preview_cache_is_invariant_under_other_tabs() {
+    let _env_guard = crate::test_support::ENV_LOCK
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
     let mut runner = proptest::test_runner::TestRunner::default();
     let strategy = proptest::collection::vec((0u8..3, 0u16..256), 0..40);
 

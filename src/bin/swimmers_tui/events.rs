@@ -313,6 +313,7 @@ impl TuiStartupPlan {
         self.client_mode
     }
 
+    #[cfg(test)]
     pub(crate) fn installs_embedded_shutdown(self) -> bool {
         self.client_mode == TuiStartupClientMode::Embedded
     }
