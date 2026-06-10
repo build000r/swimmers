@@ -431,7 +431,7 @@ pub fn invalidate_inspect_git_repo(path: &Path) {
 /// contention), so we go through the blocking pool instead — it's sized for
 /// exactly this pattern and keeps the main worker threads free.
 ///
-/// Memoized for [`INSPECT_GIT_REPO_CACHE_TTL`]; mutating code paths must call
+/// Memoized for `INSPECT_GIT_REPO_CACHE_TTL`; mutating code paths must call
 /// [`invalidate_inspect_git_repo`] to clear stale `dirty` entries.
 pub async fn inspect_git_repo(path: &Path) -> io::Result<Option<GitRepoSummary>> {
     if let Some(cached) = lookup_cached_inspect_git_repo(path) {
