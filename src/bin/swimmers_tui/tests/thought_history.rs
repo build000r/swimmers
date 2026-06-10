@@ -82,6 +82,29 @@ fn refresh_updates_native_status_label_when_backend_app_changes() {
 }
 
 #[test]
+fn refresh_labels_remote_linux_native_status_as_tmux_attach_fallback() {
+    let api = MockApi::new();
+    let layout = test_layout(120, 32);
+    api.push_fetch_sessions(Ok(vec![session_summary("sess-1", "7", TEST_REPO_SWIMMERS)]));
+    api.push_native_status(Ok(NativeDesktopStatusResponse {
+        supported: false,
+        platform: Some("linux".to_string()),
+        app_id: Some(NativeDesktopApp::Iterm),
+        ghostty_mode: None,
+        app: Some("iTerm".to_string()),
+        reason: Some("native iTerm control is only supported on macOS".to_string()),
+    }));
+    let mut app = make_app(api);
+
+    app.refresh(layout);
+
+    assert_eq!(
+        app.native_status_text(),
+        "terminal handoff: tmux attach only"
+    );
+}
+
+#[test]
 fn refresh_ignores_null_duplicate_and_stale_thoughts() {
     let api = MockApi::new();
     let layout = test_layout(120, 32);

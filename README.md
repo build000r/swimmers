@@ -203,6 +203,11 @@ AUTH_TOKEN=your-secret-token \
 swimmers
 ```
 
+From a source checkout on a Tailscale host, `make tailnet` wraps the Tailnet setup,
+auto-detects the machine's Tailscale IPv4 address, enables personal workflow
+endpoints, and prints the browser URL plus the local `SWIMMERS_TUI_URL=...`
+command to run from another machine.
+
 `AUTH_MODE=tailnet_trust` is accepted only for Tailscale IP ranges (`100.64.0.0/10` or `fd7a:115c:a1e0::/48`). It does not add a second browser token; Tailnet membership is the access boundary. `OBSERVER_TOKEN` is optional only for token-auth deployments where you also want a read-only credential for browser or observer clients.
 
 In `AUTH_MODE=token`, browser HTTP requests use an `Authorization: Bearer ...` header, and browser terminal WebSockets authenticate with a first WebSocket message instead of a `?token=` URL parameter. This keeps long-lived operator and observer tokens out of WebSocket URLs, browser history, and proxy request lines; it does not encrypt the connection. Use HTTPS, SSH forwarding, or a Tailnet-only bind for non-loopback token deployments.
@@ -263,6 +268,7 @@ If you are working from a source checkout, the Makefile has convenience targets:
 
 ```bash
 make up                 # Start the current-checkout backend, print browser URLs, and launch the TUI against it
+make tailnet            # Start the backend on this machine's Tailscale IP for remote browser/TUI clients
 make tui                # Launch swimmers-tui (embedded mode by default)
 make web                # Start the standalone server and print local browser URLs
 make server             # Run only the standalone API server

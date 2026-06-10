@@ -172,6 +172,28 @@ pub(crate) enum PendingInteractionResult {
     },
 }
 
+fn native_status_unavailable_text(
+    app_label: &str,
+    mode_suffix: &str,
+    reason: Option<&str>,
+) -> String {
+    if native_status_should_show_tmux_fallback(reason) {
+        return "terminal handoff: tmux attach only".to_string();
+    }
+
+    format!(
+        "terminal handoff: {app_label}{mode_suffix} unavailable: {}",
+        reason.unwrap_or("unknown reason")
+    )
+}
+
+fn native_status_should_show_tmux_fallback(reason: Option<&str>) -> bool {
+    let Some(reason) = reason else {
+        return false;
+    };
+    reason.contains("only supported on macOS") || reason.contains("only available from localhost")
+}
+
 pub(crate) struct App<C: TuiApi> {
     pub(crate) runtime: Runtime,
     pub(crate) client: Arc<C>,
@@ -421,9 +443,10 @@ impl<C: TuiApi> App<C> {
                 if status.supported {
                     format!("terminal handoff: {app_label}{mode_suffix}")
                 } else {
-                    format!(
-                        "terminal handoff: {app_label}{mode_suffix} unavailable: {}",
-                        status.reason.as_deref().unwrap_or("unknown reason")
+                    native_status_unavailable_text(
+                        app_label,
+                        &mode_suffix,
+                        status.reason.as_deref(),
                     )
                 }
             }
