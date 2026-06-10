@@ -75,7 +75,7 @@ impl DomainPlanTab {
 
 pub(crate) enum FishBowlMode {
     Aquarium,
-    Mermaid(MermaidViewerState),
+    Mermaid(Box<MermaidViewerState>),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

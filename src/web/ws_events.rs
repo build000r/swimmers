@@ -139,7 +139,7 @@ async fn next_session_ws_event(
         maybe_frame = output_rx.recv() => maybe_frame.map(SessionWsEvent::Frame),
         event = session_events.recv() => Some(SessionWsEvent::SessionControl(event)),
         event = thought_events.recv() => Some(SessionWsEvent::ThoughtControl(event)),
-        event = lifecycle_events.recv() => Some(SessionWsEvent::Lifecycle(event)),
+        event = lifecycle_events.recv() => Some(SessionWsEvent::Lifecycle(Box::new(event))),
     }
 }
 
@@ -209,7 +209,7 @@ enum SessionWsEvent {
     Frame(OutputFrame),
     SessionControl(Result<ControlEvent, broadcast::error::RecvError>),
     ThoughtControl(Result<ControlEvent, broadcast::error::RecvError>),
-    Lifecycle(Result<LifecycleEvent, broadcast::error::RecvError>),
+    Lifecycle(Box<Result<LifecycleEvent, broadcast::error::RecvError>>),
 }
 
 async fn handle_session_ws_event(
@@ -236,7 +236,7 @@ async fn handle_session_ws_event(
             send_control_event_if_relevant(sender, session_id, "thought_events", event).await
         }
         SessionWsEvent::Lifecycle(event) => {
-            send_lifecycle_event_if_relevant(sender, session_id, event).await
+            send_lifecycle_event_if_relevant(sender, session_id, *event).await
         }
     }
 }

@@ -506,7 +506,7 @@ impl<C: TuiApi> App<C> {
         let plan_tabs = artifact
             .plan_files
             .and_then(|files| plan_tabs_from_filenames(&files));
-        self.fish_bowl_mode = FishBowlMode::Mermaid(Self::mermaid_viewer_state(
+        self.fish_bowl_mode = FishBowlMode::Mermaid(Box::new(Self::mermaid_viewer_state(
             session.session_id.clone(),
             session.tmux_name.clone(),
             session.cwd.clone(),
@@ -516,7 +516,7 @@ impl<C: TuiApi> App<C> {
             plan_tabs,
             false,
             BTreeMap::new(),
-        ));
+        )));
     }
 
     /// Open the Mermaid/plan viewer directly from a `schema.mmd` path on disk.
@@ -540,7 +540,7 @@ impl<C: TuiApi> App<C> {
 
         let plan_tabs = plan_tabs_from_filenames(&siblings);
 
-        self.fish_bowl_mode = FishBowlMode::Mermaid(Self::mermaid_viewer_state(
+        self.fish_bowl_mode = FishBowlMode::Mermaid(Box::new(Self::mermaid_viewer_state(
             session_id,
             slug,
             cwd,
@@ -550,7 +550,7 @@ impl<C: TuiApi> App<C> {
             plan_tabs,
             true,
             BTreeMap::new(),
-        ));
+        )));
     }
 
     pub(crate) fn open_skill_atlas_viewer(&mut self, action: SkillPanelAction) {
@@ -563,7 +563,7 @@ impl<C: TuiApi> App<C> {
         let title = skill_atlas_focus_title(&action);
         let mut inline_plan_files = BTreeMap::new();
         inline_plan_files.insert(DomainPlanTab::Plan, plan_text);
-        self.fish_bowl_mode = FishBowlMode::Mermaid(Self::mermaid_viewer_state(
+        self.fish_bowl_mode = FishBowlMode::Mermaid(Box::new(Self::mermaid_viewer_state(
             format!("skill-atlas::{title}"),
             format!("skill atlas: {title}"),
             cwd,
@@ -573,7 +573,7 @@ impl<C: TuiApi> App<C> {
             Some(vec![DomainPlanTab::Schema, DomainPlanTab::Plan]),
             true,
             inline_plan_files,
-        ));
+        )));
     }
 
     pub(crate) fn close_mermaid_viewer(&mut self) {

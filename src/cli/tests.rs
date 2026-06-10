@@ -857,13 +857,12 @@ fn fast_timeout() -> Duration {
 fn write_executable_script(dir: &std::path::Path, name: &str, body: &str) -> PathBuf {
     use std::os::unix::fs::PermissionsExt;
     let path = dir.join(name);
-    let file = std::fs::File::create(&path).expect("create script");
-    std::io::Write::write_all(&mut &file, body.as_bytes()).expect("write script");
-    file.sync_all().expect("sync script");
-    drop(file);
-    let mut perms = std::fs::metadata(&path).expect("metadata").permissions();
+    let tmp = dir.join(format!(".{name}.tmp"));
+    std::fs::write(&tmp, body).expect("write script");
+    let mut perms = std::fs::metadata(&tmp).expect("metadata").permissions();
     perms.set_mode(0o755);
-    std::fs::set_permissions(&path, perms).expect("chmod");
+    std::fs::set_permissions(&tmp, perms).expect("chmod");
+    std::fs::rename(&tmp, &path).expect("rename script into place");
     path
 }
 
