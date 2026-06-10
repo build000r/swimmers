@@ -15,7 +15,7 @@ All notable changes to swimmers are documented here. The format is based on [Kee
 
 ### Build and CI
 
-- Added CI workflow (`.github/workflows/ci.yml`) that runs `cargo test` and `cargo clippy` on every push to main and every pull request.
+- Added CI workflow (`.github/workflows/ci.yml`) with test, clippy, format, and rustdoc gates on every push to main and every pull request.
 - Added release profile with thin LTO, symbol stripping, and single codegen unit for smaller binaries.
 
 ### Code quality
@@ -23,6 +23,9 @@ All notable changes to swimmers are documented here. The format is based on [Kee
 - Cleaned up clippy warnings: replaced clamp-like patterns, redundant closures, and needless borrows.
 - Boxed oversized enum variants (`FishBowlMode::Mermaid`, `SessionWsEvent::Lifecycle`) to reduce stack frame sizes.
 - Added brief retry to file-lock acquisition for resilience under IO contention.
+- Enforced `cargo fmt` across all source files.
+- Removed dead code (`model_override`, `DismissAttentionPayload`, `ClientOverlay.client_dir`) and replaced stale `FIXME` annotations with proper `#[cfg(test)]` guards.
+- Fixed broken intra-doc link to private `INSPECT_GIT_REPO_CACHE_TTL`.
 
 ## [0.3.0] — 2026-05-02
 
