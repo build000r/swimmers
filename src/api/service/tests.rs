@@ -4,7 +4,10 @@ use crate::session::supervisor::SessionSupervisor;
 use crate::thought::health::BridgeHealthState;
 use crate::thought::protocol::SyncRequestSequence;
 use crate::thought::runtime_config::ThoughtConfig;
-use crate::types::{DirGroupMembershipUpdateRequest, DirRepoSearchResponse};
+use crate::types::{
+    DirGroupMembershipUpdateRequest, DirRepoSearchResponse, LaunchPathMapping, LaunchTargetSummary,
+};
+use std::collections::BTreeMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
@@ -44,6 +47,59 @@ fn managed_service_config(base: &Path, services: Vec<OverlayServiceEntry>) -> Ov
         groups: Vec::new(),
         launch: crate::session::overlay::OverlayLaunchConfig::local_only(),
     }
+}
+
+fn service_mapped_launch_target(
+    id: &str,
+    local_prefix: &Path,
+    remote_prefix: &str,
+) -> LaunchTargetSummary {
+    LaunchTargetSummary {
+        id: id.to_string(),
+        label: id.to_string(),
+        kind: "swimmers_api".to_string(),
+        base_url: Some("http://127.0.0.1:3210".to_string()),
+        auth_token_env: None,
+        path_mappings: vec![LaunchPathMapping {
+            local_prefix: local_prefix.to_string_lossy().into_owned(),
+            remote_prefix: remote_prefix.to_string(),
+        }],
+    }
+}
+
+#[test]
+fn default_launch_target_for_uses_mapping_only_without_explicit_default() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let base = dir.path().join("repos");
+    let swimmers = base.join("opensource").join("swimmers");
+    let config = OverlayDirConfig {
+        label: "managed".into(),
+        base_path: base.clone(),
+        services: Vec::new(),
+        groups: Vec::new(),
+        launch: crate::session::overlay::OverlayLaunchConfig {
+            default_target: "local".to_string(),
+            default_target_explicit: false,
+            targets: vec![
+                LaunchTargetSummary::local(),
+                service_mapped_launch_target("broad", &base, "/srv/repos"),
+                service_mapped_launch_target("devbox", &swimmers, "/srv/swimmers"),
+            ],
+            group_defaults: BTreeMap::new(),
+        },
+    };
+
+    assert_eq!(
+        default_launch_target_for(Some(&config), None, swimmers.join("src").as_path()).as_deref(),
+        Some("devbox")
+    );
+
+    let mut explicit = config;
+    explicit.launch.default_target_explicit = true;
+    assert_eq!(
+        default_launch_target_for(Some(&explicit), None, swimmers.as_path()).as_deref(),
+        Some("local")
+    );
 }
 
 #[tokio::test]

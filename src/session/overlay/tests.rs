@@ -24,6 +24,78 @@ fn test_launch_target(id: &str, label: &str, kind: &str) -> LaunchTargetSummary 
     }
 }
 
+fn mapped_launch_target(id: &str, local_prefix: &str, remote_prefix: &str) -> LaunchTargetSummary {
+    LaunchTargetSummary {
+        id: id.to_string(),
+        label: id.to_string(),
+        kind: "swimmers_api".to_string(),
+        base_url: Some("http://127.0.0.1:3210".to_string()),
+        auth_token_env: None,
+        path_mappings: vec![crate::types::LaunchPathMapping {
+            local_prefix: local_prefix.to_string(),
+            remote_prefix: remote_prefix.to_string(),
+        }],
+    }
+}
+
+#[test]
+fn implicit_launch_default_uses_longest_matching_path_mapping() {
+    let config = OverlayLaunchConfig {
+        default_target: "local".to_string(),
+        default_target_explicit: false,
+        targets: vec![
+            LaunchTargetSummary::local(),
+            mapped_launch_target("broad", "/tmp/repos", "/srv/repos"),
+            mapped_launch_target("specific", "/tmp/repos/swimmers", "/srv/swimmers"),
+        ],
+        group_defaults: BTreeMap::new(),
+    };
+
+    assert_eq!(
+        config.default_for_group_or_path(None, Path::new("/tmp/repos/swimmers/src")),
+        "specific"
+    );
+}
+
+#[test]
+fn explicit_launch_default_wins_over_path_mapping() {
+    let config = OverlayLaunchConfig {
+        default_target: "local".to_string(),
+        default_target_explicit: true,
+        targets: vec![
+            LaunchTargetSummary::local(),
+            mapped_launch_target("devbox", "/tmp/repos/swimmers", "/srv/swimmers"),
+        ],
+        group_defaults: BTreeMap::new(),
+    };
+
+    assert_eq!(
+        config.default_for_group_or_path(None, Path::new("/tmp/repos/swimmers")),
+        "local"
+    );
+}
+
+#[test]
+fn group_launch_default_wins_over_implicit_path_mapping() {
+    let mut group_defaults = BTreeMap::new();
+    group_defaults.insert("backend".to_string(), "backend-box".to_string());
+    let config = OverlayLaunchConfig {
+        default_target: "local".to_string(),
+        default_target_explicit: false,
+        targets: vec![
+            LaunchTargetSummary::local(),
+            mapped_launch_target("devbox", "/tmp/repos/swimmers", "/srv/swimmers"),
+            mapped_launch_target("backend-box", "/tmp/repos", "/srv/backend"),
+        ],
+        group_defaults,
+    };
+
+    assert_eq!(
+        config.default_for_group_or_path(Some("backend"), Path::new("/tmp/repos/swimmers")),
+        "backend-box"
+    );
+}
+
 fn test_launch_client(label: &str, targets: Vec<LaunchTargetSummary>) -> ClientOverlay {
     ClientOverlay {
         label: label.to_string(),
@@ -38,6 +110,7 @@ fn test_launch_client(label: &str, targets: Vec<LaunchTargetSummary>) -> ClientO
             groups: Vec::new(),
             launch: OverlayLaunchConfig {
                 default_target: "local".to_string(),
+                default_target_explicit: true,
                 targets,
                 group_defaults: BTreeMap::new(),
             },
@@ -760,6 +833,7 @@ fn overlay_health_reports_load_age_and_remote_target_count_without_probe() {
             groups: Vec::new(),
             launch: OverlayLaunchConfig {
                 default_target: "local".to_string(),
+                default_target_explicit: true,
                 targets: vec![LaunchTargetSummary::local(), remote],
                 group_defaults: BTreeMap::new(),
             },

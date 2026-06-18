@@ -953,7 +953,11 @@ async fn list_group_dir_response(
         overlay_label: dir_config.as_ref().map(|c| c.label.clone()),
         groups: dir_groups(dir_config.as_ref()),
         launch_targets: launch_targets_for(dir_config.as_ref()),
-        default_launch_target: default_launch_target_for(dir_config.as_ref(), Some(group_name)),
+        default_launch_target: default_launch_target_for(
+            dir_config.as_ref(),
+            Some(group_name),
+            canonical_base.as_path(),
+        ),
     })
 }
 
@@ -991,7 +995,7 @@ async fn list_managed_root_response(
         overlay_label: Some(config.label.clone()),
         groups: dir_groups(Some(config)),
         launch_targets: launch_targets_for(Some(config)),
-        default_launch_target: default_launch_target_for(Some(config), None),
+        default_launch_target: default_launch_target_for(Some(config), None, canonical),
     })
 }
 
@@ -1068,7 +1072,7 @@ async fn list_regular_dir_response(
         overlay_label: dir_config.map(|c| c.label.clone()),
         groups,
         launch_targets: launch_targets_for(dir_config),
-        default_launch_target: default_launch_target_for(dir_config, None),
+        default_launch_target: default_launch_target_for(dir_config, None, canonical),
     })
 }
 
@@ -1094,10 +1098,11 @@ fn launch_targets_for(config: Option<&OverlayDirConfig>) -> Vec<LaunchTargetSumm
 fn default_launch_target_for(
     config: Option<&OverlayDirConfig>,
     group: Option<&str>,
+    path: &Path,
 ) -> Option<String> {
     Some(
         config
-            .map(|config| config.launch.default_for_group(group))
+            .map(|config| config.launch.default_for_group_or_path(group, path))
             .unwrap_or_else(|| "local".to_string()),
     )
 }

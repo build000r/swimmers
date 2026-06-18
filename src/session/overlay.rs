@@ -68,6 +68,7 @@ pub struct OverlayDirGroup {
 #[derive(Debug, Clone)]
 pub struct OverlayLaunchConfig {
     pub default_target: String,
+    pub default_target_explicit: bool,
     pub targets: Vec<LaunchTargetSummary>,
     pub group_defaults: BTreeMap<String, String>,
 }
@@ -76,6 +77,7 @@ impl OverlayLaunchConfig {
     pub fn local_only() -> Self {
         Self {
             default_target: "local".to_string(),
+            default_target_explicit: true,
             targets: vec![LaunchTargetSummary::local()],
             group_defaults: BTreeMap::new(),
         }
@@ -85,6 +87,17 @@ impl OverlayLaunchConfig {
         group
             .and_then(|name| self.group_defaults.get(name))
             .cloned()
+            .unwrap_or_else(|| self.default_target.clone())
+    }
+
+    pub fn default_for_group_or_path(&self, group: Option<&str>, path: &Path) -> String {
+        if let Some(target) = group.and_then(|name| self.group_defaults.get(name)) {
+            return target.clone();
+        }
+        if self.default_target_explicit {
+            return self.default_target.clone();
+        }
+        best_mapped_launch_target(path, &self.targets)
             .unwrap_or_else(|| self.default_target.clone())
     }
 }
@@ -922,11 +935,16 @@ fn parse_agent_launch(section: Option<DevSanityAgentLaunch>) -> OverlayLaunchCon
         .filter_map(parse_launch_target)
         .collect();
     ensure_local_launch_target(&mut targets);
+    let default_target_explicit = section
+        .default_target
+        .as_deref()
+        .is_some_and(|target| target_exists(&targets, target));
     let default_target = valid_default_target(section.default_target, &targets);
     let group_defaults = valid_group_defaults(section.group_defaults, &targets);
 
     OverlayLaunchConfig {
         default_target,
+        default_target_explicit,
         targets,
         group_defaults,
     }
@@ -982,6 +1000,41 @@ fn valid_group_defaults(
 
 fn target_exists(targets: &[LaunchTargetSummary], id: &str) -> bool {
     targets.iter().any(|target| target.id == id)
+}
+
+fn best_mapped_launch_target(path: &Path, targets: &[LaunchTargetSummary]) -> Option<String> {
+    targets
+        .iter()
+        .filter(|target| target.id != "local" && !target.path_mappings.is_empty())
+        .flat_map(|target| {
+            target.path_mappings.iter().filter_map(move |mapping| {
+                launch_mapping_score(path, mapping).map(|score| (score, target.id.clone()))
+            })
+        })
+        .max_by_key(|(score, _)| *score)
+        .map(|(_, id)| id)
+}
+
+fn launch_mapping_score(path: &Path, mapping: &LaunchPathMapping) -> Option<usize> {
+    let local_prefix = lexical_path_buf(&mapping.local_prefix);
+    lexical_path_buf(path.to_string_lossy().as_ref())
+        .strip_prefix(&local_prefix)
+        .ok()?;
+    Some(local_prefix.components().count())
+}
+
+fn lexical_path_buf(path: &str) -> PathBuf {
+    let mut normalized = PathBuf::new();
+    for component in Path::new(path).components() {
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                normalized.pop();
+            }
+            other => normalized.push(other.as_os_str()),
+        }
+    }
+    normalized
 }
 
 fn unique_launch_targets<'a, I>(targets: I) -> Vec<LaunchTargetSummary>
