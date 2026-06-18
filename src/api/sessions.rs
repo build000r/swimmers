@@ -79,8 +79,8 @@ use crate::types::{
 
 #[cfg(test)]
 use self::pane_tail::{
-    request_pane_tail_from_actor, request_pane_tail_from_actor_with_timeout, PaneTailError,
-    PANE_TAIL_LINES,
+    remote_pane_tail_response, request_pane_tail_from_actor,
+    request_pane_tail_from_actor_with_timeout, PaneTailError, PANE_TAIL_LINES,
 };
 
 // ---------------------------------------------------------------------------

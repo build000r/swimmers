@@ -766,6 +766,36 @@ fn encode_path_segment_escapes_reserved_url_characters() {
 }
 
 #[test]
+fn remote_url_rejects_credentialed_query_or_fragment_base_url() {
+    for base_url in [
+        "http://token@127.0.0.1:3210",
+        "http://user:token@127.0.0.1:3210",
+        "http://127.0.0.1:3210?token=secret",
+        "http://127.0.0.1:3210#secret",
+    ] {
+        let mut target = target();
+        target.base_url = Some(base_url.to_string());
+
+        let err = remote_url(&target, "/v1/sessions").expect_err("unsafe base_url rejected");
+
+        assert_eq!(err.status, StatusCode::BAD_REQUEST);
+        assert_eq!(err.code(), "LAUNCH_TARGET_INVALID");
+        assert!(err.message().contains("must not include credentials"));
+    }
+}
+
+#[test]
+fn remote_url_preserves_clean_base_path() {
+    let mut target = target();
+    target.base_url = Some("  http://127.0.0.1:3210/swimmers-api/  ".to_string());
+
+    assert_eq!(
+        remote_url(&target, "/v1/sessions/sess%2Fweird/pane-tail").expect("remote url"),
+        "http://127.0.0.1:3210/swimmers-api/v1/sessions/sess%2Fweird/pane-tail"
+    );
+}
+
+#[test]
 fn target_points_at_current_server_matches_active_tailnet_bind_and_port() {
     let mut config = Config::default();
     config.bind = "100.86.253.9".to_string();

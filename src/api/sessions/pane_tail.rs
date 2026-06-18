@@ -6,10 +6,10 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::oneshot;
 
-use crate::api::AppState;
+use crate::api::{remote_sessions, AppState};
 use crate::auth::{AuthInfo, AuthScope};
 use crate::session::actor::{ActorHandle, SessionCommand};
-use crate::types::SessionPaneTailResponse;
+use crate::types::{LaunchTargetSummary, SessionPaneTailResponse};
 
 use super::error_response;
 
@@ -29,10 +29,54 @@ pub(super) async fn get_pane_tail(
         return resp;
     }
 
-    match request_pane_tail(&state, &session_id).await {
+    match pane_tail_route(&session_id) {
+        Ok(PaneTailRoute::Remote {
+            target,
+            remote_session_id,
+        }) => remote_pane_tail_response(&target, remote_session_id).await,
+        Ok(PaneTailRoute::Local) => local_pane_tail_response(&state, &session_id).await,
+        Err(err) => err.into_response(),
+    }
+}
+
+enum PaneTailRoute<'a> {
+    Remote {
+        target: LaunchTargetSummary,
+        remote_session_id: &'a str,
+    },
+    Local,
+}
+
+fn pane_tail_route(
+    session_id: &str,
+) -> Result<PaneTailRoute<'_>, remote_sessions::RemoteSessionError> {
+    Ok(match remote_sessions::denamespace_for_target(session_id)? {
+        Some((target, remote_session_id)) => PaneTailRoute::Remote {
+            target,
+            remote_session_id,
+        },
+        None => PaneTailRoute::Local,
+    })
+}
+
+pub(super) async fn remote_pane_tail_response(
+    target: &LaunchTargetSummary,
+    remote_session_id: &str,
+) -> Response {
+    match remote_sessions::fetch_remote_pane_tail(target, remote_session_id).await {
+        Ok(response) => (StatusCode::OK, Json(response)).into_response(),
+        Err(err) => err.into_response(),
+    }
+}
+
+async fn local_pane_tail_response(state: &Arc<AppState>, session_id: &str) -> Response {
+    match request_pane_tail(state, session_id).await {
         Ok(text) => (
             StatusCode::OK,
-            Json(SessionPaneTailResponse { session_id, text }),
+            Json(SessionPaneTailResponse {
+                session_id: session_id.to_string(),
+                text,
+            }),
         )
             .into_response(),
         Err(error) => pane_tail_error_response(error),

@@ -21,7 +21,8 @@ use crate::types::{
     EnvironmentSummary, ErrorResponse, LaunchPathMapping, LaunchTargetSummary,
     SessionAgentContextResponse, SessionEnvironmentSummary, SessionGitDiffResponse,
     SessionGroupInputRequest, SessionGroupInputResponse, SessionInputRequest, SessionInputResponse,
-    SessionListResponse, SessionSummary, SessionTimelineResponse, SessionTranscriptResponse,
+    SessionListResponse, SessionPaneTailResponse, SessionSummary, SessionTimelineResponse,
+    SessionTranscriptResponse,
 };
 
 const REMOTE_LIST_TIMEOUT: Duration = Duration::from_millis(900);
@@ -561,7 +562,7 @@ fn is_current_server_poll_target(target: &LaunchTargetSummary, config: &Config) 
     if target_points_at_current_server(target, config) {
         tracing::debug!(
             target = %target.id,
-            base_url = ?target.base_url,
+            base_url = ?sanitized_target_base_url(target),
             "skipping self-target remote session polling"
         );
         true
@@ -1000,6 +1001,19 @@ pub async fn fetch_remote_timeline(
     get_remote_json(target, &format!("/v1/sessions/{session_id}/timeline"))
         .await
         .map(|mut response: SessionTimelineResponse| {
+            response.session_id = namespace_session_id(&target.id, &response.session_id);
+            response
+        })
+}
+
+pub async fn fetch_remote_pane_tail(
+    target: &LaunchTargetSummary,
+    remote_session_id: &str,
+) -> Result<SessionPaneTailResponse, RemoteSessionError> {
+    let session_id = encode_path_segment(remote_session_id);
+    get_remote_json(target, &format!("/v1/sessions/{session_id}/pane-tail"))
+        .await
+        .map(|mut response: SessionPaneTailResponse| {
             response.session_id = namespace_session_id(&target.id, &response.session_id);
             response
         })
@@ -1489,9 +1503,37 @@ fn remote_url(target: &LaunchTargetSummary, path: &str) -> Result<String, Remote
                 format!("launch target '{}' is missing base_url", target.id),
             )
         })?;
+    let url = reqwest::Url::parse(base_url).map_err(|err| {
+        RemoteSessionError::new(
+            StatusCode::BAD_REQUEST,
+            "LAUNCH_TARGET_INVALID",
+            format!("launch target '{}' has invalid base_url: {err}", target.id),
+        )
+    })?;
+    if url.host_str().is_none() {
+        return Err(RemoteSessionError::new(
+            StatusCode::BAD_REQUEST,
+            "LAUNCH_TARGET_INVALID",
+            format!("launch target '{}' base_url must include a host", target.id),
+        ));
+    }
+    if !url.username().is_empty()
+        || url.password().is_some()
+        || url.query().is_some()
+        || url.fragment().is_some()
+    {
+        return Err(RemoteSessionError::new(
+            StatusCode::BAD_REQUEST,
+            "LAUNCH_TARGET_INVALID",
+            format!(
+                "launch target '{}' base_url must not include credentials, query, or fragment",
+                target.id
+            ),
+        ));
+    }
     Ok(format!(
         "{}/{}",
-        base_url.trim_end_matches('/'),
+        url.as_str().trim_end_matches('/'),
         path.trim_start_matches('/')
     ))
 }

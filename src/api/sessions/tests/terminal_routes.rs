@@ -284,6 +284,25 @@ async fn get_pane_tail_returns_actor_text() {
 }
 
 #[tokio::test]
+async fn get_pane_tail_proxies_namespaced_remote_session() {
+    let (base_url, handle) = spawn_remote_pane_tail_ok_server().await;
+    let target = remote_agent_context_target(base_url);
+
+    let response = remote_pane_tail_response(&target, "sess/remote?x#frag")
+        .await
+        .into_response();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let json = response_json(response).await;
+    assert_eq!(
+        json["session_id"],
+        remote_sessions::namespace_session_id("remote-test", "sess/remote?x#frag")
+    );
+    assert_eq!(json["text"], "remote pane output");
+    handle.abort();
+}
+
+#[tokio::test]
 async fn request_pane_tail_from_actor_returns_actor_text() {
     let (cmd_tx, mut cmd_rx) = mpsc::channel(8);
     let handle = ActorHandle::test_handle("sess-tail", "tmux-tail", cmd_tx);
