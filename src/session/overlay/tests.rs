@@ -639,18 +639,13 @@ dev_sanity:
         .map(|service| service.dir.as_str())
         .collect();
 
-    let scanned_hard_path = scanned_hard_repo
-        .canonicalize()
-        .expect("canonical scanned hard path")
-        .to_string_lossy()
-        .into_owned();
     assert_eq!(
         service_dirs,
         vec![
             "sweet-potato",
             "finalreceipts",
             hard_repo.to_str().expect("hard path"),
-            scanned_hard_path.as_str()
+            scanned_hard_repo.to_str().expect("scanned hard path")
         ]
     );
     assert!(config

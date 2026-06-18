@@ -26,6 +26,7 @@ use crate::config::{
 };
 use crate::thought::emitter_client::resolve_clawgs_bin;
 use crate::thought::runtime_config::DaemonDefaults;
+use crate::types::{DependencyHealthSnapshot, DependencyHealthStatus};
 
 /// Single source of truth for a documented environment variable.
 ///
@@ -502,6 +503,15 @@ fn doctor_fail(name: &'static str, detail: impl Into<String>) -> DoctorFinding {
     }
 }
 
+fn doctor_warn(name: &'static str, detail: impl Into<String>) -> DoctorFinding {
+    DoctorFinding {
+        ok: true,
+        level: DoctorLevel::Warn,
+        name,
+        detail: detail.into(),
+    }
+}
+
 pub fn config_diagnostic_findings(diagnostics: &[ConfigDiagnostic]) -> Vec<DoctorFinding> {
     diagnostics
         .iter()
@@ -622,6 +632,53 @@ fn doctor_data_dir_finding(data_dir_writable: Result<PathBuf, String>) -> Doctor
     match data_dir_writable {
         Ok(path) => doctor_ok("data_dir", format!("writable: {}", path.display())),
         Err(reason) => doctor_fail("data_dir", format!("data dir not writable: {reason}")),
+    }
+}
+
+pub fn doctor_remote_targets_finding(snapshot: &DependencyHealthSnapshot) -> DoctorFinding {
+    let configured = snapshot
+        .details
+        .get("configured_targets")
+        .map(String::as_str)
+        .unwrap_or("unknown");
+    let detail = snapshot
+        .last_error
+        .as_deref()
+        .map(|error| format!(": {error}"))
+        .unwrap_or_default();
+    let summary = format!(
+        "status={} configured={} auth_env_missing={} targets_without_path_mappings={}{}",
+        dependency_status_label(snapshot.status),
+        configured,
+        snapshot
+            .details
+            .get("auth_env_missing")
+            .map(String::as_str)
+            .unwrap_or("0"),
+        snapshot
+            .details
+            .get("targets_without_path_mappings")
+            .map(String::as_str)
+            .unwrap_or("0"),
+        detail
+    );
+    match snapshot.status {
+        DependencyHealthStatus::Healthy | DependencyHealthStatus::NotConfigured => {
+            doctor_ok("remote_targets", summary)
+        }
+        DependencyHealthStatus::Unknown
+        | DependencyHealthStatus::Degraded
+        | DependencyHealthStatus::Unavailable => doctor_warn("remote_targets", summary),
+    }
+}
+
+fn dependency_status_label(status: DependencyHealthStatus) -> &'static str {
+    match status {
+        DependencyHealthStatus::Unknown => "unknown",
+        DependencyHealthStatus::Healthy => "healthy",
+        DependencyHealthStatus::Degraded => "degraded",
+        DependencyHealthStatus::Unavailable => "unavailable",
+        DependencyHealthStatus::NotConfigured => "not_configured",
     }
 }
 

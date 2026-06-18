@@ -297,8 +297,10 @@ fn dir_config_base_path_contains_cwd(config: &OverlayDirConfig, cwd_normalized: 
         .base_path
         .canonicalize()
         .unwrap_or_else(|_| config.base_path.clone());
+    let cwd = canonical_or_original(Path::new(cwd_normalized));
     let base_str = base.to_string_lossy();
-    cwd_starts_with(cwd_normalized, base_str.as_ref())
+    let cwd_str = cwd.to_string_lossy();
+    cwd_starts_with(cwd_str.as_ref(), base_str.as_ref())
 }
 
 fn client_matches_cwd_patterns(client: &ClientOverlay, cwd_normalized: &str) -> bool {
@@ -743,7 +745,7 @@ fn parse_services(
         .into_iter()
         .filter_map(parse_service_entry)
         .inspect(|entry| {
-            seen_dirs.insert(entry.dir.clone());
+            mark_service_dir_seen(&mut seen_dirs, &entry.dir);
         })
         .collect();
 
@@ -800,9 +802,11 @@ fn append_service_if_new(
     let Some(entry) = entry else {
         return;
     };
-    if seen_dirs.insert(entry.dir.clone()) {
-        services.push(entry);
+    if service_dir_seen(seen_dirs, &entry.dir) {
+        return;
     }
+    mark_service_dir_seen(seen_dirs, &entry.dir);
+    services.push(entry);
 }
 
 fn append_services_if_new<I>(
@@ -823,7 +827,31 @@ fn service_entries_from_scan_root(root: &Path, base_path: &Path) -> Vec<OverlayS
         return Vec::new();
     }
 
-    collect_sorted_service_entries(repo_dirs_in_scan_root(&canonical.root), base_path)
+    collect_sorted_service_entries(repo_dirs_in_scan_root(root), base_path)
+}
+
+fn service_dir_seen(seen_dirs: &BTreeSet<String>, dir: &str) -> bool {
+    service_dir_seen_keys(dir)
+        .iter()
+        .any(|key| seen_dirs.contains(key))
+}
+
+fn mark_service_dir_seen(seen_dirs: &mut BTreeSet<String>, dir: &str) {
+    for key in service_dir_seen_keys(dir) {
+        seen_dirs.insert(key);
+    }
+}
+
+fn service_dir_seen_keys(dir: &str) -> Vec<String> {
+    let mut keys = vec![dir.to_string()];
+    let path = Path::new(dir);
+    if path.is_absolute() {
+        let canonical = canonical_or_original(path).to_string_lossy().into_owned();
+        if canonical != dir {
+            keys.push(canonical);
+        }
+    }
+    keys
 }
 
 struct CanonicalScanRootPaths {

@@ -550,6 +550,26 @@ fn doctor_flags_token_mode_without_token() {
 }
 
 #[test]
+fn doctor_remote_targets_warning_reports_counts_without_env_names() {
+    let snapshot = DependencyHealthSnapshot::degraded(chrono::Utc::now(), "auth_env_missing")
+        .with_detail("configured_targets", "2")
+        .with_detail("auth_env_missing", "1")
+        .with_detail("targets_without_path_mappings", "1");
+
+    let finding = doctor_remote_targets_finding(&snapshot);
+    assert!(
+        finding.ok,
+        "remote targets are advisory for local operation"
+    );
+    assert_eq!(finding.level, DoctorLevel::Warn);
+    assert_eq!(finding.name, "remote_targets");
+    assert!(finding.detail.contains("status=degraded"));
+    assert!(finding.detail.contains("configured=2"));
+    assert!(finding.detail.contains("auth_env_missing=1"));
+    assert!(!finding.detail.contains("SWIMMERS_REMOTE_TEST_TOKEN"));
+}
+
+#[test]
 fn doctor_reports_config_warning_without_failing() {
     let diagnostics = [ConfigDiagnostic {
         level: ConfigDiagnosticLevel::Warning,

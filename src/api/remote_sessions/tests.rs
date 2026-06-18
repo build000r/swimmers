@@ -616,6 +616,64 @@ fn environment_summary_redacts_token_values_and_credentialed_base_url() {
 }
 
 #[test]
+fn remote_targets_health_reports_cached_degraded_target_without_secret_values() {
+    reset_remote_target_session_cache_for_tests();
+    let remote = target();
+    record_remote_poll_success(&remote.id, &[summary("sess_0")]);
+    let stale = record_remote_poll_failure(&remote.id, "REMOTE_SESSION_LIST_FAILED");
+    assert_eq!(stale.len(), 1);
+
+    let health = remote_targets_health_snapshot_for_targets(vec![
+        LaunchTargetSummary::local(),
+        remote.clone(),
+    ]);
+    assert_eq!(health.status, DependencyHealthStatus::Degraded);
+    assert_eq!(health.details["configured_targets"], "1");
+    assert_eq!(health.details["degraded_targets"], "1");
+    assert_eq!(health.details["probe"], "session_list_cache");
+    assert!(health.last_seen_at.is_some());
+    assert_eq!(
+        health.last_error.as_deref(),
+        Some("REMOTE_SESSION_LIST_FAILED")
+    );
+
+    let environment = environment_summary_for_target(&remote);
+    assert_eq!(environment.status, DependencyHealthStatus::Degraded);
+    assert_eq!(
+        environment.last_error.as_deref(),
+        Some("REMOTE_SESSION_LIST_FAILED")
+    );
+}
+
+#[test]
+fn remote_targets_health_reports_auth_and_mapping_doctor_without_env_names() {
+    let _guard = crate::test_support::ENV_LOCK
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
+    reset_remote_target_session_cache_for_tests();
+    std::env::remove_var("SWIMMERS_REMOTE_TEST_TOKEN");
+    let mut remote = target();
+    remote.auth_token_env = Some("SWIMMERS_REMOTE_TEST_TOKEN".to_string());
+    remote.path_mappings = Vec::new();
+
+    let health = remote_targets_health_snapshot_for_targets(vec![remote]);
+    assert_eq!(health.status, DependencyHealthStatus::Unavailable);
+    assert_eq!(health.details["auth_env_missing"], "1");
+    assert_eq!(health.details["targets_without_path_mappings"], "1");
+    assert_eq!(health.last_error.as_deref(), Some("auth_env_missing"));
+
+    let json = serde_json::to_string(&health).expect("health json");
+    assert!(!json.contains("SWIMMERS_REMOTE_TEST_TOKEN"));
+}
+
+#[test]
+fn unmapped_launch_target_cwd_returns_stable_guidance() {
+    let err = map_cwd_for_target(&target(), "/elsewhere/swimmers").expect_err("unmapped cwd");
+    assert_eq!(err.code(), "LAUNCH_TARGET_PATH_UNMAPPED");
+    assert!(err.message().contains("add a path_mappings entry"));
+}
+
+#[test]
 fn denamespace_uses_longest_configured_target_prefix() {
     let mut short = target();
     short.id = "zone".to_string();

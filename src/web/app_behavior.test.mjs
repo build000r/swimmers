@@ -887,6 +887,27 @@ test("terminal status strip renders thought bridge degradation", () => {
   assert.ok(web.el.terminalStatusStrip.textContent.includes("thought bridge degraded: model timeout"));
 });
 
+test("terminal status strip renders remote target degradation", () => {
+  resetWebState();
+  web.applyBackendHealth({
+    status: "healthy",
+    thought_bridge: { status: "healthy" },
+    persistence: { available: true, ok: true },
+    dependencies: {
+      remote_targets: {
+        status: "degraded",
+        last_error: "REMOTE_SESSION_LIST_FAILED",
+      },
+    },
+  });
+
+  assert.equal(
+    web.backendHealthWarningText(web.state.backendHealth),
+    "remote targets degraded: REMOTE_SESSION_LIST_FAILED",
+  );
+  assert.ok(web.el.terminalStatusStrip.textContent.includes("remote targets degraded"));
+});
+
 test("terminal text fallback refreshes from live terminal frames", () => {
   resetWebState();
   web.state.selectedSessionId = "sess_0";

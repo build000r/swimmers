@@ -86,9 +86,6 @@ export function backendHealthWarningText(health) {
   }
   const thought = health.thought_bridge || {};
   const status = String(thought.status || "").toLowerCase();
-  if (!status || status === "healthy") {
-    return "";
-  }
   if (status === "degraded") {
     const detail = conciseHealthDetail(thought.last_backend_error || thought.last_error);
     return `thought bridge degraded${detail ? `: ${detail}` : ""}`;
@@ -97,7 +94,16 @@ export function backendHealthWarningText(health) {
     const detail = conciseHealthDetail(thought.shutdown_reason || thought.last_error);
     return `thought bridge unhealthy${detail ? `: ${detail}` : ""}`;
   }
-  return `thought bridge ${status}`;
+  if (status && status !== "healthy") {
+    return `thought bridge ${status}`;
+  }
+  const remoteTargets = health.dependencies?.remote_targets || {};
+  const remoteStatus = String(remoteTargets.status || "").toLowerCase();
+  if (remoteStatus === "degraded" || remoteStatus === "unavailable") {
+    const detail = conciseHealthDetail(remoteTargets.last_error);
+    return `remote targets ${remoteStatus}${detail ? `: ${detail}` : ""}`;
+  }
+  return "";
 }
 
 export async function runSessionRefresh(runtime) {

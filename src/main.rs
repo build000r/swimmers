@@ -269,7 +269,14 @@ fn run_config_doctor(load: ConfigLoad) -> i32 {
     let clawgs_defaults = cli::check_clawgs_defaults();
     let data_dir = startup::resolve_data_dir();
     let data_dir_writable = cli::check_data_dir_writable(&data_dir);
-    let findings = config_doctor_findings(&load, tmux_present, clawgs_defaults, data_dir_writable);
+    let remote_targets = swimmers::api::remote_sessions::remote_targets_health_snapshot();
+    let findings = config_doctor_findings(
+        &load,
+        tmux_present,
+        clawgs_defaults,
+        data_dir_writable,
+        remote_targets,
+    );
     let printed_code = cli::print_doctor_findings(&findings);
     debug_assert_eq!(printed_code, config_doctor_exit_code(&findings));
     printed_code
@@ -280,6 +287,7 @@ fn config_doctor_findings(
     tmux_present: bool,
     clawgs_defaults: Result<String, String>,
     data_dir_writable: Result<PathBuf, String>,
+    remote_targets: swimmers::types::DependencyHealthSnapshot,
 ) -> Vec<cli::DoctorFinding> {
     let mut findings = cli::config_diagnostic_findings(&load.diagnostics);
     findings.extend(cli::run_doctor_checks(
@@ -288,6 +296,7 @@ fn config_doctor_findings(
         clawgs_defaults,
         data_dir_writable,
     ));
+    findings.push(cli::doctor_remote_targets_finding(&remote_targets));
     findings
 }
 
@@ -298,7 +307,9 @@ fn config_doctor_exit_code(findings: &[cli::DoctorFinding]) -> i32 {
 #[cfg(test)]
 mod config_subcommand_tests {
     use super::*;
+    use chrono::Utc;
     use swimmers::config::{ConfigDiagnostic, ConfigDiagnosticLevel};
+    use swimmers::types::DependencyHealthSnapshot;
 
     fn config_load_with_diagnostics(diagnostics: Vec<ConfigDiagnostic>) -> ConfigLoad {
         ConfigLoad {
@@ -330,6 +341,10 @@ mod config_subcommand_tests {
             name: "test",
             detail: "test finding".to_string(),
         }
+    }
+
+    fn remote_targets_not_configured() -> DependencyHealthSnapshot {
+        DependencyHealthSnapshot::not_configured(Utc::now()).with_detail("configured_targets", "0")
     }
 
     #[test]
@@ -392,6 +407,7 @@ mod config_subcommand_tests {
             true,
             Ok("clawgs defaults ok".to_string()),
             Ok(PathBuf::from("/tmp/swimmers-test")),
+            remote_targets_not_configured(),
         );
 
         let names: Vec<_> = findings.iter().map(|finding| finding.name).collect();
@@ -404,7 +420,8 @@ mod config_subcommand_tests {
                 "auth/token",
                 "tmux",
                 "clawgs",
-                "data_dir"
+                "data_dir",
+                "remote_targets"
             ]
         );
     }

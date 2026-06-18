@@ -11,7 +11,7 @@ use serde::Serialize;
 
 use crate::api::AppState;
 use crate::persistence::file_store::{PersistenceHealthSnapshot, PersistenceLoadSnapshot};
-use crate::session::overlay::{default_overlay_health, remote_targets_health};
+use crate::session::overlay::default_overlay_health;
 use crate::thought::health::{BridgeHealthSnapshot, BridgeStatus};
 use crate::types::{
     DependencyHealthLedger, DependencyHealthSnapshot, DependencyHealthStatus,
@@ -195,7 +195,7 @@ fn dependency_ledger(
         thought_bridge: thought_bridge_dependency_health(thought_bridge),
         native_scripts: crate::native::script_dependency_health(native_app),
         overlay: default_overlay_health(),
-        remote_targets: remote_targets_health(),
+        remote_targets: crate::api::remote_sessions::remote_targets_health_snapshot(),
     }
 }
 
