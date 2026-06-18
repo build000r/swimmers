@@ -384,7 +384,7 @@ async fn api_client_list_dirs_allows_slower_directory_listing_responses() {
     let client = test_api_client(base_url, None);
 
     let response = client
-        .list_dirs(None, true, None)
+        .list_dirs(None, true, None, None)
         .await
         .expect("list dirs should outlive the default polling timeout");
 
@@ -497,7 +497,7 @@ async fn api_client_list_dirs_reports_feature_hint_on_404() {
     let client = test_api_client(format!("http://{addr}"), None);
 
     let error = client
-        .list_dirs(None, true, None)
+        .list_dirs(None, true, None, None)
         .await
         .expect_err("missing route should explain the required runtime switch");
 

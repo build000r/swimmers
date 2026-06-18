@@ -39,6 +39,7 @@ struct MockApiState {
     open_calls: Vec<String>,
     open_attention_group_calls: Vec<(usize, Vec<String>, bool, bool, AttentionGroupLayout)>,
     list_calls: Vec<(Option<String>, bool)>,
+    list_targets: Vec<Option<String>>,
     list_repo_dirs_calls: usize,
     update_dir_group_memberships_calls: Vec<(String, Vec<String>, Vec<String>)>,
     start_repo_action_calls: Vec<(String, RepoActionKind)>,
@@ -260,6 +261,10 @@ impl MockApi {
 
     fn list_calls(&self) -> Vec<(Option<String>, bool)> {
         self.state.lock().unwrap().list_calls.clone()
+    }
+
+    fn list_targets(&self) -> Vec<Option<String>> {
+        self.state.lock().unwrap().list_targets.clone()
     }
 
     fn list_repo_dirs_calls(&self) -> usize {
@@ -657,12 +662,15 @@ impl TuiApi for MockApi {
         path: Option<&str>,
         managed_only: bool,
         _group: Option<&str>,
+        target: Option<&str>,
     ) -> BoxFuture<'_, Result<DirListResponse, String>> {
         let state = self.state.clone();
         let path = path.map(|value| value.to_string());
+        let target = target.map(|value| value.to_string());
         Box::pin(async move {
             let mut state = state.lock().unwrap();
             state.list_calls.push((path, managed_only));
+            state.list_targets.push(target);
             state
                 .list_dirs_results
                 .pop_front()

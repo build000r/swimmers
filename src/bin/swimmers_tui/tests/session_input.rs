@@ -1023,7 +1023,7 @@ fn toggle_launch_target_persists_across_picker_reopen() {
         &[("swimmers", false)],
     )));
     let field = test_field();
-    let mut app = make_app(api);
+    let mut app = make_app(api.clone());
 
     app.handle_field_click(10, 10, field);
     poll_until_interaction(&mut app);
@@ -1041,6 +1041,10 @@ fn toggle_launch_target_persists_across_picker_reopen() {
             .as_ref()
             .and_then(|picker| picker.launch_target.as_deref()),
         Some("jeremy-skillbox")
+    );
+    assert_eq!(
+        api.list_targets(),
+        vec![None, Some("jeremy-skillbox".to_string())]
     );
 }
 

@@ -303,6 +303,8 @@ function resetWebState() {
   web.state.workbenchSelectedTurnId = "";
   web.state.readOnly = false;
   web.state.backendHealth = null;
+  web.state.fleetFilter = { kind: "", key: "" };
+  web.state.sessionGroupMode = "flat";
   web.state.terminalFallbackActive = false;
   web.state.terminalFallbackAutoFollow = true;
   web.state.terminalMirrorText = "";
@@ -417,6 +419,38 @@ test("command palette run path preserves disabled no-op, actions, and actionId d
   web.state.activeSheet = "palette";
   assert.equal(await web.runCommandPaletteItem({ actionId: "open_auth" }), true);
   assert.equal(web.state.activeSheet, "auth");
+});
+
+test("surface fleet lens actions persist active filter and grouping mode", async () => {
+  resetWebState();
+
+  await web.handleSurfaceAction({
+    type: "action",
+    actionId: "fleet_filter",
+    kind: "target",
+    key: "skillbox",
+  });
+  assert.deepEqual(web.state.fleetFilter, { kind: "target", key: "skillbox" });
+  assert.equal(
+    storage.get("swimmers.web.fleet.filter"),
+    JSON.stringify({ kind: "target", key: "skillbox" }),
+  );
+
+  await web.handleSurfaceAction({
+    type: "action",
+    actionId: "fleet_filter",
+    kind: "target",
+    key: "skillbox",
+  });
+  assert.deepEqual(web.state.fleetFilter, { kind: "", key: "" });
+  assert.equal(storage.has("swimmers.web.fleet.filter"), false);
+
+  await web.handleSurfaceAction({
+    type: "action",
+    actionId: "toggle_session_grouping",
+  });
+  assert.equal(web.state.sessionGroupMode, "project");
+  assert.equal(storage.get("swimmers.web.sessionGroupMode"), "project");
 });
 
 test("command palette event handlers preserve navigation and result dispatch", () => {

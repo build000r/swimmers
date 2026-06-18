@@ -408,10 +408,26 @@ impl TuiApi for InProcessApi {
         path: Option<&str>,
         managed_only: bool,
         group: Option<&str>,
+        target: Option<&str>,
     ) -> BoxFuture<'_, Result<DirListResponse, String>> {
         let path = path.map(str::to_owned);
         let group = group.map(str::to_owned);
+        let target = target.map(str::to_owned);
         Box::pin(async move {
+            if let Some(target) = target
+                .as_deref()
+                .map(str::trim)
+                .filter(|target| !target.is_empty() && *target != "local")
+            {
+                return remote_sessions::list_remote_dirs(
+                    target,
+                    path.as_deref(),
+                    managed_only,
+                    group.as_deref(),
+                )
+                .await
+                .map_err(|err| err.message().to_string());
+            }
             list_dirs_service(&self.state, path.as_deref(), managed_only, group.as_deref())
                 .await
                 .map_err(|err| err.to_string())

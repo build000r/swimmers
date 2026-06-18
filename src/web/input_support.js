@@ -943,8 +943,28 @@ export function initialStateBootPlan(context = {}) {
     storedDirPath,
     clearStoredDirPath: Boolean(rawStoredDirPath && !storedDirPath),
     storedManagedOnly: context.rawStoredManagedOnly === "true",
+    storedFleetFilter: parseStoredFleetFilter(context.rawStoredFleetFilter),
+    storedSessionGroupMode: parseStoredSessionGroupMode(context.rawStoredSessionGroupMode),
     terminalWorkbenchOpen: !Boolean(context.terminalWorkbenchMobile),
   };
+}
+
+function parseStoredFleetFilter(raw) {
+  if (!raw) {
+    return { kind: "", key: "" };
+  }
+  try {
+    const parsed = JSON.parse(String(raw));
+    const kind = String(parsed?.kind || "").trim().toLowerCase();
+    const key = String(parsed?.key || "").trim();
+    return kind && key ? { kind, key } : { kind: "", key: "" };
+  } catch {
+    return { kind: "", key: "" };
+  }
+}
+
+function parseStoredSessionGroupMode(raw) {
+  return String(raw || "").trim().toLowerCase() === "project" ? "project" : "flat";
 }
 
 export function controlEventSessionPatchPlan(session = {}, message = {}) {

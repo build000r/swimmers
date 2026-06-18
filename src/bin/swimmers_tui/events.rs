@@ -180,10 +180,11 @@ impl TuiApi for TuiClient {
         path: Option<&str>,
         managed_only: bool,
         group: Option<&str>,
+        target: Option<&str>,
     ) -> BoxFuture<'_, Result<DirListResponse, String>> {
         match self {
-            Self::Embedded(client) => client.list_dirs(path, managed_only, group),
-            Self::External(client) => client.list_dirs(path, managed_only, group),
+            Self::Embedded(client) => client.list_dirs(path, managed_only, group, target),
+            Self::External(client) => client.list_dirs(path, managed_only, group, target),
         }
     }
 

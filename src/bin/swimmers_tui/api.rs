@@ -414,6 +414,7 @@ fn dir_list_query_params(
     path: Option<&str>,
     managed_only: bool,
     group: Option<&str>,
+    target: Option<&str>,
 ) -> Vec<(&'static str, String)> {
     let mut query = Vec::new();
     if let Some(path) = path {
@@ -424,6 +425,12 @@ fn dir_list_query_params(
     }
     if let Some(group) = group {
         query.push(("group", group.to_string()));
+    }
+    if let Some(target) = target
+        .map(str::trim)
+        .filter(|target| !target.is_empty() && *target != "local")
+    {
+        query.push(("target", target.to_string()));
     }
     query
 }
@@ -521,6 +528,7 @@ pub(crate) trait TuiApi: Send + Sync + 'static {
         path: Option<&str>,
         managed_only: bool,
         group: Option<&str>,
+        target: Option<&str>,
     ) -> BoxFuture<'_, Result<DirListResponse, String>>;
     fn list_repo_dirs(&self) -> BoxFuture<'_, Result<DirRepoSearchResponse, String>>;
     fn update_dir_group_memberships(
@@ -920,12 +928,19 @@ impl TuiApi for ApiClient {
         path: Option<&str>,
         managed_only: bool,
         group: Option<&str>,
+        target: Option<&str>,
     ) -> BoxFuture<'_, Result<DirListResponse, String>> {
         let path = path.map(|value| value.to_string());
         let group = group.map(|value| value.to_string());
+        let target = target.map(|value| value.to_string());
         Box::pin(async move {
             let url = format!("{}/v1/dirs", self.base_url);
-            let query = dir_list_query_params(path.as_deref(), managed_only, group.as_deref());
+            let query = dir_list_query_params(
+                path.as_deref(),
+                managed_only,
+                group.as_deref(),
+                target.as_deref(),
+            );
             let request = self.http.get(url).query(&query);
 
             let response = self
@@ -1414,28 +1429,32 @@ mod response_tests {
 
     #[test]
     fn dir_list_query_params_preserve_path_managed_and_group_semantics() {
-        let query = dir_list_query_params(Some("/srv/repos"), true, Some("core"));
+        let query = dir_list_query_params(Some("/srv/repos"), true, Some("core"), Some("skillbox"));
 
         assert_eq!(
             query,
             vec![
                 ("path", "/srv/repos".to_string()),
                 ("managed_only", "true".to_string()),
-                ("group", "core".to_string())
+                ("group", "core".to_string()),
+                ("target", "skillbox".to_string())
             ]
         );
     }
 
     #[test]
     fn dir_list_query_params_omit_absent_and_false_filters() {
-        assert!(dir_list_query_params(None, false, None).is_empty());
+        assert!(dir_list_query_params(None, false, None, None).is_empty());
         assert_eq!(
-            dir_list_query_params(Some("/srv/repos"), false, None),
+            dir_list_query_params(Some("/srv/repos"), false, None, Some("local")),
             vec![("path", "/srv/repos".to_string())]
         );
         assert_eq!(
-            dir_list_query_params(None, false, Some("personal")),
-            vec![("group", "personal".to_string())]
+            dir_list_query_params(None, false, Some("personal"), Some("skillbox")),
+            vec![
+                ("group", "personal".to_string()),
+                ("target", "skillbox".to_string())
+            ]
         );
     }
 

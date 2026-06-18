@@ -281,6 +281,37 @@ test("buildSurfaceModel applies fleet lens filters without losing bucket counts"
   assert.equal(model.fleetChips[1].active, true);
 });
 
+test("buildSurfaceModel drops saved fleet filters when the bucket is unavailable", () => {
+  const local = rawSession({
+    session_id: "local",
+    tmux_name: "local",
+    cwd: "/Users/b/repos/opensource/swimmers",
+    environment: {
+      scope: "local",
+      target_id: "local",
+      target_label: "Local machine",
+      target_kind: "local",
+      display_host: "local",
+      canonical_cwd: "/Users/b/repos/opensource/swimmers",
+    },
+  });
+  const state = baseState({
+    sessions: [local],
+    fleetFilter: { kind: "target", key: "missing-devbox" },
+  });
+
+  const model = buildSurfaceModel({
+    state,
+    boot: { focus_layout: false, franken_term_available: true },
+    websocketOpen: 7,
+  });
+
+  assert.deepEqual(model.fleetFilter, { kind: "", key: "" });
+  assert.equal(model.sessions.length, 1);
+  assert.equal(model.fleetChips[0].label, "all 1");
+  assert.equal(model.fleetChips[0].active, true);
+});
+
 test("buildSurfaceModel builds display-only project groups across local and remote sessions", () => {
   const local = rawSession({
     session_id: "local",

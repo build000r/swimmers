@@ -1374,6 +1374,8 @@ test("initialStateBootPlan preserves token, session, directory, and desktop defa
     selectedFromStorage: "stored-session",
     rawStoredDirPath: "/repo/swimmers",
     rawStoredManagedOnly: "true",
+    rawStoredFleetFilter: JSON.stringify({ kind: "TARGET", key: "skillbox" }),
+    rawStoredSessionGroupMode: "project",
     bootFollowPublishedSelection: false,
     terminalWorkbenchMobile: false,
   }), {
@@ -1385,6 +1387,8 @@ test("initialStateBootPlan preserves token, session, directory, and desktop defa
     storedDirPath: "/repo/swimmers",
     clearStoredDirPath: false,
     storedManagedOnly: true,
+    storedFleetFilter: { kind: "target", key: "skillbox" },
+    storedSessionGroupMode: "project",
     terminalWorkbenchOpen: true,
   });
 });
@@ -1396,6 +1400,8 @@ test("initialStateBootPlan preserves stored fallbacks and root directory cleanup
     selectedFromStorage: "stored-session",
     rawStoredDirPath: "/",
     rawStoredManagedOnly: "false",
+    rawStoredFleetFilter: "{not json",
+    rawStoredSessionGroupMode: "unknown",
     bootFollowPublishedSelection: false,
     terminalWorkbenchMobile: true,
   }), {
@@ -1407,6 +1413,8 @@ test("initialStateBootPlan preserves stored fallbacks and root directory cleanup
     storedDirPath: "",
     clearStoredDirPath: true,
     storedManagedOnly: false,
+    storedFleetFilter: { kind: "", key: "" },
+    storedSessionGroupMode: "flat",
     terminalWorkbenchOpen: false,
   });
 });
@@ -1429,6 +1437,8 @@ test("initialStateBootPlan preserves follow-published selection override", () =>
     storedDirPath: "",
     clearStoredDirPath: true,
     storedManagedOnly: false,
+    storedFleetFilter: { kind: "", key: "" },
+    storedSessionGroupMode: "flat",
     terminalWorkbenchOpen: true,
   });
 

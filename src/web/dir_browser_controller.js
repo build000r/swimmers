@@ -215,6 +215,10 @@ export function createDirBrowserController(runtime) {
       if (groupName) {
         url.searchParams.set("group", groupName);
       }
+      const target = selectedLaunchTarget();
+      if (target && target !== "local") {
+        url.searchParams.set("target", target);
+      }
       const response = await apiFetch(url.pathname + url.search);
       const payload = await responseJson(response, normalizeDirListResponse);
       renderDirEntries(payload);
@@ -417,12 +421,22 @@ export function createDirBrowserController(runtime) {
     await createSessionFromSheet();
   }
 
-  function handleCreateLaunchTargetChange() {
-    state.dirBrowser.launchTarget = selectedLaunchTarget();
+  async function handleCreateLaunchTargetChange() {
+    const previousTarget = state.dirBrowser.launchTarget || "local";
+    const nextTarget = selectedLaunchTarget();
+    state.dirBrowser.launchTarget = nextTarget;
+    clearCreateBatchSelection();
     renderCreateBatchBar();
     batchLaunchBlockersForPaths(selectedBatchDirs());
     syncCreateLaunchTargetStatus();
     syncSheetActionAvailability();
+    if (nextTarget !== previousTarget && (state.dirBrowser.path || el.dirsPath.value || state.dirBrowser.entries.length)) {
+      await loadDirListing(
+        state.dirBrowser.path || el.dirsPath.value,
+        state.dirBrowser.managedOnly,
+        state.dirBrowser.group,
+      );
+    }
   }
 
   function handleDirsSearchInput() {

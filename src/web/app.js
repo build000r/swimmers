@@ -121,6 +121,8 @@ const TOKEN_STORAGE_KEY = "swimmers.web.token";
 const SESSION_STORAGE_KEY = "swimmers.web.session";
 const DIR_BROWSER_PATH_KEY = "swimmers.web.dirs.path";
 const DIR_BROWSER_MANAGED_ONLY_KEY = "swimmers.web.dirs.managed";
+const FLEET_FILTER_STORAGE_KEY = "swimmers.web.fleet.filter";
+const SESSION_GROUP_MODE_STORAGE_KEY = "swimmers.web.sessionGroupMode";
 const TERMINAL_ZOOM_STORAGE_KEY = "swimmers.web.terminalZoom";
 const SEND_HISTORY_KEY = "swimmers.web.send.history";
 const SESSION_REFRESH_MS = 2500;
@@ -1143,6 +1145,8 @@ function loadInitialState() {
     selectedFromStorage: localStorage.getItem(SESSION_STORAGE_KEY),
     rawStoredDirPath: localStorage.getItem(DIR_BROWSER_PATH_KEY) ?? "",
     rawStoredManagedOnly: localStorage.getItem(DIR_BROWSER_MANAGED_ONLY_KEY),
+    rawStoredFleetFilter: localStorage.getItem(FLEET_FILTER_STORAGE_KEY),
+    rawStoredSessionGroupMode: localStorage.getItem(SESSION_GROUP_MODE_STORAGE_KEY),
     bootFollowPublishedSelection: boot.follow_published_selection,
     terminalWorkbenchMobile: window.matchMedia?.("(max-width: 700px)")?.matches ?? false,
   });
@@ -1158,6 +1162,8 @@ function loadInitialState() {
   setFollowPublishedSelection(plan.followPublishedSelection, { skipUrlSync: true });
   state.dirBrowser.path = plan.storedDirPath;
   state.dirBrowser.managedOnly = plan.storedManagedOnly;
+  state.fleetFilter = plan.storedFleetFilter;
+  state.sessionGroupMode = plan.storedSessionGroupMode;
   el.dirsPath.value = plan.storedDirPath;
   el.dirsManagedOnly.checked = plan.storedManagedOnly;
   el.createCwd.value = plan.storedDirPath;
@@ -1722,12 +1728,26 @@ function setFleetFilter(filter = {}) {
   state.fleetFilter = current.kind === next.kind && current.key === next.key
     ? { kind: "", key: "" }
     : next;
+  persistFleetFilter();
   renderHudSurface();
 }
 
 function toggleSessionGrouping() {
   state.sessionGroupMode = state.sessionGroupMode === "project" ? "flat" : "project";
+  localStorage.setItem(SESSION_GROUP_MODE_STORAGE_KEY, state.sessionGroupMode);
   renderHudSurface();
+}
+
+function persistFleetFilter() {
+  const filter = state.fleetFilter || { kind: "", key: "" };
+  if (filter.kind && filter.key) {
+    localStorage.setItem(FLEET_FILTER_STORAGE_KEY, JSON.stringify({
+      kind: filter.kind,
+      key: filter.key,
+    }));
+  } else {
+    localStorage.removeItem(FLEET_FILTER_STORAGE_KEY);
+  }
 }
 
 function surfaceActionPlan(zone) {
@@ -2207,6 +2227,7 @@ export const __swimmersWebTest = {
   renderCommandPalette,
   handleCommandPaletteEvent,
   runCommandPaletteItem,
+  handleSurfaceAction,
   rememberSendHistory,
   syncTerminalAccessibilityMirror,
   syncTerminalStatusStrip,

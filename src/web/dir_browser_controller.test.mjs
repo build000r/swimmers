@@ -77,6 +77,18 @@ function devboxTarget() {
   };
 }
 
+function selectElement(value = "local") {
+  return {
+    value,
+    innerHTML: "",
+    children: [],
+    appendChild(child) {
+      this.children.push(child);
+      return child;
+    },
+  };
+}
+
 function submitEvent() {
   return {
     prevented: false,
@@ -142,6 +154,79 @@ test("directory browser controller delegates dynamic view rendering while preser
     isError: false,
   }]);
   assert.equal(syncCount(), 1);
+});
+
+test("directory browser controller scopes listings to the selected remote target", async () => {
+  const calls = [];
+  const { runtime, state } = createRuntime({
+    apiFetch: async (url) => {
+      calls.push(url);
+      return {};
+    },
+    responseJson: async (_response, normalize) => normalize({
+      path: "/workspace",
+      entries: [],
+      launch_targets: [devboxTarget()],
+      default_launch_target: "devbox",
+    }),
+    location: new URL("http://swimmers.test/"),
+    renderDirBrowserView() {
+      return true;
+    },
+  });
+  state.dirBrowser.launchTargets = [devboxTarget()];
+  state.dirBrowser.launchTarget = "devbox";
+
+  const controller = createDirBrowserController(runtime);
+  await controller.loadDirListing("/workspace", true, "core");
+
+  assert.equal(
+    calls[0],
+    "/v1/dirs?path=%2Fworkspace&managed_only=true&group=core&target=devbox",
+  );
+});
+
+test("directory browser controller reloads inventory when launch target changes", async () => {
+  const previousDocument = globalThis.document;
+  globalThis.document = {
+    createElement(tagName) {
+      return { tagName, value: "", textContent: "" };
+    },
+  };
+  try {
+    const calls = [];
+    const { runtime, state, el } = createRuntime({
+      apiFetch: async (url) => {
+        calls.push(url);
+        return {};
+      },
+      responseJson: async (_response, normalize) => normalize({
+        path: "/workspace",
+        entries: [],
+        launch_targets: [{ id: "local", label: "Local machine", kind: "local" }, devboxTarget()],
+        default_launch_target: "devbox",
+      }),
+      location: new URL("http://swimmers.test/"),
+      renderDirBrowserView() {
+        return true;
+      },
+    });
+    state.dirBrowser.path = "/workspace";
+    state.dirBrowser.entries = [{ name: "swimmers", has_children: false }];
+    state.dirBrowser.launchTargets = [{ id: "local", label: "Local machine", kind: "local" }, devboxTarget()];
+    state.dirBrowser.launchTarget = "local";
+    el.dirsPath.value = "/workspace";
+    el.createLaunchTarget = selectElement("devbox");
+
+    const controller = createDirBrowserController(runtime);
+    await controller.handleCreateLaunchTargetChange();
+
+    assert.equal(state.dirBrowser.launchTarget, "devbox");
+    assert.equal(calls.length, 1);
+    assert.equal(calls[0], "/v1/dirs?path=%2Fworkspace&managed_only=false&target=devbox");
+  } finally {
+    globalThis.document = previousDocument;
+  }
 });
 
 test("directory browser controller blocks unmapped remote single creates before fetch", async () => {

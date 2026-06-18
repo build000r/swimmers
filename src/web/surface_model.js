@@ -138,6 +138,14 @@ function bucketFor(lens, kind, key = "") {
   return buckets.find((bucket) => bucket.kind === kind && (!key || bucket.key === key)) || null;
 }
 
+function availableFleetFilter(lens, filter) {
+  const active = normalizeFleetFilter(filter);
+  if (!active.kind) {
+    return active;
+  }
+  return bucketFor(lens, active.kind, active.key) ? active : { kind: "", key: "" };
+}
+
 function firstNonHealthyTransport(lens) {
   const buckets = Array.isArray(lens?.buckets) ? lens.buckets : [];
   return buckets.find((bucket) => bucket.kind === "transport" && bucket.key !== "healthy") || null;
@@ -364,9 +372,9 @@ export function buildSurfaceModel({
     ...extra,
   });
   const allSurfaceSessions = state.sessions.map((session) => surfaceSession(session, surfaceOptions(session)));
-  const fleetFilter = normalizeFleetFilter(state.fleetFilter);
   const sessionGroupMode = normalizeSessionGroupMode(state.sessionGroupMode);
   const fleetLens = buildFleetLensSummary(allSurfaceSessions);
+  const fleetFilter = availableFleetFilter(fleetLens, state.fleetFilter);
   const surfaceSessions = allSurfaceSessions.filter((session) => sessionMatchesFleetFilter(session, fleetFilter));
   const terminalReady = Boolean(state.terminal && state.ws && state.ws.readyState === websocketOpen);
   return {

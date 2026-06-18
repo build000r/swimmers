@@ -1,6 +1,6 @@
 use super::*;
 use crate::types::{
-    CreateSessionsBatchResult, SessionBatchMembership, SessionGroupInputRequest,
+    CreateSessionsBatchResult, DirEntry, SessionBatchMembership, SessionGroupInputRequest,
     SessionGroupInputResponse, SessionGroupInputResult, SessionInputRequest, SessionInputResponse,
     SessionState, SessionTimelinePinned, SessionTimelineResponse, SpawnTool, ThoughtState,
     TransportHealth, SUMMARY_CAUSE_REMOTE_POLL_DEGRADED,
@@ -1316,4 +1316,83 @@ async fn remote_api_smoke_matrix_covers_launch_reads_scopes_and_redaction() {
     handle.abort();
     std::env::remove_var(REMOTE_OPERATOR_TOKEN_ENV);
     std::env::remove_var(REMOTE_OBSERVER_TOKEN_ENV);
+}
+
+#[test]
+fn remote_dir_inventory_path_maps_local_paths_and_defaults_to_first_remote_prefix() {
+    let target = target();
+
+    assert_eq!(
+        remote_dir_inventory_path(&target, None).expect("default remote path"),
+        "/monoserver"
+    );
+    assert_eq!(
+        remote_dir_inventory_path(&target, Some("/workspace/repos/opensource/swimmers"))
+            .expect("mapped remote path"),
+        "/monoserver/opensource/swimmers"
+    );
+
+    let err = remote_dir_inventory_path(&target, Some("/tmp/outside"))
+        .expect_err("outside paths should be rejected before remote listing");
+    assert_eq!(err.status, StatusCode::BAD_REQUEST);
+    assert_eq!(err.code, "LAUNCH_TARGET_PATH_UNMAPPED");
+}
+
+#[test]
+fn remote_dir_response_maps_remote_paths_back_to_local_cockpit() {
+    let target = target();
+    let response = DirListResponse {
+        path: "/monoserver/opensource".to_string(),
+        entries: vec![
+            DirEntry {
+                name: "swimmers".to_string(),
+                has_children: false,
+                is_running: None,
+                repo_dirty: None,
+                repo_action: None,
+                group: None,
+                groups: vec!["core".to_string()],
+                full_path: Some("/monoserver/opensource/swimmers".to_string()),
+                has_restart: None,
+                open_url: None,
+            },
+            DirEntry {
+                name: "outside".to_string(),
+                has_children: false,
+                is_running: None,
+                repo_dirty: None,
+                repo_action: None,
+                group: None,
+                groups: Vec::new(),
+                full_path: Some("/outside/unmapped".to_string()),
+                has_restart: None,
+                open_url: None,
+            },
+        ],
+        overlay_label: Some("Remote".to_string()),
+        groups: vec!["core".to_string()],
+        launch_targets: Vec::new(),
+        default_launch_target: None,
+    };
+
+    let mapped = remote_dir_response_for_local_cockpit(
+        &target,
+        response,
+        Some("/workspace/repos/opensource"),
+    );
+
+    assert_eq!(mapped.path, "/workspace/repos/opensource");
+    assert_eq!(
+        mapped.entries[0].full_path.as_deref(),
+        Some("/workspace/repos/opensource/swimmers")
+    );
+    assert_eq!(
+        mapped.entries[1].full_path.as_deref(),
+        Some("/outside/unmapped")
+    );
+    assert_eq!(
+        mapped.default_launch_target.as_deref(),
+        Some("jeremy-skillbox")
+    );
+    assert!(!mapped.launch_targets.is_empty());
 }

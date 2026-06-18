@@ -1,4 +1,5 @@
 use crate::api::envelope::{error_response, success_json};
+use crate::api::remote_sessions;
 use crate::api::service::{
     list_dirs as list_dirs_service, list_repo_search_entries as list_repo_search_entries_service,
     restart_dir_services as restart_dir_services_service,
@@ -20,6 +21,7 @@ struct DirQuery {
     path: Option<String>,
     managed_only: Option<bool>,
     group: Option<String>,
+    target: Option<String>,
 }
 
 fn service_error_response(error: ApiServiceError) -> Response {
@@ -34,6 +36,25 @@ async fn list_dirs(
 ) -> impl IntoResponse {
     if let Err(resp) = auth.require_scope(AuthScope::SessionsRead) {
         return resp;
+    }
+
+    if let Some(target) = query
+        .target
+        .as_deref()
+        .map(str::trim)
+        .filter(|target| !target.is_empty() && *target != "local")
+    {
+        return match remote_sessions::list_remote_dirs(
+            target,
+            query.path.as_deref(),
+            query.managed_only.unwrap_or(false),
+            query.group.as_deref(),
+        )
+        .await
+        {
+            Ok(response) => success_json(StatusCode::OK, &response),
+            Err(error) => error.into_response(),
+        };
     }
 
     match list_dirs_service(
@@ -722,6 +743,7 @@ mod tests {
                 path: None,
                 managed_only: Some(false),
                 group: None,
+                target: None,
             }),
         )
         .await
@@ -876,6 +898,7 @@ mod tests {
                 path: None,
                 managed_only: Some(false),
                 group: None,
+                target: None,
             }),
         )
         .await
@@ -1056,6 +1079,7 @@ esac
                     path: None,
                     managed_only: Some(false),
                     group: None,
+                    target: None,
                 }),
             )
             .await
@@ -1106,6 +1130,7 @@ esac
                     path: None,
                     managed_only: Some(false),
                     group: None,
+                    target: None,
                 }),
             )
             .await

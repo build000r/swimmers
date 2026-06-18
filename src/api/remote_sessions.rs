@@ -17,7 +17,7 @@ use crate::config::Config;
 use crate::session::overlay::default_overlay;
 use crate::types::{
     CreateSessionRequest, CreateSessionResponse, CreateSessionsBatchRequest,
-    CreateSessionsBatchResponse, DependencyHealthStatus, EnvironmentAuthSummary,
+    CreateSessionsBatchResponse, DependencyHealthStatus, DirListResponse, EnvironmentAuthSummary,
     EnvironmentSummary, ErrorResponse, LaunchPathMapping, LaunchTargetSummary,
     SessionAgentContextResponse, SessionEnvironmentSummary, SessionGitDiffResponse,
     SessionGroupInputRequest, SessionGroupInputResponse, SessionInputRequest, SessionInputResponse,
@@ -1097,6 +1097,105 @@ pub async fn send_remote_group_input(
     Ok(SessionGroupInputResponse::from_results(response.results))
 }
 
+pub async fn list_remote_dirs(
+    target_id: &str,
+    path: Option<&str>,
+    managed_only: bool,
+    group: Option<&str>,
+) -> Result<DirListResponse, RemoteSessionError> {
+    let target = resolve_dir_inventory_target(target_id)?;
+    let local_path = path.map(str::trim).filter(|path| !path.is_empty());
+    let remote_path = remote_dir_inventory_path(&target, local_path)?;
+    let managed = managed_only.to_string();
+    let mut query = vec![
+        ("path", remote_path.as_str()),
+        ("managed_only", managed.as_str()),
+    ];
+    if let Some(group) = group.map(str::trim).filter(|group| !group.is_empty()) {
+        query.push(("group", group));
+    }
+    let response = get_remote_json_with_query(&target, "/v1/dirs", &query).await?;
+    Ok(remote_dir_response_for_local_cockpit(
+        &target, response, local_path,
+    ))
+}
+
+fn resolve_dir_inventory_target(
+    target_id: &str,
+) -> Result<LaunchTargetSummary, RemoteSessionError> {
+    let target_id = target_id.trim();
+    if target_id.is_empty() || target_id == "local" {
+        return Err(RemoteSessionError::new(
+            StatusCode::BAD_REQUEST,
+            "LAUNCH_TARGET_INVALID",
+            "remote directory inventory requires a non-local launch target",
+        ));
+    }
+    let Some(overlay) = default_overlay() else {
+        return Err(RemoteSessionError::new(
+            StatusCode::BAD_REQUEST,
+            "LAUNCH_TARGET_UNKNOWN",
+            "no skillbox-config overlay is available for remote directory inventory",
+        ));
+    };
+    let target = overlay.launch_target_by_id(target_id).ok_or_else(|| {
+        RemoteSessionError::new(
+            StatusCode::BAD_REQUEST,
+            "LAUNCH_TARGET_UNKNOWN",
+            format!("launch target '{target_id}' is not configured"),
+        )
+    })?;
+    ensure_swimmers_api_target(&target)?;
+    Ok(target)
+}
+
+fn remote_dir_inventory_path(
+    target: &LaunchTargetSummary,
+    local_path: Option<&str>,
+) -> Result<String, RemoteSessionError> {
+    if let Some(path) = local_path {
+        return map_cwd_for_target(target, path);
+    }
+    target
+        .path_mappings
+        .first()
+        .map(|mapping| mapping.remote_prefix.clone())
+        .filter(|path| !path.trim().is_empty())
+        .ok_or_else(|| {
+            RemoteSessionError::new(
+                StatusCode::BAD_REQUEST,
+                "LAUNCH_TARGET_PATH_UNMAPPED",
+                format!(
+                    "launch target '{}' has no path_mappings remote prefix for directory inventory",
+                    target.id
+                ),
+            )
+        })
+}
+
+fn remote_dir_response_for_local_cockpit(
+    target: &LaunchTargetSummary,
+    mut response: DirListResponse,
+    fallback_local_path: Option<&str>,
+) -> DirListResponse {
+    response.path = map_remote_cwd_to_local(target, &response.path)
+        .or_else(|| fallback_local_path.map(str::to_string))
+        .unwrap_or(response.path);
+    for entry in &mut response.entries {
+        if let Some(full_path) = entry.full_path.as_mut() {
+            if let Some(local_path) = map_remote_cwd_to_local(target, full_path) {
+                *full_path = local_path;
+            }
+        }
+    }
+    response.launch_targets = default_overlay()
+        .map(|overlay| overlay.all_launch_targets())
+        .filter(|targets| !targets.is_empty())
+        .unwrap_or_else(|| vec![LaunchTargetSummary::local()]);
+    response.default_launch_target = Some(target.id.clone());
+    response
+}
+
 async fn get_remote_json<T>(
     target: &LaunchTargetSummary,
     path: &str,
@@ -1337,7 +1436,9 @@ pub fn map_path_with_mappings(cwd: &str, mappings: &[LaunchPathMapping]) -> Opti
             let rel = cwd.strip_prefix(&local_prefix).ok()?;
             let score = local_prefix.components().count();
             let mut remote = PathBuf::from(&mapping.remote_prefix);
-            remote.push(rel);
+            if !rel.as_os_str().is_empty() {
+                remote.push(rel);
+            }
             Some((score, remote.to_string_lossy().into_owned()))
         })
         .max_by_key(|(score, _)| *score)

@@ -110,6 +110,13 @@ fn launch_target_blocker_message(preview: &LaunchTargetPreview) -> String {
     )
 }
 
+fn remote_inventory_target(target: Option<&str>) -> Option<String> {
+    target
+        .map(str::trim)
+        .filter(|target| !target.is_empty() && *target != "local")
+        .map(str::to_string)
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct GroupInputTargets {
     pub(crate) session_ids: Vec<String>,
@@ -1469,10 +1476,16 @@ impl<C: TuiApi> App<C> {
             return;
         };
 
+        let target = remote_inventory_target(
+            self.picker
+                .as_ref()
+                .and_then(|picker| picker.launch_target.as_deref())
+                .or(self.launch_target.as_deref()),
+        );
         let client = Arc::clone(&self.client);
         self.set_message("loading directories...");
         self.runtime.spawn(async move {
-            let response = client.list_dirs(None, true, None).await;
+            let response = client.list_dirs(None, true, None, target.as_deref()).await;
             let _ = tx.send(PendingInteractionResult::OpenPicker { x, y, response });
         });
     }
@@ -1498,13 +1511,24 @@ impl<C: TuiApi> App<C> {
             return;
         };
 
+        let target = remote_inventory_target(
+            self.picker
+                .as_ref()
+                .and_then(|picker| picker.launch_target.as_deref())
+                .or(self.launch_target.as_deref()),
+        );
         let client = Arc::clone(&self.client);
         if show_message {
             self.set_message("loading directories...");
         }
         self.runtime.spawn(async move {
             let response = client
-                .list_dirs(path.as_deref(), managed_only, group.as_deref())
+                .list_dirs(
+                    path.as_deref(),
+                    managed_only,
+                    group.as_deref(),
+                    target.as_deref(),
+                )
                 .await;
             let _ = tx.send(PendingInteractionResult::ReloadPicker {
                 managed_only,
@@ -1566,6 +1590,12 @@ impl<C: TuiApi> App<C> {
             group,
         } = plan;
         self.set_message(format!("updating groups for {entry_label}..."));
+        let target = remote_inventory_target(
+            self.picker
+                .as_ref()
+                .and_then(|picker| picker.launch_target.as_deref())
+                .or(self.launch_target.as_deref()),
+        );
         self.runtime.spawn(async move {
             let response = match client
                 .update_dir_group_memberships(&path, delta.add, delta.remove)
@@ -1573,7 +1603,12 @@ impl<C: TuiApi> App<C> {
             {
                 Ok(_) => {
                     client
-                        .list_dirs(Some(&reload_path), managed_only, group.as_deref())
+                        .list_dirs(
+                            Some(&reload_path),
+                            managed_only,
+                            group.as_deref(),
+                            target.as_deref(),
+                        )
                         .await
                 }
                 Err(err) => Err(err),
