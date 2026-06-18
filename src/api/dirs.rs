@@ -929,13 +929,20 @@ mod tests {
         );
     }
 
-    struct PathGuard(Option<OsString>);
+    struct PathGuard {
+        path: Option<OsString>,
+        fake_git_log: Option<OsString>,
+    }
 
     impl Drop for PathGuard {
         fn drop(&mut self) {
-            match self.0.take() {
+            match self.path.take() {
                 Some(value) => std::env::set_var("PATH", value),
                 None => std::env::remove_var("PATH"),
+            }
+            match self.fake_git_log.take() {
+                Some(value) => std::env::set_var("SWIMMERS_FAKE_GIT_LOG", value),
+                None => std::env::remove_var("SWIMMERS_FAKE_GIT_LOG"),
             }
         }
     }
@@ -944,6 +951,7 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
         let dir = tempfile::tempdir().expect("fake git tempdir");
         let bin_dir = dir.path().join("bin");
+        let log_path = dir.path().join("git-invocations.log");
         std::fs::create_dir_all(&bin_dir).expect("bin dir");
 
         // Sleep per git invocation, then return the `-C PATH` value for
@@ -953,6 +961,9 @@ mod tests {
         let script = format!(
             r#"#!/bin/sh
 set -eu
+if [ -n "${{SWIMMERS_FAKE_GIT_LOG:-}}" ]; then
+  printf '%s\n' "$*" >> "$SWIMMERS_FAKE_GIT_LOG"
+fi
 sleep {sleep_seconds}
 repo_root=""
 while [ $# -gt 0 ]; do
@@ -989,6 +1000,7 @@ esac
         std::fs::set_permissions(&git_path, perms).expect("chmod fake git");
 
         let original_path = std::env::var_os("PATH");
+        let original_fake_git_log = std::env::var_os("SWIMMERS_FAKE_GIT_LOG");
         let mut entries = vec![bin_dir.as_os_str().to_os_string()];
         if let Some(existing) = original_path.as_ref() {
             entries.extend(std::env::split_paths(existing).map(|p| p.into_os_string()));
@@ -997,8 +1009,15 @@ esac
             "PATH",
             std::env::join_paths(entries).expect("join fake git path"),
         );
+        std::env::set_var("SWIMMERS_FAKE_GIT_LOG", log_path);
 
-        (dir, PathGuard(original_path))
+        (
+            dir,
+            PathGuard {
+                path: original_path,
+                fake_git_log: original_fake_git_log,
+            },
+        )
     }
 
     /// Regression guard for the "swimmers API unavailable (timed out while
@@ -1058,15 +1077,15 @@ esac
     }
 
     /// Direct repo-root entries should skip the `rev-parse` probe and only ask
-    /// git for dirty status. With 24 fake repos × 200ms per git process, a
-    /// two-process path would still sit around 400ms even at full fan-out.
+    /// git for dirty status. The fake git log proves the command shape directly
+    /// so this regression guard does not depend on a tight scheduler margin.
     #[tokio::test]
     async fn list_dirs_skips_rev_parse_for_direct_git_roots() {
         let _lock = crate::test_support::ENV_LOCK
             .lock()
             .unwrap_or_else(|poison| poison.into_inner());
 
-        let (_fake_git_dir, _path_guard) = install_fake_slow_git(200);
+        let (fake_git_dir, _path_guard) = install_fake_slow_git(200);
 
         let tmp = tempfile::tempdir().expect("tempdir");
         let base = tmp.path().join("repos");
@@ -1100,11 +1119,31 @@ esac
             assert_eq!(entries.len(), 24, "all repo entries should be present");
         }
 
+        let invocations =
+            fs::read_to_string(fake_git_dir.path().join("git-invocations.log")).unwrap_or_default();
+        let rev_parse_count = invocations
+            .lines()
+            .filter(|line| line.contains(" rev-parse "))
+            .count();
+        let status_count = invocations
+            .lines()
+            .filter(|line| line.contains(" status "))
+            .count();
+
+        assert_eq!(
+            rev_parse_count, 0,
+            "direct repo roots should not call rev-parse; invocations:\n{invocations}"
+        );
+        assert_eq!(
+            status_count, 24,
+            "direct repo roots should only run one status probe per entry; invocations:\n{invocations}"
+        );
+
         let p95 = p95_duration(samples);
-        eprintln!("/v1/dirs direct repo p95: {p95:?} (budget 350ms)");
+        eprintln!("/v1/dirs direct repo p95: {p95:?} (budget 1s)");
         assert!(
-            p95 < Duration::from_millis(350),
-            "direct repo roots should skip rev-parse and only pay one slow git status wave, got {p95:?}"
+            p95 < Duration::from_secs(1),
+            "direct repo roots should stay comfortably parallelized, got {p95:?}"
         );
     }
 }

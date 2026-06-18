@@ -165,7 +165,10 @@ fn dir_group_from_exact_paths(name: String, paths: Vec<PathBuf>) -> Option<Overl
     let mut seen = BTreeSet::new();
     let paths = paths
         .into_iter()
-        .filter(|path| seen.insert(path.canonicalize().unwrap_or_else(|_| path.clone())))
+        .filter_map(|path| {
+            let canonical = path.canonicalize().unwrap_or(path);
+            seen.insert(canonical.clone()).then_some(canonical)
+        })
         .collect::<Vec<_>>();
     (!paths.is_empty()).then_some(OverlayDirGroup {
         name,

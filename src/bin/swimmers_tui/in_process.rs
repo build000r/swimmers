@@ -563,6 +563,11 @@ impl TuiApi for InProcessApi {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::ffi::OsString;
+    use std::fs;
+    use std::os::unix::fs::PermissionsExt;
+    use std::path::Path as FsPath;
+    use std::sync::{LazyLock, Mutex};
     use swimmers::config::Config;
     use swimmers::persistence::file_store::FileStore;
     use swimmers::session::actor::{ActorHandle, InputDeliveryResult};
@@ -574,6 +579,8 @@ mod tests {
     };
     use tokio::sync::mpsc;
     use tokio::sync::RwLock;
+
+    static TEST_ENV_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
 
     fn test_state() -> Arc<AppState> {
         test_state_with_store(None)
@@ -661,6 +668,36 @@ mod tests {
             }
         });
         write_rx
+    }
+
+    struct TestEnvGuard {
+        key: &'static str,
+        previous: Option<OsString>,
+    }
+
+    impl TestEnvGuard {
+        fn set(key: &'static str, value: impl AsRef<std::ffi::OsStr>) -> Self {
+            let previous = std::env::var_os(key);
+            std::env::set_var(key, value);
+            Self { key, previous }
+        }
+    }
+
+    impl Drop for TestEnvGuard {
+        fn drop(&mut self) {
+            if let Some(value) = self.previous.take() {
+                std::env::set_var(self.key, value);
+            } else {
+                std::env::remove_var(self.key);
+            }
+        }
+    }
+
+    fn write_executable(path: &FsPath, contents: &str) {
+        fs::write(path, contents).expect("write executable");
+        let mut perms = fs::metadata(path).expect("metadata").permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(path, perms).expect("chmod executable");
     }
 
     #[tokio::test]
@@ -956,6 +993,19 @@ mod tests {
 
     #[tokio::test]
     async fn fetch_session_skills_reads_local_summary_cwd() {
+        let _lock = TEST_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let dir = tempfile::tempdir().expect("tempdir");
+        let sbp = dir.path().join("sbp");
+        write_executable(
+            &sbp,
+            r#"#!/bin/sh
+printf '{"effective":[],"recommendations":[]}\n'
+"#,
+        );
+        let _sbp_guard = TestEnvGuard::set("SWIMMERS_SBP", sbp.as_os_str());
+
         let state = test_state();
         let _write_rx =
             insert_summary_test_handle(&state, summary("sess-skills", SessionState::Idle)).await;
@@ -969,6 +1019,7 @@ mod tests {
         assert_eq!(skills.session_id, "sess-skills");
         assert_eq!(skills.cwd, "/tmp/project");
         assert_eq!(skills.source, "sbp");
+        assert!(skills.available);
     }
 
     #[tokio::test]
