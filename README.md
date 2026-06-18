@@ -290,9 +290,9 @@ make release-acceptance-all
 make cargo-cov-lcov     # Generate lcov coverage report
 ```
 
-`make web` runs `scripts/run-web.sh`. The wrapper probes `/app.js` before
-declaring the server ready, prints both the root browser URL (`/`) and the
-focused selected-session URL (`/selected`), and defaults
+`make web` runs `scripts/run-web.sh`. The wrapper probes `/app.js` when it finds
+an existing listener on the target port, prints both the root browser URL (`/`)
+and the focused selected-session URL (`/selected`), and defaults
 `SWIMMERS_PERSONAL_WORKFLOWS=1` for source-checkout browser workflows. Set that
 environment variable to `0` to hide local repo browsing, skills, group editing,
 and commit-helper routes.
@@ -419,7 +419,7 @@ Set `SWIMMERS_TUI_URL` to split the API into its own process. Multiple TUIs, hea
 │    ├─ bridge runner (daemon mode)                             │
 │    └─ loop runner (in-process mode)                           │
 ├──────────────────────────────────────────────────────────────┤
-│  FileStore (data/swimmers/)  — flat-file persistence         │
+│  FileStore (SWIMMERS_DATA_DIR / platform data dir)           │
 └───────────────────────────┬──────────────────────────────────┘
                             │ PTY / shell exec
                             ▼
@@ -621,7 +621,7 @@ cargo build --release
 
 - **tmux only** — swimmers does not manage screen, zellij, or plain terminal sessions
 - **Browser UI is terminal-first** — the web surface keeps the live terminal primary; Trogdor presentation and cockpit panels summarize existing backend facts rather than inventing new state
-- **Single-machine sessions** — the API manages tmux sessions on the machine it runs on; it does not aggregate sessions across multiple hosts
+- **Single-machine sessions by default** — each API manages tmux sessions on the machine it runs on. One local cockpit may aggregate explicitly configured `swimmers_api` launch targets, but Swimmers does not discover or control arbitrary SSH fleets
 - **No session templating** — swimmers discovers existing tmux sessions but does not define layouts or startup commands (use tmuxinator for that)
 - **macOS and Linux only** — tmux does not run on Windows, so neither does swimmers
 
@@ -677,7 +677,7 @@ See [docs/VISION.md](docs/VISION.md) for the project's mission, competitive posi
 
 **The API is the truth.** The TUI is a client. The API discovers tmux sessions, tracks their state, and serves snapshots. You can point multiple TUIs at the same API, run the API headless, or build your own client against the REST endpoints.
 
-**No infrastructure required.** No database, no Docker, no message broker. The server binary talks to tmux directly via `portable-pty`, persists state to flat files under `data/swimmers/`, and serves HTTP on a single port.
+**No infrastructure required.** No database, no Docker, no message broker. The server binary talks to tmux directly via `portable-pty`, persists state to flat files under `SWIMMERS_DATA_DIR` or the platform data directory, and serves HTTP on a single port.
 
 **Thoughts are first-class.** The thought subsystem streams AI agent context (from Claude Code, Codex, etc.) into a side panel. Sessions that run AI coding agents surface their internal monologue alongside the terminal output.
 
