@@ -82,6 +82,7 @@ async fn capture_list_sessions() -> AxumJson<SessionListResponse> {
         version: 0,
         repo_themes: Default::default(),
         environments: Vec::new(),
+        fleet_lens: Default::default(),
     })
 }
 
@@ -227,6 +228,7 @@ async fn remote_smoke_list_sessions(
             version: 0,
             repo_themes: Default::default(),
             environments: Vec::new(),
+            fleet_lens: Default::default(),
         })
         .into_response(),
         RemoteSmokeScope::Unauthenticated => remote_smoke_auth_error(&headers, "read"),

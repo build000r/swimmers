@@ -226,6 +226,60 @@ test("buildSurfaceModel preserves selected/current session, terminal, reader, an
   assert.notEqual(model.sessions[0].thoughtLabel, selected.thought);
 });
 
+test("buildSurfaceModel applies fleet lens filters without losing bucket counts", () => {
+  const local = rawSession({
+    session_id: "local",
+    tmux_name: "local",
+    cwd: "/Users/b/repos/opensource/swimmers",
+    environment: {
+      scope: "local",
+      target_id: "local",
+      target_label: "Local machine",
+      target_kind: "local",
+      display_host: "local",
+      canonical_cwd: "/Users/b/repos/opensource/swimmers",
+    },
+  });
+  const remote = rawSession({
+    session_id: "remote",
+    tmux_name: "remote",
+    cwd: "/srv/skillbox/repos/swimmers",
+    state: "busy",
+    transport_health: "degraded",
+    environment: {
+      scope: "remote",
+      target_id: "skillbox",
+      target_label: "Skillbox devbox",
+      target_kind: "swimmers_api",
+      display_host: "Skillbox devbox",
+      canonical_cwd: "/Users/b/repos/opensource/swimmers",
+    },
+  });
+  const state = baseState({
+    sessions: [local, remote],
+    fleetFilter: { kind: "target", key: "skillbox" },
+  });
+
+  const model = buildSurfaceModel({
+    state,
+    boot: { focus_layout: false, franken_term_available: true },
+    websocketOpen: 7,
+  });
+
+  assert.equal(model.allSessionCount, 2);
+  assert.equal(model.sessions.length, 1);
+  assert.equal(model.sessions[0].sessionId, "remote");
+  assert.equal(model.fleetLens.total_sessions, 2);
+  assert.equal(
+    model.fleetLens.buckets.find((bucket) => bucket.kind === "repo")?.count,
+    2,
+  );
+  assert.deepEqual(model.fleetFilter, { kind: "target", key: "skillbox" });
+  assert.equal(model.fleetChips[0].label, "all 2");
+  assert.equal(model.fleetChips[1].label, "target Skillbox devbox 1");
+  assert.equal(model.fleetChips[1].active, true);
+});
+
 test("buildSurfaceModel reports terminal not ready without the expected websocket state", () => {
   const state = baseState({
     hoveredTrogdorSessionId: null,

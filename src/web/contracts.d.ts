@@ -200,11 +200,30 @@ export interface EnvironmentSummary {
   freshness_ms: Nullable<number>;
 }
 
+export type FleetLensBucketKind = "target" | "repo" | "state" | "readiness" | "transport";
+
+export interface FleetLensBucket {
+  kind: FleetLensBucketKind | string;
+  key: string;
+  label: string;
+  count: number;
+  degraded_count: number;
+  stale_count: number;
+  attention_count: number;
+  commit_ready_count: number;
+}
+
+export interface FleetLensSummary {
+  total_sessions: number;
+  buckets: FleetLensBucket[];
+}
+
 export interface SessionListResponse {
   sessions: SessionSummary[];
   version: number;
   repo_themes: Record<string, RepoTheme | Record<string, unknown>>;
   environments: EnvironmentSummary[];
+  fleet_lens: FleetLensSummary;
 }
 
 export interface ErrorResponse {
@@ -746,9 +765,11 @@ export interface TrogdorSurfaceSession {
   stateObserved: boolean;
   restLabel: string;
   transportLabel: string;
+  transportKey: string;
   toolLabel: string;
   cwdLabel: string;
   fullCwd: string;
+  canonicalCwd: string;
   thoughtLabel: string;
   clawgText: string;
   thoughtUpdatedAt: string;
@@ -764,6 +785,11 @@ export interface TrogdorSurfaceSession {
   batchSendSessionIds: string[];
   repoKey: string;
   repoLabel: string;
+  targetKey: string;
+  targetLabel: string;
+  stateKey: string;
+  readinessKey: string;
+  readinessLabel: string;
   isStale: boolean;
   clawgReadIndex: number;
   clawgWordCount: number;
@@ -896,6 +922,10 @@ export interface SurfaceModel {
   trogdorReaderStartIndex: number;
   trogdorReaderElapsedMs: number;
   sessions: TrogdorSurfaceSession[];
+  allSessionCount: number;
+  fleetFilter: { kind: string; key: string };
+  fleetLens: FleetLensSummary;
+  fleetChips: Array<{ label: string; kind: string; key: string; active: boolean }>;
   selectedSessionId: Nullable<string>;
   publishedSessionId: Nullable<string>;
   publishedAtLabel: string;

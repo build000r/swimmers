@@ -4,6 +4,7 @@ pub mod cli;
 pub mod color;
 pub mod config;
 pub mod env_bootstrap;
+pub mod fleet_lens;
 pub mod host_actions;
 pub mod launcher;
 pub mod metrics;

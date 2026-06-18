@@ -88,6 +88,22 @@ test("normalizeSessionListResponse preserves SessionSummary-derived web fields w
       },
       null,
     ],
+    fleet_lens: {
+      total_sessions: "2",
+      buckets: [
+        {
+          kind: "target",
+          key: "skillbox",
+          label: "Skillbox",
+          count: "1",
+          degraded_count: "1",
+          stale_count: null,
+          attention_count: "1",
+          commit_ready_count: "0",
+        },
+        null,
+      ],
+    },
   });
 
   assert.equal(payload.version, 7);
@@ -155,6 +171,19 @@ test("normalizeSessionListResponse preserves SessionSummary-derived web fields w
     last_error: "404",
     freshness_ms: 5,
   }]);
+  assert.deepEqual(payload.fleet_lens, {
+    total_sessions: 2,
+    buckets: [{
+      kind: "target",
+      key: "skillbox",
+      label: "Skillbox",
+      count: 1,
+      degraded_count: 1,
+      stale_count: 0,
+      attention_count: 1,
+      commit_ready_count: 0,
+    }],
+  });
 });
 
 test("normalizeOperatorPressureResponse preserves existing Trogdor input fields only", () => {

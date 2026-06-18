@@ -122,6 +122,7 @@ export async function runSessionRefresh(runtime) {
     const pressurePayload = await runtime.responseJsonOrNull(pressureResponse);
     const healthPayload = await runtime.responseJsonOrNull(healthResponse);
     runtime.state.sessions = Array.isArray(payload.sessions) ? payload.sessions : [];
+    runtime.state.fleetLens = payload.fleet_lens || null;
     runtime.applyOperatorPressure(pressurePayload);
     runtime.applyBackendHealth(healthPayload);
     runtime.syncTrogdorCueTransitions();
@@ -174,6 +175,7 @@ async function runSessionRefreshSuccessSideEffects(runtime) {
 
 function applySessionRefreshError(error, runtime) {
   runtime.state.sessions = [];
+  runtime.state.fleetLens = null;
   runtime.state.operatorPressureBySession = new Map();
   runtime.state.backendHealth = null;
   runtime.state.publishedSelection = null;

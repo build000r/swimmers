@@ -592,6 +592,41 @@ impl EnvironmentSummary {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FleetLensBucketKind {
+    Target,
+    Repo,
+    State,
+    Readiness,
+    Transport,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FleetLensBucket {
+    pub kind: FleetLensBucketKind,
+    pub key: String,
+    pub label: String,
+    pub count: usize,
+    pub degraded_count: usize,
+    pub stale_count: usize,
+    pub attention_count: usize,
+    pub commit_ready_count: usize,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FleetLensSummary {
+    pub total_sessions: usize,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub buckets: Vec<FleetLensBucket>,
+}
+
+impl FleetLensSummary {
+    pub fn is_empty(&self) -> bool {
+        self.total_sessions == 0 && self.buckets.is_empty()
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RepoActionKind {
@@ -1558,6 +1593,8 @@ pub struct SessionListResponse {
     pub repo_themes: HashMap<String, RepoTheme>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub environments: Vec<EnvironmentSummary>,
+    #[serde(default, skip_serializing_if = "FleetLensSummary::is_empty")]
+    pub fleet_lens: FleetLensSummary,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -1,7 +1,9 @@
 use super::*;
 use swimmers::api::remote_sessions;
 use swimmers::color::hsl_to_rgb;
+use swimmers::fleet_lens::build_fleet_lens_summary;
 use swimmers::session_labels::{session_canonical_cwd_key, session_cwd_label};
+use swimmers::types::FleetLensBucketKind;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 const THOUGHT_COMMIT_LABEL: &str = "[commit]";
@@ -1430,14 +1432,55 @@ pub(crate) fn thought_panel_header<C: TuiApi>(app: &App<C>) -> String {
     let mode = thought_panel_display_mode(app, &entries);
     let scope = if mode.show_all { "all" } else { "asleep" };
     let toggle = if mode.show_all { "> asleep" } else { "> all" };
+    let fleet = thought_panel_fleet_lens_header(app)
+        .map(|summary| format!(" · {summary}"))
+        .unwrap_or_default();
     format!(
-        "clawgs / {} / {} · {}/{} asleep · {}",
+        "clawgs / {} / {} · {}/{} asleep · {}{}",
         mode.group_by.label(),
         scope,
         stopped,
         total,
-        toggle
+        toggle,
+        fleet
     )
+}
+
+fn thought_panel_fleet_lens_header<C: TuiApi>(app: &App<C>) -> Option<String> {
+    let sessions = app
+        .entities
+        .iter()
+        .map(|entity| entity.session.clone())
+        .collect::<Vec<_>>();
+    let lens = build_fleet_lens_summary(&sessions);
+    let target_count = lens
+        .buckets
+        .iter()
+        .filter(|bucket| bucket.kind == FleetLensBucketKind::Target)
+        .count();
+    if target_count <= 1 {
+        return None;
+    }
+    let repo_count = lens
+        .buckets
+        .iter()
+        .filter(|bucket| bucket.kind == FleetLensBucketKind::Repo)
+        .count();
+    let degraded = lens
+        .buckets
+        .iter()
+        .filter(|bucket| bucket.kind == FleetLensBucketKind::Transport && bucket.key != "healthy")
+        .map(|bucket| bucket.count)
+        .sum::<usize>();
+    let degraded_suffix = if degraded > 0 {
+        format!(" · {degraded} degraded")
+    } else {
+        String::new()
+    };
+    Some(format!(
+        "fleet {target_count} hosts / {repo_count} project{}{degraded_suffix}",
+        pluralize(repo_count)
+    ))
 }
 
 pub(crate) fn render_thought_panel<C: TuiApi>(

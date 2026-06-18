@@ -232,6 +232,8 @@ const state = {
   utilityLabel: "Cmd/Ctrl-click a terminal link to open it.",
   utilityMuted: true,
   backendHealth: null,
+  fleetFilter: { kind: "", key: "" },
+  fleetLens: null,
   surfaceZones: [],
   surfaceMasks: [],
   surfaceClickSuppressUntil: 0,
@@ -1703,7 +1705,20 @@ async function handleSurfaceAction(zone) {
   if (plan.type === "trogdor_read_toggle" || plan.type === "trogdor_wpm") return runTrogdorReaderSurfaceAction(plan);
   if (plan.type === "toggle_trogdor_atlas") return toggleTrogdorAtlasSurfaceAction();
   if (plan.type === "focus_terminal") return focusTerminalSurfaceAction();
+  if (plan.type === "set_fleet_filter") return setFleetFilter(plan.filter);
   return runSurfaceActionExecution(surfaceActionExecutionForZone(plan, zone));
+}
+
+function setFleetFilter(filter = {}) {
+  const next = {
+    kind: String(filter.kind || "").trim().toLowerCase(),
+    key: String(filter.key || "").trim(),
+  };
+  const current = state.fleetFilter || { kind: "", key: "" };
+  state.fleetFilter = current.kind === next.kind && current.key === next.key
+    ? { kind: "", key: "" }
+    : next;
+  renderHudSurface();
 }
 
 function surfaceActionPlan(zone) {

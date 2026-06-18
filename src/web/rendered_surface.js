@@ -115,6 +115,17 @@ function drawHeader(frame, layout, model) {
       type: "action",
       actionId: "refresh",
     }),
+    ...(Array.isArray(model?.fleetChips) ? model.fleetChips.map((chip) => chipSpec(
+      chip.label,
+      chip.active ? COLORS.success : COLORS.text,
+      chip.active ? COLORS.chipActiveBg : COLORS.chipBg,
+      {
+        type: "action",
+        actionId: "fleet_filter",
+        kind: chip.kind,
+        key: chip.key,
+      },
+    )) : []),
   ];
 
   let cursorX = layout.header.x + 2;

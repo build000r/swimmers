@@ -67,6 +67,14 @@ export function surfaceActionDispatchPlan(zone, context = {}) {
       return { type: "focus_terminal" };
     case "refresh":
       return { type: "refresh" };
+    case "fleet_filter":
+      return {
+        type: "set_fleet_filter",
+        filter: {
+          kind: String(zone.kind || ""),
+          key: String(zone.key || ""),
+        },
+      };
     default:
       return { type: "ignore" };
   }
@@ -152,7 +160,10 @@ export function surfaceActionExecutionPlan(plan = {}, context = {}) {
     case "toggle_select":
     case "copy_selection":
     case "refresh":
-      return { type: plan.type };
+    case "set_fleet_filter":
+      return plan.type === "set_fleet_filter"
+        ? { type: plan.type, filter: plan.filter || { kind: "", key: "" } }
+        : { type: plan.type };
     default:
       return { type: "ignore" };
   }

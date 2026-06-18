@@ -199,6 +199,46 @@ export function normalizeEnvironmentSummary(value) {
   };
 }
 
+function normalizeFleetLensBucket(value) {
+  const bucket = objectRecord(value) || {};
+  return {
+    kind: stringValue(bucket.kind),
+    key: stringValue(bucket.key),
+    label: stringValue(bucket.label || bucket.key),
+    count: finiteNumber(bucket.count),
+    degraded_count: finiteNumber(bucket.degraded_count),
+    stale_count: finiteNumber(bucket.stale_count),
+    attention_count: finiteNumber(bucket.attention_count),
+    commit_ready_count: finiteNumber(bucket.commit_ready_count),
+  };
+}
+
+export function normalizeFleetLensSummary(value) {
+  const summary = objectRecord(value) || {};
+  return {
+    total_sessions: finiteNumber(summary.total_sessions),
+    buckets: objectArray(summary.buckets).map(normalizeFleetLensBucket),
+  };
+}
+
+function normalizeFleetFilter(value) {
+  const filter = objectRecord(value) || {};
+  return {
+    kind: stringValue(filter.kind),
+    key: stringValue(filter.key),
+  };
+}
+
+function normalizeFleetChip(value) {
+  const chip = objectRecord(value) || {};
+  return {
+    label: stringValue(chip.label),
+    kind: stringValue(chip.kind),
+    key: stringValue(chip.key),
+    active: booleanValue(chip.active),
+  };
+}
+
 export function normalizeSessionListResponse(value) {
   const payload = objectRecord(value) || {};
   return {
@@ -207,6 +247,7 @@ export function normalizeSessionListResponse(value) {
     version: finiteNumber(payload.version),
     repo_themes: objectMap(payload.repo_themes),
     environments: objectArray(payload.environments).map(normalizeEnvironmentSummary),
+    fleet_lens: normalizeFleetLensSummary(payload.fleet_lens),
   };
 }
 
@@ -791,6 +832,7 @@ export function normalizeTrogdorSurfaceSession(value) {
     stateObserved: booleanValue(session.stateObserved),
     restLabel: stringValue(session.restLabel, "unknown"),
     transportLabel: stringValue(session.transportLabel, "unknown"),
+    transportKey: stringValue(session.transportKey, "unknown"),
     toolLabel: stringValue(session.toolLabel, "shell"),
     cwdLabel: stringValue(session.cwdLabel),
     fullCwd: stringValue(session.fullCwd),
@@ -812,6 +854,11 @@ export function normalizeTrogdorSurfaceSession(value) {
     batchSendSessionIds: stringArray(session.batchSendSessionIds),
     repoKey: stringValue(session.repoKey),
     repoLabel: stringValue(session.repoLabel),
+    targetKey: stringValue(session.targetKey),
+    targetLabel: stringValue(session.targetLabel),
+    stateKey: stringValue(session.stateKey),
+    readinessKey: stringValue(session.readinessKey),
+    readinessLabel: stringValue(session.readinessLabel),
     isStale: booleanValue(session.isStale),
     clawgReadIndex: finiteNumber(session.clawgReadIndex),
     clawgWordCount: finiteNumber(session.clawgWordCount),
@@ -854,6 +901,10 @@ export function normalizeSurfaceModel(value) {
     trogdorReaderStartIndex: finiteNumber(model.trogdorReaderStartIndex),
     trogdorReaderElapsedMs: finiteNumber(model.trogdorReaderElapsedMs),
     sessions: objectArray(model.sessions).map(normalizeTrogdorSurfaceSession),
+    allSessionCount: finiteNumber(model.allSessionCount),
+    fleetFilter: normalizeFleetFilter(model.fleetFilter),
+    fleetLens: normalizeFleetLensSummary(model.fleetLens),
+    fleetChips: objectArray(model.fleetChips).map(normalizeFleetChip),
     selectedSessionId: optionalString(model.selectedSessionId),
     publishedSessionId: optionalString(model.publishedSessionId),
     publishedAtLabel: stringValue(model.publishedAtLabel),

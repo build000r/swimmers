@@ -11,6 +11,7 @@ use crate::api::service::{create_local_sessions_batch, list_sessions_for_client}
 use crate::api::{fetch_live_summary, remote_sessions, AppState};
 use crate::auth::{AuthInfo, AuthScope};
 use crate::config::SessionDeleteMode;
+use crate::fleet_lens::build_fleet_lens_summary;
 use crate::session::actor::{ActorHandle, InputDeliveryResult, SessionCommand};
 use crate::session::supervisor::TmuxAdoptError;
 use crate::types::{
@@ -36,6 +37,7 @@ pub(super) async fn list_sessions(
     // as a placeholder. A proper monotonic version can be added to the
     // supervisor later if clients need ETag-style cache validation.
     Ok(Json(SessionListResponse {
+        fleet_lens: build_fleet_lens_summary(&sessions),
         sessions,
         version: 0,
         repo_themes: Default::default(),
