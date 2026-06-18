@@ -339,14 +339,15 @@ export function batchLaunchTargetBlockers(dirBrowser, target) {
   return launchTargetBlockersForPaths(Array.from(selected), target);
 }
 
-function renderLaunchTargetOptions(response, { el, dirBrowser }) {
+function renderLaunchTargetOptions(response, { el, dirBrowser, preferredLaunchTarget = "" }) {
   if (!el.createLaunchTarget) {
     return;
   }
   const targets = Array.isArray(response?.launch_targets) && response.launch_targets.length
     ? response.launch_targets
     : [{ id: "local", label: "Local machine", kind: "local" }];
-  const defaultTarget = String(response?.default_launch_target || dirBrowser.launchTarget || "local").trim() || "local";
+  const preferredTarget = String(preferredLaunchTarget || "").trim();
+  const defaultTarget = String(preferredTarget || response?.default_launch_target || dirBrowser.launchTarget || "local").trim() || "local";
   const hasDefault = targets.some((target) => String(target?.id || "") === defaultTarget);
   dirBrowser.launchTargets = targets;
   dirBrowser.launchTarget = hasDefault ? defaultTarget : String(targets[0]?.id || "local");
@@ -568,6 +569,7 @@ export function renderDirEntries(
     setDirStatus,
     syncSheetActionAvailability,
     renderDirBrowserView = null,
+    preferredLaunchTarget = "",
   },
 ) {
   const rawEntries = Array.isArray(response?.entries) ? response.entries : [];
@@ -586,7 +588,7 @@ export function renderDirEntries(
   if (!el.createCwd.value.trim() || !selected.size) {
     el.createCwd.value = path;
   }
-  renderLaunchTargetOptions(response, { el, dirBrowser });
+  renderLaunchTargetOptions(response, { el, dirBrowser, preferredLaunchTarget });
 
   const entries = visibleDirEntries(rawEntries, path, normalizedDirSearch(dirBrowser));
   const selectablePaths = dirBrowserSelectablePathSet(entries, path);

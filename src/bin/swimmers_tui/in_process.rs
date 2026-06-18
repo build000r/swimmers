@@ -466,7 +466,12 @@ impl TuiApi for InProcessApi {
         Box::pin(async move {
             update_dir_group_memberships_service(
                 state,
-                DirGroupMembershipUpdateRequest { path, add, remove },
+                DirGroupMembershipUpdateRequest {
+                    path,
+                    target: None,
+                    add,
+                    remove,
+                },
             )
             .await
             .map_err(api_service_error_message)

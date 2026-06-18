@@ -888,6 +888,7 @@ async fn update_dir_group_memberships_persists_delta_and_returns_effective_group
         &config,
         DirGroupMembershipUpdateRequest {
             path: backend.to_string_lossy().into_owned(),
+            target: None,
             add: vec!["frontend".into()],
             remove: vec!["backend".into()],
         },
@@ -943,6 +944,7 @@ async fn update_dir_group_memberships_rejects_unknown_and_empty_updates_before_p
         &config,
         DirGroupMembershipUpdateRequest {
             path: frontend.to_string_lossy().into_owned(),
+            target: None,
             add: vec!["missing".into()],
             remove: Vec::new(),
         },
@@ -958,6 +960,7 @@ async fn update_dir_group_memberships_rejects_unknown_and_empty_updates_before_p
         &config,
         DirGroupMembershipUpdateRequest {
             path: frontend.to_string_lossy().into_owned(),
+            target: None,
             add: Vec::new(),
             remove: Vec::new(),
         },
@@ -993,6 +996,7 @@ async fn update_dir_group_memberships_forbids_paths_outside_base_and_overlay_roo
         &config,
         DirGroupMembershipUpdateRequest {
             path: outside.to_string_lossy().into_owned(),
+            target: None,
             add: vec!["frontend".into()],
             remove: Vec::new(),
         },
@@ -1026,6 +1030,7 @@ async fn update_dir_group_memberships_allows_overlay_group_roots_outside_base() 
         &config,
         DirGroupMembershipUpdateRequest {
             path: skill.to_string_lossy().into_owned(),
+            target: None,
             add: vec!["frontend".into()],
             remove: vec!["skills".into()],
         },

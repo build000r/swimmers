@@ -205,6 +205,9 @@ fn sanitized_target_base_url(target: &LaunchTargetSummary) -> Option<String> {
         return None;
     }
     let mut url = reqwest::Url::parse(raw).ok()?;
+    if !matches!(url.scheme(), "http" | "https") {
+        return None;
+    }
     if !url.username().is_empty() {
         let _ = url.set_username("");
     }
@@ -309,24 +312,21 @@ fn cached_poll_error_is_current(entry: &RemoteTargetSessionCache) -> bool {
 }
 
 fn remote_target_config_error(target: &LaunchTargetSummary) -> Option<String> {
-    target
-        .base_url
-        .as_deref()
-        .map(str::trim)
-        .filter(|base_url| !base_url.is_empty())
-        .and_then(|base_url| reqwest::Url::parse(base_url).ok())
-        .and_then(|url| url.host_str().map(|_| ()))
-        .is_none()
-        .then_some("base_url_unavailable".to_string())
-        .or_else(|| {
-            target
-                .auth_token_env
-                .as_deref()
-                .map(str::trim)
-                .filter(|env_key| !env_key.is_empty())
-                .filter(|env_key| !auth_env_value_present(env_key))
-                .map(|_| "auth_env_missing".to_string())
-        })
+    remote_base_url_config_error(target).or_else(|| {
+        target
+            .auth_token_env
+            .as_deref()
+            .map(str::trim)
+            .filter(|env_key| !env_key.is_empty())
+            .filter(|env_key| !auth_env_value_present(env_key))
+            .map(|_| "auth_env_missing".to_string())
+    })
+}
+
+fn remote_base_url_config_error(target: &LaunchTargetSummary) -> Option<String> {
+    parse_remote_base_url(target)
+        .err()
+        .map(|_| "base_url_unavailable".to_string())
 }
 
 pub fn remote_targets_health_snapshot() -> crate::types::DependencyHealthSnapshot {
@@ -383,15 +383,7 @@ fn remote_targets_health_snapshot_for_targets(
         if target.path_mappings.is_empty() {
             missing_mappings += 1;
         }
-        if target
-            .base_url
-            .as_deref()
-            .map(str::trim)
-            .filter(|base_url| !base_url.is_empty())
-            .and_then(|base_url| reqwest::Url::parse(base_url).ok())
-            .and_then(|url| url.host_str().map(|_| ()))
-            .is_none()
-        {
+        if remote_base_url_config_error(target).is_some() {
             missing_base_url += 1;
         }
         if let Some(env_key) = target
@@ -1426,15 +1418,7 @@ fn is_swimmers_api_target(target: &LaunchTargetSummary) -> bool {
 }
 
 fn target_points_at_current_server(target: &LaunchTargetSummary, config: &Config) -> bool {
-    let Some(base_url) = target
-        .base_url
-        .as_deref()
-        .map(str::trim)
-        .filter(|url| !url.is_empty())
-    else {
-        return false;
-    };
-    let Ok(url) = reqwest::Url::parse(base_url) else {
+    let Ok(url) = parse_remote_base_url(target) else {
         return false;
     };
     let Some(host) = url.host_str() else {
@@ -1547,6 +1531,15 @@ fn http_client(timeout: Duration) -> Result<Client, RemoteSessionError> {
 }
 
 fn remote_url(target: &LaunchTargetSummary, path: &str) -> Result<String, RemoteSessionError> {
+    let url = parse_remote_base_url(target)?;
+    Ok(format!(
+        "{}/{}",
+        url.as_str().trim_end_matches('/'),
+        path.trim_start_matches('/')
+    ))
+}
+
+fn parse_remote_base_url(target: &LaunchTargetSummary) -> Result<reqwest::Url, RemoteSessionError> {
     let base_url = target
         .base_url
         .as_deref()
@@ -1573,6 +1566,16 @@ fn remote_url(target: &LaunchTargetSummary, path: &str) -> Result<String, Remote
             format!("launch target '{}' base_url must include a host", target.id),
         ));
     }
+    if !matches!(url.scheme(), "http" | "https") {
+        return Err(RemoteSessionError::new(
+            StatusCode::BAD_REQUEST,
+            "LAUNCH_TARGET_INVALID",
+            format!(
+                "launch target '{}' base_url must use http or https",
+                target.id
+            ),
+        ));
+    }
     if !url.username().is_empty()
         || url.password().is_some()
         || url.query().is_some()
@@ -1587,11 +1590,7 @@ fn remote_url(target: &LaunchTargetSummary, path: &str) -> Result<String, Remote
             ),
         ));
     }
-    Ok(format!(
-        "{}/{}",
-        url.as_str().trim_end_matches('/'),
-        path.trim_start_matches('/')
-    ))
+    Ok(url)
 }
 
 fn with_remote_auth(

@@ -993,7 +993,11 @@ impl TuiApi for ApiClient {
             let response = self
                 .with_auth(self.http.post(url))
                 .timeout(API_DIRECTORY_ACTION_TIMEOUT)
-                .json(&DirRepoActionRequest { path, kind })
+                .json(&DirRepoActionRequest {
+                    path,
+                    target: None,
+                    kind,
+                })
                 .send()
                 .await
                 .map_err(|err| self.transport_error("start the repo action", err))?;
@@ -1019,7 +1023,12 @@ impl TuiApi for ApiClient {
             let response = self
                 .with_auth(self.http.post(url))
                 .timeout(API_DIRECTORY_ACTION_TIMEOUT)
-                .json(&DirGroupMembershipUpdateRequest { path, add, remove })
+                .json(&DirGroupMembershipUpdateRequest {
+                    path,
+                    target: None,
+                    add,
+                    remove,
+                })
                 .send()
                 .await
                 .map_err(|err| self.transport_error("update directory groups", err))?;

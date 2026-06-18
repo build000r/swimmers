@@ -176,7 +176,7 @@ export function createDirBrowserController(runtime) {
     return true;
   }
 
-  function renderDirEntries(response) {
+  function renderDirEntries(response, options = {}) {
     renderDirBrowserEntries(response, {
       el,
       dirBrowser: state.dirBrowser,
@@ -187,6 +187,7 @@ export function createDirBrowserController(runtime) {
       setDirStatus,
       syncSheetActionAvailability,
       renderDirBrowserView,
+      preferredLaunchTarget: options.preferredLaunchTarget,
     });
   }
 
@@ -221,7 +222,10 @@ export function createDirBrowserController(runtime) {
       }
       const response = await apiFetch(url.pathname + url.search);
       const payload = await responseJson(response, normalizeDirListResponse);
-      renderDirEntries(payload);
+      renderDirEntries(payload, {
+        preferredLaunchTarget: options.preferredLaunchTarget,
+      });
+      return true;
     } catch (error) {
       if (shouldRetryDirListingFromBase(error, targetPath, groupName, options)) {
         storage.removeItem(pathStorageKey);
@@ -230,9 +234,13 @@ export function createDirBrowserController(runtime) {
         el.dirsPath.value = "";
         el.createCwd.value = "";
         setDirStatus("Saved directory was outside the repository root. Loading the default directory...");
-        return loadDirListing("", managed, "", { retriedFromBase: true });
+        return loadDirListing("", managed, "", {
+          retriedFromBase: true,
+          preferredLaunchTarget: options.preferredLaunchTarget,
+        });
       }
       setDirStatus(`Failed to load directories: ${error.message}`, true);
+      return false;
     } finally {
       state.dirBrowser.loading = false;
       syncSheetActionAvailability();
@@ -263,7 +271,7 @@ export function createDirBrowserController(runtime) {
       await apiFetch("/v1/dirs/group-memberships", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ path: targetPath, add, remove }),
+        body: JSON.stringify({ path: targetPath, target: launchTargetPayload(), add, remove }),
       });
       await loadDirListing(
         state.dirBrowser.path || el.dirsPath.value,
@@ -438,11 +446,21 @@ export function createDirBrowserController(runtime) {
     syncCreateLaunchTargetStatus();
     syncSheetActionAvailability();
     if (nextTarget !== previousTarget && (state.dirBrowser.path || el.dirsPath.value || state.dirBrowser.entries.length)) {
-      await loadDirListing(
+      const loaded = await loadDirListing(
         state.dirBrowser.path || el.dirsPath.value,
         state.dirBrowser.managedOnly,
         state.dirBrowser.group,
+        { preferredLaunchTarget: nextTarget },
       );
+      if (!loaded) {
+        state.dirBrowser.launchTarget = previousTarget;
+        if (el.createLaunchTarget) {
+          el.createLaunchTarget.value = previousTarget;
+        }
+        renderCreateBatchBar();
+        batchLaunchBlockersForPaths(selectedBatchDirs());
+        syncSheetActionAvailability();
+      }
     }
   }
 

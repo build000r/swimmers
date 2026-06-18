@@ -1419,6 +1419,8 @@ pub struct DirGroupMembershipDelta {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DirGroupMembershipUpdateRequest {
     pub path: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target: Option<String>,
     #[serde(default)]
     pub add: Vec<String>,
     #[serde(default)]
@@ -1435,6 +1437,8 @@ pub struct DirGroupMembershipUpdateResponse {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DirRestartRequest {
     pub path: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1447,6 +1451,8 @@ pub struct DirRestartResponse {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DirRepoActionRequest {
     pub path: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target: Option<String>,
     pub kind: RepoActionKind,
 }
 

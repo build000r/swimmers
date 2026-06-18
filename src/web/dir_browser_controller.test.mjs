@@ -259,6 +259,121 @@ test("directory browser controller reloads inventory when launch target changes"
   }
 });
 
+test("directory browser controller preserves explicit local target during reload", async () => {
+  const previousDocument = globalThis.document;
+  globalThis.document = {
+    createElement(tagName) {
+      return { tagName, value: "", textContent: "" };
+    },
+  };
+  try {
+    const calls = [];
+    const { runtime, state, el } = createRuntime({
+      apiFetch: async (url) => {
+        calls.push(url);
+        return {};
+      },
+      responseJson: async (_response, normalize) => normalize({
+        path: "/workspace",
+        entries: [],
+        launch_targets: [{ id: "local", label: "Local machine", kind: "local" }, devboxTarget()],
+        default_launch_target: "devbox",
+      }),
+      location: new URL("http://swimmers.test/"),
+      renderDirBrowserView() {
+        return true;
+      },
+    });
+    state.dirBrowser.path = "/workspace";
+    state.dirBrowser.entries = [{ name: "swimmers", has_children: false }];
+    state.dirBrowser.launchTargets = [{ id: "local", label: "Local machine", kind: "local" }, devboxTarget()];
+    state.dirBrowser.launchTarget = "devbox";
+    el.dirsPath.value = "/workspace";
+    el.createLaunchTarget = selectElement("local");
+
+    const controller = createDirBrowserController(runtime);
+    await controller.handleCreateLaunchTargetChange();
+
+    assert.equal(state.dirBrowser.launchTarget, "local");
+    assert.equal(el.createLaunchTarget.value, "local");
+    assert.equal(calls.length, 1);
+    assert.equal(calls[0], "/v1/dirs?path=%2Fworkspace&managed_only=false");
+  } finally {
+    globalThis.document = previousDocument;
+  }
+});
+
+test("directory browser controller reverts target when target-change reload fails", async () => {
+  const { runtime, state, el, statuses } = createRuntime({
+    apiFetch: async () => {
+      throw new Error("remote down");
+    },
+    location: new URL("http://swimmers.test/"),
+  });
+  state.dirBrowser.path = "/workspace";
+  state.dirBrowser.entries = [{ name: "swimmers", has_children: false }];
+  state.dirBrowser.launchTargets = [{ id: "local", label: "Local machine", kind: "local" }, devboxTarget()];
+  state.dirBrowser.launchTarget = "local";
+  el.dirsPath.value = "/workspace";
+  el.createLaunchTarget = selectElement("devbox");
+
+  const controller = createDirBrowserController(runtime);
+  await controller.handleCreateLaunchTargetChange();
+
+  assert.equal(state.dirBrowser.launchTarget, "local");
+  assert.equal(el.createLaunchTarget.value, "local");
+  assert.deepEqual(statuses.at(-1), {
+    message: "Failed to load directories: remote down",
+    isError: true,
+  });
+});
+
+test("directory browser controller sends selected target with group edits", async () => {
+  const previousDocument = globalThis.document;
+  globalThis.document = {
+    createElement(tagName) {
+      return { tagName, value: "", textContent: "" };
+    },
+  };
+  try {
+    const calls = [];
+    const { runtime, state, el } = createRuntime({
+      apiFetch: async (...args) => {
+        calls.push(args);
+        return {};
+      },
+      responseJson: async (_response, normalize) => normalize({
+        path: "/workspace",
+        entries: [],
+        launch_targets: [{ id: "local", label: "Local machine", kind: "local" }, devboxTarget()],
+        default_launch_target: "devbox",
+      }),
+      location: new URL("http://swimmers.test/"),
+      renderDirBrowserView() {
+        return true;
+      },
+    });
+    state.readOnly = false;
+    state.dirBrowser.path = "/workspace";
+    state.dirBrowser.launchTargets = [{ id: "local", label: "Local machine", kind: "local" }, devboxTarget()];
+    state.dirBrowser.launchTarget = "devbox";
+    el.createLaunchTarget = selectElement("devbox");
+
+    const controller = createDirBrowserController(runtime);
+    await controller.updateDirEntryGroupMembership("/workspace/swimmers", "add", "backend");
+
+    assert.equal(calls[0][0], "/v1/dirs/group-memberships");
+    assert.deepEqual(JSON.parse(calls[0][1].body), {
+      path: "/workspace/swimmers",
+      target: "devbox",
+      add: ["backend"],
+      remove: [],
+    });
+  } finally {
+    globalThis.document = previousDocument;
+  }
+});
+
 test("directory browser controller blocks unmapped remote single creates before fetch", async () => {
   const calls = [];
   const { runtime, state, el, statuses } = createRuntime({

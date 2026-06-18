@@ -1298,8 +1298,8 @@ fn app_js_retries_saved_out_of_base_dir_from_default_base() {
     assert!(js.contains("createDirBrowserController"));
     assert!(dir_browser_controller.contains("shouldRetryDirListingFromBase"));
     assert!(dir_browser_controller.contains("storage.removeItem(pathStorageKey)"));
-    assert!(dir_browser_controller
-        .contains("return loadDirListing(\"\", managed, \"\", { retriedFromBase: true })"));
+    assert!(dir_browser_controller.contains("retriedFromBase: true"));
+    assert!(dir_browser_controller.contains("preferredLaunchTarget: options.preferredLaunchTarget"));
     assert!(dir_browser_controller.contains("outside the allowed base directory"));
     assert!(input_support.contains("rawStoredDirPath.trim() === \"/\" ? \"\" : rawStoredDirPath"));
 }

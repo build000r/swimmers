@@ -28,6 +28,16 @@ fn service_error_response(error: ApiServiceError) -> Response {
     error_response(error.status(), error.code(), error.message())
 }
 
+fn remote_dir_write_response(target: Option<&str>) -> Option<Response> {
+    remote_sessions::is_remote_launch_target(target).then(|| {
+        error_response(
+            StatusCode::BAD_REQUEST,
+            "REMOTE_DIRECTORY_READ_ONLY",
+            "directory write actions for remote launch targets are read-only from this server",
+        )
+    })
+}
+
 // GET /v1/dirs?path=...
 async fn list_dirs(
     Extension(auth): Extension<AuthInfo>,
@@ -95,6 +105,9 @@ async fn restart_dir_services(
     if let Err(resp) = auth.require_scope(AuthScope::SessionsWrite) {
         return resp;
     }
+    if let Some(resp) = remote_dir_write_response(body.target.as_deref()) {
+        return resp;
+    }
 
     match restart_dir_services_service(&body.path).await {
         Ok(response) => success_json(StatusCode::OK, &response),
@@ -119,6 +132,9 @@ async fn start_dir_repo_action_response(
     if let Err(resp) = auth.require_scope(AuthScope::SessionsWrite) {
         return resp;
     }
+    if let Some(resp) = remote_dir_write_response(body.target.as_deref()) {
+        return resp;
+    }
 
     match start_dir_repo_action_service(state, &body.path, body.kind).await {
         Ok(response) => success_json(StatusCode::ACCEPTED, &response),
@@ -133,6 +149,9 @@ async fn update_dir_group_memberships(
     Json(body): Json<DirGroupMembershipUpdateRequest>,
 ) -> Response {
     if let Err(resp) = auth.require_scope(AuthScope::SessionsWrite) {
+        return resp;
+    }
+    if let Some(resp) = remote_dir_write_response(body.target.as_deref()) {
         return resp;
     }
 
@@ -771,6 +790,7 @@ mod tests {
             State(test_state()),
             Json(DirRestartRequest {
                 path: base.join("alpha").to_string_lossy().into_owned(),
+                target: None,
             }),
         )
         .await
@@ -787,6 +807,7 @@ mod tests {
             State(test_state()),
             Json(DirGroupMembershipUpdateRequest {
                 path: "/tmp".to_string(),
+                target: None,
                 add: vec!["frontend".to_string()],
                 remove: Vec::new(),
             }),
@@ -795,6 +816,53 @@ mod tests {
         .into_response();
 
         assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn directory_write_routes_reject_remote_targets() {
+        let restart = restart_dir_services(
+            Extension(AuthInfo::new(OPERATOR_SCOPES.to_vec())),
+            State(test_state()),
+            Json(DirRestartRequest {
+                path: "/tmp".to_string(),
+                target: Some("devbox".to_string()),
+            }),
+        )
+        .await
+        .into_response();
+        assert_eq!(restart.status(), StatusCode::BAD_REQUEST);
+        let json = response_json(restart).await;
+        assert_eq!(json["code"], "REMOTE_DIRECTORY_READ_ONLY");
+
+        let action = start_dir_repo_action(
+            Extension(AuthInfo::new(OPERATOR_SCOPES.to_vec())),
+            State(test_state()),
+            Json(DirRepoActionRequest {
+                path: "/tmp".to_string(),
+                target: Some("devbox".to_string()),
+                kind: RepoActionKind::Open,
+            }),
+        )
+        .await;
+        assert_eq!(action.status(), StatusCode::BAD_REQUEST);
+        let json = response_json(action).await;
+        assert_eq!(json["code"], "REMOTE_DIRECTORY_READ_ONLY");
+
+        let group = update_dir_group_memberships(
+            Extension(AuthInfo::new(OPERATOR_SCOPES.to_vec())),
+            State(test_state()),
+            Json(DirGroupMembershipUpdateRequest {
+                path: "/tmp".to_string(),
+                target: Some("devbox".to_string()),
+                add: vec!["frontend".to_string()],
+                remove: Vec::new(),
+            }),
+        )
+        .await
+        .into_response();
+        assert_eq!(group.status(), StatusCode::BAD_REQUEST);
+        let json = response_json(group).await;
+        assert_eq!(json["code"], "REMOTE_DIRECTORY_READ_ONLY");
     }
 
     #[tokio::test]
@@ -841,6 +909,7 @@ mod tests {
             State(test_state()),
             Json(DirRepoActionRequest {
                 path: "/tmp".to_string(),
+                target: None,
                 kind: RepoActionKind::Commit,
             }),
         )
@@ -858,6 +927,7 @@ mod tests {
             State(test_state()),
             Json(DirRepoActionRequest {
                 path: "/tmp".to_string(),
+                target: None,
                 kind: RepoActionKind::Open,
             }),
         )

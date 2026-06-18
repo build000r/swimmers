@@ -58,6 +58,12 @@ struct CaptureState {
 
 type CapturedRequests = Vec<(Option<String>, CreateSessionRequest)>;
 
+fn shared_remote_cache_test_guard() -> std::sync::MutexGuard<'static, ()> {
+    crate::test_support::ENV_LOCK
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner())
+}
+
 async fn capture_create_session(
     axum::extract::State(state): axum::extract::State<CaptureState>,
     headers: HeaderMap,
@@ -706,6 +712,7 @@ fn environment_summary_redacts_token_values_and_credentialed_base_url() {
 
 #[test]
 fn remote_targets_health_reports_cached_degraded_target_without_secret_values() {
+    let _guard = shared_remote_cache_test_guard();
     reset_remote_target_session_cache_for_tests();
     let remote = target();
     record_remote_poll_success(&remote.id, &[summary("sess_0")]);
@@ -736,6 +743,7 @@ fn remote_targets_health_reports_cached_degraded_target_without_secret_values() 
 
 #[test]
 fn remote_targets_health_keeps_cached_failure_degraded_after_backoff_expires() {
+    let _guard = shared_remote_cache_test_guard();
     reset_remote_target_session_cache_for_tests();
     let remote = target();
     record_remote_poll_success(&remote.id, &[summary("sess_0")]);
@@ -758,9 +766,7 @@ fn remote_targets_health_keeps_cached_failure_degraded_after_backoff_expires() {
 
 #[test]
 fn remote_targets_health_reports_auth_and_mapping_doctor_without_env_names() {
-    let _guard = crate::test_support::ENV_LOCK
-        .lock()
-        .unwrap_or_else(|poison| poison.into_inner());
+    let _guard = shared_remote_cache_test_guard();
     reset_remote_target_session_cache_for_tests();
     std::env::remove_var("SWIMMERS_REMOTE_TEST_TOKEN");
     let mut remote = target();
@@ -779,7 +785,52 @@ fn remote_targets_health_reports_auth_and_mapping_doctor_without_env_names() {
 }
 
 #[test]
+fn remote_targets_health_reports_non_http_base_url_as_unavailable() {
+    let _guard = shared_remote_cache_test_guard();
+    reset_remote_target_session_cache_for_tests();
+    let mut remote = target();
+    remote.base_url = Some("ftp://127.0.0.1:3210".to_string());
+
+    let health = remote_targets_health_snapshot_for_targets(
+        vec![remote.clone()],
+        &remote_health_test_config(),
+    );
+
+    assert_eq!(health.status, DependencyHealthStatus::Unavailable);
+    assert_eq!(health.details["targets_without_base_url"], "1");
+    assert_eq!(health.last_error.as_deref(), Some("base_url_unavailable"));
+
+    let environment = environment_summary_for_target(&remote);
+    assert_eq!(environment.status, DependencyHealthStatus::Unavailable);
+    assert_eq!(environment.base_url, None);
+    assert_eq!(
+        environment.last_error.as_deref(),
+        Some("base_url_unavailable")
+    );
+}
+
+#[test]
+fn remote_targets_health_reports_unsafe_base_url_without_secret_values() {
+    let _guard = shared_remote_cache_test_guard();
+    reset_remote_target_session_cache_for_tests();
+    let mut remote = target();
+    remote.base_url =
+        Some("http://secret-token@127.0.0.1:3210/?token=secret-token#secret-token".to_string());
+
+    let health =
+        remote_targets_health_snapshot_for_targets(vec![remote], &remote_health_test_config());
+
+    assert_eq!(health.status, DependencyHealthStatus::Unavailable);
+    assert_eq!(health.details["targets_without_base_url"], "1");
+    assert_eq!(health.last_error.as_deref(), Some("base_url_unavailable"));
+
+    let json = serde_json::to_string(&health).expect("health json");
+    assert!(!json.contains("secret-token"));
+}
+
+#[test]
 fn remote_targets_health_skips_current_server_targets() {
+    let _guard = shared_remote_cache_test_guard();
     reset_remote_target_session_cache_for_tests();
     let mut config = Config::default();
     config.bind = "127.0.0.1".to_string();
@@ -847,6 +898,18 @@ fn remote_url_rejects_credentialed_query_or_fragment_base_url() {
         assert_eq!(err.code(), "LAUNCH_TARGET_INVALID");
         assert!(err.message().contains("must not include credentials"));
     }
+}
+
+#[test]
+fn remote_url_rejects_non_http_base_url() {
+    let mut target = target();
+    target.base_url = Some("ftp://127.0.0.1:3210".to_string());
+
+    let err = remote_url(&target, "/v1/sessions").expect_err("ftp base_url rejected");
+
+    assert_eq!(err.status, StatusCode::BAD_REQUEST);
+    assert_eq!(err.code(), "LAUNCH_TARGET_INVALID");
+    assert!(err.message().contains("must use http or https"));
 }
 
 #[test]
