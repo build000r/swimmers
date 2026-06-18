@@ -266,7 +266,7 @@ When a selected session is stale because its tmux session disappeared, press `A`
 
 Click `[attention group]` in the TUI header to build or refresh a managed `swimmers-attention` tmux session from local numbered tmux sessions that are ready for operator input. Set `SWIMMERS_ATTENTION_GROUP_SIZE` to choose how many panes you want in the group and `SWIMMERS_ATTENTION_GROUP_LAYOUT` to control their tmux placement. Set `SWIMMERS_ATTENTION_GROUP_INCLUDE_UNNUMBERED=1` to also include ready sessions that use other naming conventions. When Ghostty is the native target on macOS, that explicit action opens the attention group in its own managed Ghostty window. On Linux or other non-native hosts, the same click refreshes the tmux group and reports `tmux attach -t swimmers-attention` for manual attach. The group prefers related project work over raw recency, preserves the managed tmux session, and refreshes the configured pane count in place as visible panes stop waiting or new ready panes can fit.
 
-The optional browser terminal renderer also honors `SWIMMERS_FRANKENTUI_PKG_DIR` (or `FRANKENTUI_PKG_DIR`) to override the auto-detected `frankentui/pkg` asset path.
+The optional browser terminal renderer reads FrankenTerm assets from `SWIMMERS_FRANKENTUI_PKG_DIR` (or `FRANKENTUI_PKG_DIR`). The source-checkout wrappers can discover and export that path for local browser workflows; standalone `swimmers` runs need one of those env vars when the package assets are outside the bundled candidate paths.
 
 ---
 
@@ -304,8 +304,9 @@ shell at `/selected`. Browser assets keep `/app.js` as a compatibility ES module
 route. When Vite build output is available, the HTML shell points at
 `/assets/vite/...` files from `target/web-vite` by default, or from
 `SWIMMERS_VITE_DIST_DIR` when that override is set. In debug/source workflows,
-set `SWIMMERS_VITE_DEV_ORIGIN` to point script and style tags at a running Vite
-dev server instead of the embedded or built asset set.
+set `SWIMMERS_VITE_DEV_ORIGIN` to point module script tags at a running Vite
+dev server while the Rust backend continues serving compatibility CSS from
+`/app.css`.
 
 ### Release acceptance profiles
 

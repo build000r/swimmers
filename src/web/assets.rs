@@ -747,16 +747,29 @@ pub(super) async fn serve_vite_dist_asset(dist_dir: &Path, route_path: &str) -> 
             bytes,
         )
             .into_response(),
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => super::json_error(
-            StatusCode::NOT_FOUND,
-            "VITE_ASSET_NOT_FOUND",
-            &format!("Vite asset was not found in {}", dist_dir.display()),
-        ),
-        Err(err) => super::json_error(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "VITE_ASSET_READ_FAILED",
-            &format!("failed to read Vite asset: {err}"),
-        ),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+            tracing::debug!(
+                vite_path = %path.display(),
+                "requested Vite asset was not found"
+            );
+            super::json_error(
+                StatusCode::NOT_FOUND,
+                "VITE_ASSET_NOT_FOUND",
+                "Vite asset was not found",
+            )
+        }
+        Err(err) => {
+            tracing::warn!(
+                vite_path = %path.display(),
+                error = %err,
+                "failed to read Vite asset"
+            );
+            super::json_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "VITE_ASSET_READ_FAILED",
+                "failed to read Vite asset",
+            )
+        }
     }
 }
 
@@ -936,16 +949,29 @@ pub(super) async fn serve_franken_term_font(font_path: FrankenTermFontPath) -> R
             bytes,
         )
             .into_response(),
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => super::json_error(
-            StatusCode::NOT_FOUND,
-            "FRANKENTERM_FONT_UNAVAILABLE",
-            &format!("font asset was not found in {}", path.display()),
-        ),
-        Err(err) => super::json_error(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "FRANKENTERM_FONT_READ_FAILED",
-            &format!("failed to read font asset: {err}"),
-        ),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+            tracing::debug!(
+                font_path = %path.display(),
+                "FrankenTerm font asset was not found"
+            );
+            super::json_error(
+                StatusCode::NOT_FOUND,
+                "FRANKENTERM_FONT_UNAVAILABLE",
+                "font asset was not found",
+            )
+        }
+        Err(err) => {
+            tracing::warn!(
+                font_path = %path.display(),
+                error = %err,
+                "failed to read FrankenTerm font asset"
+            );
+            super::json_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "FRANKENTERM_FONT_READ_FAILED",
+                "failed to read font asset",
+            )
+        }
     }
 }
 
@@ -1010,16 +1036,31 @@ pub(super) fn frankentui_asset_read_error_response(
     err: std::io::Error,
 ) -> Response {
     match err.kind() {
-        std::io::ErrorKind::NotFound => super::json_error(
-            StatusCode::NOT_FOUND,
-            "FRANKENTERM_ASSET_MISSING",
-            &format!("{file_name} was not found in {}", pkg_dir.display()),
-        ),
-        _ => super::json_error(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "FRANKENTERM_ASSET_READ_FAILED",
-            &format!("failed to read {file_name}: {err}"),
-        ),
+        std::io::ErrorKind::NotFound => {
+            tracing::debug!(
+                file_name,
+                pkg_dir = %pkg_dir.display(),
+                "FrankenTerm package asset was not found"
+            );
+            super::json_error(
+                StatusCode::NOT_FOUND,
+                "FRANKENTERM_ASSET_MISSING",
+                &format!("{file_name} was not found"),
+            )
+        }
+        _ => {
+            tracing::warn!(
+                file_name,
+                pkg_dir = %pkg_dir.display(),
+                error = %err,
+                "failed to read FrankenTerm package asset"
+            );
+            super::json_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "FRANKENTERM_ASSET_READ_FAILED",
+                &format!("failed to read {file_name}"),
+            )
+        }
     }
 }
 

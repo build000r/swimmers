@@ -578,6 +578,15 @@ async fn vite_dist_asset_route_serves_built_js_css_and_chunks_with_cache_policy(
         let body = response_json(response).await;
         assert_eq!(body["code"], "VITE_ASSET_NOT_FOUND", "{route}");
     }
+
+    let response = serve_vite_dist_asset(dir.path(), "assets/missing-12345678.js").await;
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    let body = response_json(response).await;
+    assert_eq!(body["code"], "VITE_ASSET_NOT_FOUND");
+    assert!(!body["message"]
+        .as_str()
+        .expect("message")
+        .contains(dir.path().to_str().expect("temp path")));
 }
 
 #[test]
@@ -1081,6 +1090,10 @@ async fn serve_franken_term_font_serves_font_bytes_and_error_payloads() {
     assert_eq!(response.status(), StatusCode::NOT_FOUND);
     let body = response_json(response).await;
     assert_eq!(body["code"], "FRANKENTERM_FONT_UNAVAILABLE");
+    assert!(!body["message"]
+        .as_str()
+        .expect("message")
+        .contains(dir.path().to_str().expect("temp path")));
 
     let response = serve_franken_term_font(FrankenTermFontPath::Available(dir.path().into()))
         .await
@@ -1088,10 +1101,14 @@ async fn serve_franken_term_font_serves_font_bytes_and_error_payloads() {
     assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
     let body = response_json(response).await;
     assert_eq!(body["code"], "FRANKENTERM_FONT_READ_FAILED");
+    assert!(!body["message"]
+        .as_str()
+        .expect("message")
+        .contains(dir.path().to_str().expect("temp path")));
 }
 
 #[tokio::test]
-async fn frankentui_asset_response_helpers_preserve_headers_and_error_payloads() {
+async fn frankentui_asset_response_helpers_preserve_headers_and_hide_host_paths() {
     let response = frankentui_asset_response("application/javascript", b"asset".to_vec());
     assert_eq!(response.status(), StatusCode::OK);
     assert_eq!(
@@ -1124,6 +1141,10 @@ async fn frankentui_asset_response_helpers_preserve_headers_and_error_payloads()
     assert!(body["message"]
         .as_str()
         .expect("message")
+        .contains("FrankenTerm.js"));
+    assert!(!body["message"]
+        .as_str()
+        .expect("message")
         .contains(dir.path().to_str().expect("temp path")));
 
     let response = frankentui_asset_read_error_response(
@@ -1138,6 +1159,10 @@ async fn frankentui_asset_response_helpers_preserve_headers_and_error_payloads()
         .as_str()
         .expect("message")
         .contains("FrankenTerm_bg.wasm"));
+    assert!(!body["message"]
+        .as_str()
+        .expect("message")
+        .contains(dir.path().to_str().expect("temp path")));
 }
 
 #[tokio::test]
