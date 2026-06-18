@@ -116,11 +116,11 @@ async fn fetch_mermaid_artifact_for_session(
     session_id: String,
 ) -> Result<MermaidArtifactResponse, String> {
     if let Some((target, remote_session_id)) = remote_sessions::denamespace_for_target(&session_id)
-        .map_err(|err| err.message().to_string())?
+        .map_err(|err| err.display_message("in-process API"))?
     {
         return remote_sessions::fetch_remote_mermaid_artifact(&target, remote_session_id)
             .await
-            .map_err(|err| err.message().to_string());
+            .map_err(|err| err.display_message("in-process API"));
     }
     let handle = state
         .supervisor
@@ -426,11 +426,11 @@ impl TuiApi for InProcessApi {
                     group.as_deref(),
                 )
                 .await
-                .map_err(|err| err.message().to_string());
+                .map_err(|err| err.display_message("in-process API"));
             }
             list_dirs_service(&self.state, path.as_deref(), managed_only, group.as_deref())
                 .await
-                .map_err(|err| err.to_string())
+                .map_err(api_service_error_message)
         })
     }
 
@@ -438,7 +438,7 @@ impl TuiApi for InProcessApi {
         Box::pin(async move {
             list_repo_search_entries_service()
                 .await
-                .map_err(|err| err.to_string())
+                .map_err(api_service_error_message)
         })
     }
 
@@ -451,7 +451,7 @@ impl TuiApi for InProcessApi {
         Box::pin(async move {
             start_dir_repo_action_service(self.state.clone(), &path, kind)
                 .await
-                .map_err(|err| err.to_string())
+                .map_err(api_service_error_message)
         })
     }
 
@@ -469,7 +469,7 @@ impl TuiApi for InProcessApi {
                 DirGroupMembershipUpdateRequest { path, add, remove },
             )
             .await
-            .map_err(|err| err.to_string())
+            .map_err(api_service_error_message)
         })
     }
 
@@ -500,7 +500,7 @@ impl TuiApi for InProcessApi {
                     initial_request,
                 })
                 .await
-                .map_err(|err| err.message().to_string());
+                .map_err(|err| err.display_message("in-process API"));
             }
             let (session, repo_theme) = self
                 .state
@@ -554,7 +554,7 @@ impl TuiApi for InProcessApi {
                     initial_request,
                 })
                 .await
-                .map_err(|err| err.message().to_string());
+                .map_err(|err| err.display_message("in-process API"));
             }
             create_local_sessions_batch(state, dirs, Some(spawn_tool), initial_request)
                 .await
@@ -1092,6 +1092,32 @@ printf '{"effective":[],"recommendations":[]}\n'
             .expect_err("empty batch should fail");
 
         assert_eq!(err, "VALIDATION_FAILED: dirs must not be empty");
+    }
+
+    #[tokio::test]
+    async fn create_sessions_batch_rejects_oversized_remote_batches_before_target_lookup() {
+        let api = InProcessApi::new(test_state());
+        let dirs = (0..=swimmers::api::service::BATCH_CREATE_MAX_DIRS)
+            .map(|index| format!("/tmp/project-{index}"))
+            .collect::<Vec<_>>();
+
+        let err = api
+            .create_sessions_batch(
+                dirs,
+                SpawnTool::Codex,
+                Some("missing-remote".to_string()),
+                None,
+            )
+            .await
+            .expect_err("oversized remote batch should fail locally");
+
+        assert_eq!(
+            err,
+            format!(
+                "VALIDATION_FAILED: dirs must include at most {} entries",
+                swimmers::api::service::BATCH_CREATE_MAX_DIRS
+            )
+        );
     }
 
     #[tokio::test]

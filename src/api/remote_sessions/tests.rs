@@ -498,6 +498,25 @@ fn require_batch_dirs_rejects_empty_dirs() {
 }
 
 #[test]
+fn require_batch_dirs_rejects_oversized_batches() {
+    let dirs = (0..=crate::api::service::BATCH_CREATE_MAX_DIRS)
+        .map(|index| format!("/workspace/repos/project-{index}"))
+        .collect::<Vec<_>>();
+
+    let err = require_batch_dirs(dirs).expect_err("oversized batch dirs should be invalid");
+
+    assert_eq!(err.status, StatusCode::BAD_REQUEST);
+    assert_eq!(err.code, "VALIDATION_FAILED");
+    assert_eq!(
+        err.message(),
+        format!(
+            "dirs must include at most {} entries",
+            crate::api::service::BATCH_CREATE_MAX_DIRS
+        )
+    );
+}
+
+#[test]
 fn map_batch_cwds_for_target_maps_each_dir() {
     let mapped = map_batch_cwds_for_target(
         &target(),

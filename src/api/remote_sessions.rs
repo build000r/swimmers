@@ -13,6 +13,7 @@ use reqwest::Client;
 use serde::Serialize;
 
 use crate::api::envelope::error_body_msg;
+use crate::api::service::validate_sessions_batch_dirs;
 use crate::config::Config;
 use crate::session::overlay::default_overlay;
 use crate::types::{
@@ -65,6 +66,10 @@ impl RemoteSessionError {
 
     pub(crate) fn code(&self) -> &'static str {
         self.code
+    }
+
+    pub fn display_message(&self, status: impl std::fmt::Display) -> String {
+        ErrorResponse::with_message(self.code, &self.message).display_message(status)
     }
 
     pub fn into_response(self) -> Response {
@@ -864,13 +869,9 @@ fn prepare_remote_sessions_batch(
 }
 
 fn require_batch_dirs(dirs: Vec<String>) -> Result<Vec<String>, RemoteSessionError> {
-    if dirs.is_empty() {
-        return Err(RemoteSessionError::new(
-            StatusCode::BAD_REQUEST,
-            "VALIDATION_FAILED",
-            "dirs must not be empty",
-        ));
-    }
+    validate_sessions_batch_dirs(&dirs).map_err(|error| {
+        RemoteSessionError::new(error.status(), error.code(), error.message().to_string())
+    })?;
     Ok(dirs)
 }
 
