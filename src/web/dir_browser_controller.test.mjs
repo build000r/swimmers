@@ -216,6 +216,52 @@ test("directory browser controller resets stale remote target for cockpit cwd la
   assert.equal(syncCount(), 2);
 });
 
+test("directory browser controller preserves remote target for mapped cockpit launch", async () => {
+  const opened = [];
+  const calls = [];
+  const { runtime, state, el } = createRuntime({
+    apiFetch: async (...args) => {
+      calls.push(args);
+      return { json: async () => ({ session: { session_id: "devbox::sess_2" } }) };
+    },
+    openSheet(sheet) {
+      opened.push(sheet);
+    },
+  });
+  state.readOnly = false;
+  state.dirBrowser.path = "/old";
+  state.dirBrowser.entries = [{ name: "old", full_path: "/old/agent" }];
+  state.dirBrowser.groups = ["old-group"];
+  state.dirBrowser.overlayLabel = "Old overlay";
+  state.dirBrowser.launchTargets = [{ id: "local", label: "Local machine", kind: "local" }, devboxTarget()];
+  state.dirBrowser.launchTarget = "local";
+  el.createLaunchTarget = selectElement("local");
+  el.createRequest.value = "continue there";
+
+  const controller = createDirBrowserController(runtime);
+  controller.openCreateSheetForCwd("/workspace/swimmers", { launchTarget: "devbox" });
+
+  assert.deepEqual(opened, ["create"]);
+  assert.equal(el.createCwd.value, "/workspace/swimmers");
+  assert.equal(el.dirsPath.value, "/workspace/swimmers");
+  assert.equal(state.dirBrowser.path, "/workspace/swimmers");
+  assert.equal(state.dirBrowser.launchTarget, "devbox");
+  assert.equal(el.createLaunchTarget.value, "devbox");
+  assert.deepEqual(state.dirBrowser.entries, []);
+  assert.deepEqual(state.dirBrowser.groups, []);
+  assert.equal(state.dirBrowser.overlayLabel, "");
+
+  await controller.createSessionFromSheet();
+
+  assert.equal(calls[0][0], "/v1/sessions");
+  assert.deepEqual(JSON.parse(calls[0][1].body), {
+    cwd: "/workspace/swimmers",
+    spawn_tool: "grok",
+    launch_target: "devbox",
+    initial_request: "continue there",
+  });
+});
+
 test("directory browser controller reloads inventory when launch target changes", async () => {
   const previousDocument = globalThis.document;
   globalThis.document = {

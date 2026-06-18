@@ -480,14 +480,23 @@ fn aggregate_remote_target_status(
     unknown: usize,
     doctor_degraded: bool,
 ) -> DependencyHealthStatus {
-    if unavailable > 0 && healthy == 0 && degraded == 0 {
-        DependencyHealthStatus::Unavailable
-    } else if unavailable > 0 || degraded > 0 || doctor_degraded {
-        DependencyHealthStatus::Degraded
-    } else if healthy > 0 && unknown == 0 {
-        DependencyHealthStatus::Healthy
-    } else {
-        DependencyHealthStatus::Unknown
+    let has_healthy = healthy > 0;
+    let has_degraded = degraded > 0;
+    let has_unavailable = unavailable > 0;
+    let has_unknown = unknown > 0;
+    match (
+        has_unavailable,
+        has_healthy,
+        has_degraded,
+        has_unknown,
+        doctor_degraded,
+    ) {
+        (true, false, false, _, _) => DependencyHealthStatus::Unavailable,
+        (true, _, _, _, _) | (_, _, true, _, _) | (_, _, _, _, true) => {
+            DependencyHealthStatus::Degraded
+        }
+        (false, true, false, false, false) => DependencyHealthStatus::Healthy,
+        _ => DependencyHealthStatus::Unknown,
     }
 }
 

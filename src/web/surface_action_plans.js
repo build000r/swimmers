@@ -145,7 +145,11 @@ export function surfaceActionExecutionPlan(plan = {}, context = {}) {
     case "open_send_sheet_for_zone":
       return { type: "open_send_sheet", payload: context.zonePayload };
     case "open_create_sheet_for_zone_cwd":
-      return { type: "open_create_sheet_for_cwd", cwd: context.zonePayload?.cwd };
+      return {
+        type: "open_create_sheet_for_cwd",
+        cwd: context.zonePayload?.cwd,
+        launchTarget: context.zonePayload?.launchTarget || "",
+      };
     case "select_then_open_mermaid_for_zone":
       return { type: "select_then_open_mermaid", sessionId: context.zonePayload?.sessionId };
     case "select_then_launch_commit_for_zone":

@@ -419,7 +419,12 @@ test("Trogdor action payload helpers preserve zone defaults and terminal copy", 
   assert.deepEqual(trogdorActionPayloadForZone({
     actionId: "trogdor_launch",
     cwd: "/tmp/repos/swimmers",
-  }), { cwd: "/tmp/repos/swimmers" });
+  }), { cwd: "/tmp/repos/swimmers", launchTarget: "" });
+  assert.deepEqual(trogdorActionPayloadForZone({
+    actionId: "trogdor_launch",
+    cwd: "/workspace/swimmers",
+    launchTarget: "devbox",
+  }), { cwd: "/workspace/swimmers", launchTarget: "devbox" });
   assert.deepEqual(trogdorActionPayloadForZone({
     actionId: "trogdor_mermaid",
     sessionId: "agent-1",

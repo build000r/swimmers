@@ -290,16 +290,25 @@ export function createDirBrowserController(runtime) {
     await loadDirListing(state.dirBrowser.path || "", state.dirBrowser.managedOnly, state.dirBrowser.group);
   }
 
-  function openCreateSheetForCwd(cwd) {
+  function openCreateSheetForCwd(cwd, options = {}) {
     const path = String(cwd || "").trim();
+    const launchTarget = String(options.launchTarget || "local").trim() || "local";
+    const previousPath = String(state.dirBrowser.path || "");
+    const previousTarget = String(state.dirBrowser.launchTarget || "local") || "local";
+    const inventoryChanged = Boolean(path && (path !== previousPath || launchTarget !== previousTarget));
     if (path) {
       el.createCwd.value = path;
       el.dirsPath.value = path;
       state.dirBrowser.path = path;
     }
-    state.dirBrowser.launchTarget = "local";
+    if (inventoryChanged) {
+      state.dirBrowser.entries = [];
+      state.dirBrowser.groups = [];
+      state.dirBrowser.overlayLabel = "";
+    }
+    state.dirBrowser.launchTarget = launchTarget;
     if (el.createLaunchTarget) {
-      el.createLaunchTarget.value = "local";
+      el.createLaunchTarget.value = launchTarget;
     }
     state.dirBrowser.singleLaunchBlocker = null;
     state.dirBrowser.batchLaunchBlockers = [];

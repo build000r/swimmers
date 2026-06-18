@@ -742,6 +742,98 @@ fn remote_targets_health_reports_cached_degraded_target_without_secret_values() 
 }
 
 #[test]
+fn aggregate_remote_target_status_matrix_preserves_fleet_policy() {
+    use DependencyHealthStatus::{Degraded, Healthy, Unavailable, Unknown};
+
+    for (healthy, degraded, unavailable, unknown, doctor_degraded, expected) in [
+        (0, 0, 1, 0, false, Unavailable),
+        (0, 0, 2, 1, false, Unavailable),
+        (0, 0, 1, 1, true, Unavailable),
+        (1, 0, 0, 0, false, Healthy),
+        (1, 0, 0, 1, false, Unknown),
+        (1, 0, 1, 0, false, Degraded),
+        (1, 1, 0, 0, false, Degraded),
+        (0, 1, 0, 1, false, Degraded),
+        (0, 0, 0, 1, false, Unknown),
+        (1, 0, 0, 0, true, Degraded),
+        (0, 0, 0, 1, true, Degraded),
+    ] {
+        assert_eq!(
+            aggregate_remote_target_status(healthy, degraded, unavailable, unknown, doctor_degraded),
+            expected,
+            "healthy={healthy} degraded={degraded} unavailable={unavailable} unknown={unknown} doctor_degraded={doctor_degraded}",
+        );
+    }
+}
+
+#[test]
+fn remote_targets_health_snapshot_characterizes_mixed_fleets() {
+    let _guard = shared_remote_cache_test_guard();
+    reset_remote_target_session_cache_for_tests();
+
+    let mut healthy = target();
+    healthy.id = "healthy".to_string();
+    healthy.label = "Healthy".to_string();
+    record_remote_poll_success(&healthy.id, &[summary("sess_healthy")]);
+
+    let mut unknown = target();
+    unknown.id = "unknown".to_string();
+    unknown.label = "Unknown".to_string();
+
+    let health = remote_targets_health_snapshot_for_targets(
+        vec![healthy.clone(), unknown.clone()],
+        &remote_health_test_config(),
+    );
+    assert_eq!(health.status, DependencyHealthStatus::Unknown);
+    assert_eq!(health.details["healthy_targets"], "1");
+    assert_eq!(health.details["unknown_targets"], "1");
+
+    let mut unavailable = target();
+    unavailable.id = "unavailable".to_string();
+    unavailable.label = "Unavailable".to_string();
+    unavailable.base_url = Some("ftp://127.0.0.1:3210".to_string());
+
+    let health = remote_targets_health_snapshot_for_targets(
+        vec![healthy.clone(), unavailable],
+        &remote_health_test_config(),
+    );
+    assert_eq!(health.status, DependencyHealthStatus::Degraded);
+    assert_eq!(health.details["healthy_targets"], "1");
+    assert_eq!(health.details["unavailable_targets"], "1");
+    assert_eq!(health.last_error.as_deref(), Some("base_url_unavailable"));
+
+    record_remote_poll_failure(&healthy.id, "REMOTE_SESSION_LIST_FAILED");
+    let health = remote_targets_health_snapshot_for_targets(
+        vec![healthy.clone(), unknown.clone()],
+        &remote_health_test_config(),
+    );
+    assert_eq!(health.status, DependencyHealthStatus::Degraded);
+    assert_eq!(health.details["degraded_targets"], "1");
+    assert_eq!(health.details["unknown_targets"], "1");
+    assert_eq!(
+        health.last_error.as_deref(),
+        Some("REMOTE_SESSION_LIST_FAILED")
+    );
+
+    let mut missing_mapping = target();
+    missing_mapping.id = "missing-mapping".to_string();
+    missing_mapping.label = "Missing Mapping".to_string();
+    missing_mapping.path_mappings = Vec::new();
+
+    let health = remote_targets_health_snapshot_for_targets(
+        vec![unknown, missing_mapping],
+        &remote_health_test_config(),
+    );
+    assert_eq!(health.status, DependencyHealthStatus::Degraded);
+    assert_eq!(health.details["unknown_targets"], "2");
+    assert_eq!(health.details["targets_without_path_mappings"], "1");
+    assert_eq!(
+        health.last_error.as_deref(),
+        Some("remote target path mapping doctor warning")
+    );
+}
+
+#[test]
 fn remote_targets_health_keeps_cached_failure_degraded_after_backoff_expires() {
     let _guard = shared_remote_cache_test_guard();
     reset_remote_target_session_cache_for_tests();

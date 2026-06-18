@@ -151,6 +151,8 @@ test("surfaceSession separates raw cwd from mapped canonical cwd and host label"
 
   assert.equal(session.fullCwd, "/srv/skillbox/repos/swimmers");
   assert.equal(session.canonicalCwd, "/Users/b/repos/opensource/swimmers");
+  assert.equal(session.launchCwd, "/Users/b/repos/opensource/swimmers");
+  assert.equal(session.launchTarget, "skillbox");
   assert.equal(session.cwdLabel, "opensource/swimmers @ Skillbox devbox");
   assert.equal(session.repoKey, "/Users/b/repos/opensource/swimmers");
   assert.equal(session.repoLabel, "opensource/swimmers");
@@ -174,6 +176,8 @@ test("surfaceSession falls back honestly for unmapped remote cwd", () => {
 
   assert.equal(session.fullCwd, "/srv/skillbox/repos/swimmers");
   assert.equal(session.canonicalCwd, "/srv/skillbox/repos/swimmers");
+  assert.equal(session.launchCwd, "");
+  assert.equal(session.launchTarget, "");
   assert.equal(session.cwdLabel, "repos/swimmers @ Skillbox devbox");
   assert.equal(session.repoKey, "/srv/skillbox/repos/swimmers");
 });

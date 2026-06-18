@@ -1786,7 +1786,9 @@ function surfaceActionExecutionForZone(plan, zone) {
 
 const surfaceActionExecutors = {
   open_send_sheet: (action) => openSendSheet(action.payload),
-  open_create_sheet_for_cwd: (action) => openCreateSheetForCwd(action.cwd),
+  open_create_sheet_for_cwd: (action) => openCreateSheetForCwd(action.cwd, {
+    launchTarget: action.launchTarget,
+  }),
   select_then_open_mermaid: async (action) => { await selectSession(action.sessionId); openMermaidSheet(); },
   select_then_launch_commit: async (action) => { await selectSession(action.sessionId); await launchCommitGrok(); },
   open_sheet: (action) => openSheet(action.sheetId),

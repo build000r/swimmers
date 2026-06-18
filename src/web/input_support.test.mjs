@@ -358,7 +358,14 @@ test("surfaceActionExecutionPlan preserves zone payload execution decisions", ()
   );
   assert.deepEqual(
     surfaceActionExecutionPlan({ type: "open_create_sheet_for_zone_cwd" }, { zonePayload: { cwd: "/repo" } }),
-    { type: "open_create_sheet_for_cwd", cwd: "/repo" },
+    { type: "open_create_sheet_for_cwd", cwd: "/repo", launchTarget: "" },
+  );
+  assert.deepEqual(
+    surfaceActionExecutionPlan(
+      { type: "open_create_sheet_for_zone_cwd" },
+      { zonePayload: { cwd: "/workspace/swimmers", launchTarget: "devbox" } },
+    ),
+    { type: "open_create_sheet_for_cwd", cwd: "/workspace/swimmers", launchTarget: "devbox" },
   );
   assert.deepEqual(
     surfaceActionExecutionPlan({ type: "select_then_open_mermaid_for_zone" }, { zonePayload: { sessionId: "agent-2" } }),

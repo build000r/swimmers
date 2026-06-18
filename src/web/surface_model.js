@@ -404,6 +404,10 @@ export function surfaceSession(session, {
   readProgress = {},
 } = {}) {
   const target = sessionTarget(session);
+  const environment = session?.environment || {};
+  const remoteEnvironment = String(environment.scope || "local").toLowerCase() === "remote";
+  const launchCwd = remoteEnvironment ? String(environment.local_cwd || "") : String(session?.cwd || "");
+  const launchTarget = remoteEnvironment && launchCwd ? String(environment.target_id || "") : "";
   const readiness = sessionReadiness(session);
   const stateKey = String(session.state || "unknown").toLowerCase();
   const transportKey = String(session.transport_health || "unknown").toLowerCase();
@@ -423,6 +427,8 @@ export function surfaceSession(session, {
     cwdLabel: sessionCwdLabel(session),
     fullCwd: session.cwd || "",
     canonicalCwd: canonicalCwd(session),
+    launchCwd,
+    launchTarget,
     thoughtLabel: detail ? session.thought || "No thought snapshot yet." : summarizeThought(session),
     clawgText: session.thought || "",
     thoughtUpdatedAt: session.thought_updated_at || "",

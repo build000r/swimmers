@@ -631,7 +631,7 @@ export function trogdorActionPayloadForZone(zone = {}) {
         label: zone.label || "batch agents",
       };
     case "trogdor_launch":
-      return { cwd: zone.cwd };
+      return { cwd: zone.cwd, launchTarget: zone.launchTarget || "" };
     case "trogdor_mermaid":
     case "trogdor_commit":
       return { sessionId: zone.sessionId };

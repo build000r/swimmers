@@ -335,6 +335,8 @@ test("surface uses shared operator pressure and exposes batch/commit actions", (
     state: "idle",
     displayState: "idle",
     restLabel: "active",
+    launchCwd: "/workspace/swimmers",
+    launchTarget: "devbox",
     commitCandidate: false,
     operatorPressure: {
       score: 88,
@@ -363,12 +365,15 @@ test("surface uses shared operator pressure and exposes batch/commit actions", (
   const zones = frame.zones.filter((zone) => zone.actionId);
   const actionIds = zones.map((zone) => zone.actionId);
   const batchZone = zones.find((zone) => zone.actionId === "trogdor_group_send");
+  const launchZone = zones.find((zone) => zone.actionId === "trogdor_launch");
 
   assert.match(text, /pressure 88/);
   assert.match(text, /repo swimmers \/ commit ready/);
   assert.ok(actionIds.includes("trogdor_group_send"));
   assert.ok(actionIds.includes("trogdor_commit"));
   assert.deepEqual(batchZone.sessionIds, ["agent-1", "agent-2"]);
+  assert.equal(launchZone.cwd, "/workspace/swimmers");
+  assert.equal(launchZone.launchTarget, "devbox");
 });
 
 test("surface advances hovered speed-reader word by wpm timing", () => {

@@ -675,9 +675,11 @@ function drawTrogdorSpeedReader(frame, panel, session, model) {
       sessionId: session.sessionId,
     }),
   ];
+  const launchCwd = session.launchCwd ?? session.fullCwd;
   const secondarySessionActions = [
-    actionSpec("launch", "launch", "trogdor_launch", !model?.readOnly && Boolean(session.fullCwd), {
-      cwd: session.fullCwd,
+    actionSpec("launch", "launch", "trogdor_launch", !model?.readOnly && Boolean(launchCwd), {
+      cwd: launchCwd,
+      launchTarget: session.launchTarget || "",
     }),
     actionSpec("mmd", "mmd", "trogdor_mermaid", true, {
       sessionId: session.sessionId,
