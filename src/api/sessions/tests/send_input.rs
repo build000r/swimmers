@@ -20,6 +20,26 @@ async fn send_input_rejects_empty_text() {
 }
 
 #[tokio::test]
+async fn send_input_rejects_blank_submit_text() {
+    let response = send_input(
+        Extension(AuthInfo::new(OPERATOR_SCOPES.to_vec())),
+        State(test_state()),
+        Path("sess-1".to_string()),
+        Json(SessionInputRequest {
+            text: " \t\n".to_string(),
+            submit: true,
+        }),
+    )
+    .await
+    .into_response();
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let json = response_json(response).await;
+    assert_eq!(json["code"], "VALIDATION_FAILED");
+    assert_eq!(json["message"], "submitted text must not be blank");
+}
+
+#[tokio::test]
 async fn send_input_returns_not_found_for_missing_session() {
     let response = send_input(
         Extension(AuthInfo::new(OPERATOR_SCOPES.to_vec())),

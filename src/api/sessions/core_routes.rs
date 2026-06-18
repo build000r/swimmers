@@ -368,6 +368,9 @@ async fn send_input_response(
     if body.text.is_empty() {
         return validation_error("text must not be empty");
     }
+    if body.submit && body.text.trim().is_empty() {
+        return validation_error("submitted text must not be blank");
+    }
 
     match remote_sessions::denamespace_for_target(&session_id) {
         Ok(Some((target, remote_session_id))) => {
