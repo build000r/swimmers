@@ -137,6 +137,7 @@
     "remote_group_write_proxy": "cargo test --lib api::remote_sessions::tests::send_remote_group_input_denamespaces_request_and_namespaces_results -- --test-threads=1",
     "same_target_guardrail": "cargo test --lib api::sessions::group_input::tests::remote_group_input_target_rejects_mixed_remote_targets -- --test-threads=1",
     "fleet_lens": "node --test src/web/surface_model.test.mjs",
+    "native_fleet_filters": "cargo test --bin swimmers-tui header_filter_strip_applies_native_fleet_filters -- --test-threads=1",
     "grouped_display": "node --test src/web/rendered_surface.test.mjs",
     "attention_inbox": "cargo test --bin swimmers-tui thought_panel_header_summarizes_cross_host_inbox -- --test-threads=1",
     "advisory_metadata": "cargo test --bin swimmers-tui thought_panel_marks_advisory_metadata_as_external_and_stale -- --test-threads=1"

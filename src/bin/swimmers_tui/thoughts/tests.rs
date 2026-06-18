@@ -13,6 +13,7 @@ fn chip(cwd: &str, x: u16) -> ThoughtChipLayout {
     ThoughtChipLayout {
         rect: rect(x, 6),
         cwd: cwd.to_string(),
+        fleet: None,
         label: cwd.to_string(),
         color: Color::Cyan,
     }
@@ -142,6 +143,7 @@ fn header_filter_action_prioritizes_controls_over_overlapping_chips() {
         chips: vec![ThoughtChipLayout {
             rect: rect(2, 40),
             cwd: "/repo/a".to_string(),
+            fleet: None,
             label: "1xa".to_string(),
             color: Color::Cyan,
         }],

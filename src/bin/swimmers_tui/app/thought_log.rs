@@ -95,6 +95,16 @@ impl<C: TuiApi> App<C> {
 
     pub(crate) fn set_thought_filter_cwd(&mut self, cwd: String) {
         self.thought_filter.cwd = Some(cwd);
+        self.thought_filter.fleet = None;
+        self.thought_filter.excluded_cwds.clear();
+        self.thought_filter.filter_out_mode = false;
+        self.reconcile_selection();
+        self.sync_selection_publication();
+    }
+
+    pub(crate) fn set_thought_filter_fleet(&mut self, fleet: ThoughtFleetFilter) {
+        self.thought_filter.cwd = None;
+        self.thought_filter.fleet = Some(fleet);
         self.thought_filter.excluded_cwds.clear();
         self.thought_filter.filter_out_mode = false;
         self.reconcile_selection();
@@ -164,6 +174,12 @@ impl<C: TuiApi> App<C> {
             entry.tmux_name = session.tmux_name.clone();
             entry.cwd = session_canonical_cwd_key(session);
             entry.pwd_label = session_cwd_label(session);
+            entry.target_key = thought_filter_target_key(session);
+            entry.target_label = session_target_label(session);
+            entry.state_key = thought_filter_state_key(session.state).to_string();
+            entry.readiness_key = thought_filter_readiness_key(session).to_string();
+            entry.transport_key =
+                thought_filter_transport_key(session.transport_health).to_string();
             entry.batch = session.batch.clone();
             entry.state = session.state;
             entry.current_command = session.current_command.clone();

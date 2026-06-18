@@ -13,7 +13,7 @@ The tracked fixture is [multi_env_cockpit.json](../tests/fixtures/multi_env_cock
 - a degraded cached remote case
 - local and remote waiting sessions
 - a remote advisory metadata badge that is external and stale by design
-- proof command keys for inventory, health doctor, launch preview, remote input, group input, fleet lens, grouped display, attention inbox, and advisory metadata
+- proof command keys for inventory, health doctor, launch preview, remote input, group input, fleet lens, native TUI fleet filters, grouped display, attention inbox, and advisory metadata
 
 The fixture is not a generated artifact and does not start tmux, SSH, browsers, or remote servers. It is a compact release contract that points at focused tests already covering the behavior.
 
@@ -34,7 +34,7 @@ This validates the fixture JSON, checks that its required proof-command map is c
 - mixed-target group input rejection
 - local attention-group boundary preservation
 - cross-host operator pressure inbox behavior
-- TUI remote launch and thought rail summaries
+- TUI remote launch, native fleet filters, and thought rail summaries
 - web fleet lens filters and grouped display
 - passive advisory metadata display as external and stale
 

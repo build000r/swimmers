@@ -3,7 +3,10 @@ use swimmers::api::remote_sessions;
 use swimmers::color::hsl_to_rgb;
 use swimmers::fleet_lens::build_fleet_lens_summary;
 use swimmers::session_labels::{session_canonical_cwd_key, session_cwd_label};
-use swimmers::types::{AdvisoryMetadataSummary, FleetLensBucketKind, SessionEnvironmentScope};
+use swimmers::types::{
+    ActionCueKind, AdvisoryMetadataSummary, FleetLensBucket, FleetLensBucketKind,
+    SessionEnvironmentScope,
+};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 const THOUGHT_COMMIT_LABEL: &str = "[commit]";
@@ -28,7 +31,11 @@ pub(crate) struct ThoughtLogEntry {
     pub(crate) tmux_name: String,
     pub(crate) cwd: String,
     pub(crate) pwd_label: Option<String>,
+    pub(crate) target_key: String,
     pub(crate) target_label: String,
+    pub(crate) state_key: String,
+    pub(crate) readiness_key: String,
+    pub(crate) transport_key: String,
     pub(crate) batch: Option<SessionBatchMembership>,
     pub(crate) state: SessionState,
     pub(crate) current_command: Option<String>,
@@ -54,7 +61,11 @@ impl ThoughtLogEntry {
             tmux_name: session.tmux_name.clone(),
             cwd: session_canonical_cwd_key(session),
             pwd_label: session_cwd_label(session),
+            target_key: thought_filter_target_key(session),
             target_label: session_target_label(session),
+            state_key: thought_filter_state_key(session.state).to_string(),
+            readiness_key: thought_filter_readiness_key(session).to_string(),
+            transport_key: thought_filter_transport_key(session.transport_health).to_string(),
             batch: session.batch.clone(),
             state: session.state,
             current_command: session.current_command.clone(),
@@ -71,17 +82,28 @@ impl ThoughtLogEntry {
     }
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct ThoughtFleetFilter {
+    pub(crate) kind: FleetLensBucketKind,
+    pub(crate) key: String,
+    pub(crate) label: String,
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(crate) struct ThoughtFilter {
     pub(crate) cwd: Option<String>,
     pub(crate) tmux_name: Option<String>,
+    pub(crate) fleet: Option<ThoughtFleetFilter>,
     pub(crate) excluded_cwds: HashSet<String>,
     pub(crate) filter_out_mode: bool,
 }
 
 impl ThoughtFilter {
     pub(crate) fn is_active(&self) -> bool {
-        self.cwd.is_some() || self.tmux_name.is_some() || !self.excluded_cwds.is_empty()
+        self.cwd.is_some()
+            || self.tmux_name.is_some()
+            || self.fleet.is_some()
+            || !self.excluded_cwds.is_empty()
     }
 
     pub(crate) fn matches(&self, entry: &ThoughtLogEntry) -> bool {
@@ -98,7 +120,12 @@ impl ThoughtFilter {
             .as_ref()
             .map(|tmux_name| entry.tmux_name == *tmux_name)
             .unwrap_or(true);
-        cwd_matches && tmux_matches
+        let fleet_matches = self
+            .fleet
+            .as_ref()
+            .map(|fleet| thought_filter_entry_fleet_matches(entry, fleet))
+            .unwrap_or(true);
+        cwd_matches && tmux_matches && fleet_matches
     }
 
     pub(crate) fn matches_session(&self, session: &SessionSummary) -> bool {
@@ -117,7 +144,12 @@ impl ThoughtFilter {
             .as_ref()
             .map(|tmux_name| session.tmux_name == *tmux_name)
             .unwrap_or(true);
-        cwd_matches && tmux_matches
+        let fleet_matches = self
+            .fleet
+            .as_ref()
+            .map(|fleet| thought_filter_session_fleet_matches(session, fleet))
+            .unwrap_or(true);
+        cwd_matches && tmux_matches && fleet_matches
     }
 
     pub(crate) fn excludes_cwd(&self, cwd: &str) -> bool {
@@ -127,6 +159,7 @@ impl ThoughtFilter {
     pub(crate) fn clear(&mut self) {
         self.cwd = None;
         self.tmux_name = None;
+        self.fleet = None;
         self.excluded_cwds.clear();
         self.filter_out_mode = false;
     }
@@ -179,6 +212,7 @@ pub(crate) fn compare_thought_log_entries(
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum ThoughtPanelAction {
     FilterByCwd(String),
+    FilterByFleet(ThoughtFleetFilter),
     ToggleFilterOutMode,
     ToggleFilterOutCwd(String),
     OpenSession {
@@ -206,6 +240,7 @@ pub(crate) enum ThoughtPanelAction {
 pub(crate) struct ThoughtChipLayout {
     pub(crate) rect: Rect,
     pub(crate) cwd: String,
+    pub(crate) fleet: Option<ThoughtFleetFilter>,
     pub(crate) label: String,
     pub(crate) color: Color,
 }
@@ -293,7 +328,8 @@ pub(crate) fn build_header_filter_layout<C: TuiApi>(
             cursor_x = cursor_x.saturating_add(chip.width).saturating_add(2);
             ThoughtChipLayout {
                 rect,
-                cwd: chip.cwd,
+                cwd: chip.cwd.unwrap_or_default(),
+                fleet: chip.fleet,
                 label: chip.label,
                 color: chip.color,
             }
@@ -378,7 +414,8 @@ fn header_filter_rect(x: u16, width: u16) -> Rect {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct FilterChipData {
-    cwd: String,
+    cwd: Option<String>,
+    fleet: Option<ThoughtFleetFilter>,
     label: String,
     color: Color,
     width: u16,
@@ -389,7 +426,24 @@ struct FilterChipData {
 /// (cwd, label, color, width) so the caller can place rects later.
 fn gather_filter_chips<C: TuiApi>(app: &App<C>, chip_budget: u16) -> (Vec<FilterChipData>, u16) {
     let summaries = app.header_repo_summaries();
-    filter_chips_for_summaries(&summaries, &app.thought_filter, chip_budget)
+    let mut included = Vec::new();
+    let mut chips_width: u16 = 0;
+
+    if !app.thought_filter.filter_out_mode {
+        for chip in fleet_filter_chips(app, &app.thought_filter) {
+            if !append_filter_chip(&mut included, &mut chips_width, chip, chip_budget) {
+                return (included, chips_width);
+            }
+        }
+    }
+
+    for chip in repo_filter_chips_for_summaries(&summaries, &app.thought_filter) {
+        if !append_filter_chip(&mut included, &mut chips_width, chip, chip_budget) {
+            break;
+        }
+    }
+
+    (included, chips_width)
 }
 
 fn filter_chips_for_summaries(
@@ -399,15 +453,102 @@ fn filter_chips_for_summaries(
 ) -> (Vec<FilterChipData>, u16) {
     let mut included = Vec::new();
     let mut chips_width: u16 = 0;
-    for summary in summaries {
-        let Some(chip) = filter_chip_data(summary, filter) else {
-            continue;
-        };
+    for chip in repo_filter_chips_for_summaries(summaries, filter) {
         if !append_filter_chip(&mut included, &mut chips_width, chip, chip_budget) {
             break;
         }
     }
     (included, chips_width)
+}
+
+fn repo_filter_chips_for_summaries(
+    summaries: &[ThoughtRepoSummary],
+    filter: &ThoughtFilter,
+) -> Vec<FilterChipData> {
+    let mut included = Vec::new();
+    for summary in summaries {
+        let Some(chip) = filter_chip_data(summary, filter) else {
+            continue;
+        };
+        included.push(chip);
+    }
+    included
+}
+
+fn fleet_filter_chips<C: TuiApi>(app: &App<C>, filter: &ThoughtFilter) -> Vec<FilterChipData> {
+    let sessions = app
+        .entities
+        .iter()
+        .map(|entity| entity.session.clone())
+        .collect::<Vec<_>>();
+    let lens = build_fleet_lens_summary(&sessions);
+    lens.buckets
+        .iter()
+        .filter(|bucket| fleet_bucket_is_useful_chip(bucket, &lens.buckets))
+        .cloned()
+        .collect::<Vec<_>>()
+        .into_iter()
+        .filter_map(|bucket| fleet_filter_chip_data(bucket, filter))
+        .collect()
+}
+
+fn fleet_bucket_is_useful_chip(bucket: &FleetLensBucket, buckets: &[FleetLensBucket]) -> bool {
+    let bucket_count = buckets
+        .iter()
+        .filter(|candidate| candidate.kind == bucket.kind)
+        .count();
+    match bucket.kind {
+        FleetLensBucketKind::Target | FleetLensBucketKind::State => bucket_count > 1,
+        FleetLensBucketKind::Readiness => bucket_count > 1 || bucket.key == "needs_attention",
+        FleetLensBucketKind::Transport => bucket_count > 1 || bucket.key != "healthy",
+        FleetLensBucketKind::Repo => false,
+    }
+}
+
+fn fleet_filter_chip_data(
+    bucket: FleetLensBucket,
+    filter: &ThoughtFilter,
+) -> Option<FilterChipData> {
+    if bucket.kind == FleetLensBucketKind::Repo || bucket.count == 0 {
+        return None;
+    }
+    let fleet = ThoughtFleetFilter {
+        kind: bucket.kind,
+        key: bucket.key,
+        label: bucket.label,
+    };
+    let label = fleet_filter_chip_label(&fleet, filter.fleet.as_ref() == Some(&fleet));
+    let width = display_width(&label);
+    (width > 0).then(|| FilterChipData {
+        cwd: None,
+        fleet: Some(fleet.clone()),
+        label,
+        color: fleet_filter_chip_color(&fleet, filter),
+        width,
+    })
+}
+
+fn fleet_filter_chip_label(fleet: &ThoughtFleetFilter, is_active: bool) -> String {
+    let kind = fleet_filter_kind_label(fleet.kind);
+    if is_active {
+        format!("{kind} .")
+    } else {
+        format!("{kind}:{}", fleet.label)
+    }
+}
+
+fn fleet_filter_chip_color(fleet: &ThoughtFleetFilter, filter: &ThoughtFilter) -> Color {
+    if filter.fleet.as_ref() == Some(fleet) {
+        return Color::Cyan;
+    }
+    match fleet.kind {
+        FleetLensBucketKind::Target => Color::Yellow,
+        FleetLensBucketKind::State => Color::Green,
+        FleetLensBucketKind::Readiness => Color::Magenta,
+        FleetLensBucketKind::Transport if fleet.key != "healthy" => Color::Red,
+        FleetLensBucketKind::Transport => Color::DarkGrey,
+        FleetLensBucketKind::Repo => Color::Cyan,
+    }
 }
 
 fn chip_color(
@@ -507,6 +648,9 @@ fn header_filter_chip_action(
     filter: &ThoughtFilter,
     chip: &ThoughtChipLayout,
 ) -> ThoughtPanelAction {
+    if let Some(fleet) = chip.fleet.clone() {
+        return ThoughtPanelAction::FilterByFleet(fleet);
+    }
     if filter.filter_out_mode {
         return ThoughtPanelAction::ToggleFilterOutCwd(chip.cwd.clone());
     }
@@ -551,6 +695,13 @@ fn active_thought_filter_parts(filter: &ThoughtFilter) -> Vec<String> {
     if let Some(tmux_name) = filter.tmux_name.as_deref() {
         parts.push(format!("num={tmux_name}"));
     }
+    if let Some(fleet) = filter.fleet.as_ref() {
+        parts.push(format!(
+            "{}={}",
+            fleet_filter_kind_label(fleet.kind),
+            fleet.label
+        ));
+    }
     parts
 }
 
@@ -566,6 +717,102 @@ fn excluded_thought_filter_labels(filter: &ThoughtFilter) -> String {
 
 fn thought_filter_cwd_label(cwd: &str) -> String {
     path_tail_label(cwd).unwrap_or_else(|| cwd.to_string())
+}
+
+pub(crate) fn thought_filter_target_key(session: &SessionSummary) -> String {
+    if session.environment.scope == SessionEnvironmentScope::Remote {
+        return [
+            session.environment.target_id.as_str(),
+            session.environment.display_host.as_str(),
+            session.environment.target_label.as_str(),
+        ]
+        .into_iter()
+        .map(str::trim)
+        .find(|value| !value.is_empty())
+        .unwrap_or("remote")
+        .to_string();
+    }
+    "local".to_string()
+}
+
+pub(crate) fn thought_filter_state_key(state: SessionState) -> &'static str {
+    match state {
+        SessionState::Idle => "idle",
+        SessionState::Busy => "busy",
+        SessionState::Error => "error",
+        SessionState::Attention => "attention",
+        SessionState::Exited => "exited",
+    }
+}
+
+pub(crate) fn thought_filter_readiness_key(session: &SessionSummary) -> &'static str {
+    if session.state == SessionState::Attention
+        || session.commit_candidate
+        || session.action_cues.iter().any(|cue| {
+            matches!(
+                cue.kind,
+                ActionCueKind::AwaitingUser
+                    | ActionCueKind::CommitReady
+                    | ActionCueKind::ValidationMissingAfterEdit
+                    | ActionCueKind::DirtyCheckMissing
+            )
+        })
+    {
+        "needs_attention"
+    } else if session.state == SessionState::Busy {
+        "working"
+    } else if matches!(
+        session.rest_state,
+        RestState::Sleeping | RestState::DeepSleep
+    ) {
+        "sleeping"
+    } else {
+        "quiet"
+    }
+}
+
+pub(crate) fn thought_filter_transport_key(health: TransportHealth) -> &'static str {
+    match health {
+        TransportHealth::Healthy => "healthy",
+        TransportHealth::Degraded => "degraded",
+        TransportHealth::Overloaded => "overloaded",
+        TransportHealth::Disconnected => "disconnected",
+    }
+}
+
+fn thought_filter_entry_fleet_matches(entry: &ThoughtLogEntry, fleet: &ThoughtFleetFilter) -> bool {
+    match fleet.kind {
+        FleetLensBucketKind::Target => entry.target_key == fleet.key,
+        FleetLensBucketKind::Repo => entry.cwd == fleet.key,
+        FleetLensBucketKind::State => entry.state_key == fleet.key,
+        FleetLensBucketKind::Readiness => entry.readiness_key == fleet.key,
+        FleetLensBucketKind::Transport => entry.transport_key == fleet.key,
+    }
+}
+
+fn thought_filter_session_fleet_matches(
+    session: &SessionSummary,
+    fleet: &ThoughtFleetFilter,
+) -> bool {
+    match fleet.kind {
+        FleetLensBucketKind::Target => thought_filter_target_key(session) == fleet.key,
+        FleetLensBucketKind::Repo => session_canonical_cwd_key(session) == fleet.key,
+        FleetLensBucketKind::State => thought_filter_state_key(session.state) == fleet.key,
+        FleetLensBucketKind::Readiness => thought_filter_readiness_key(session) == fleet.key,
+        FleetLensBucketKind::Transport => {
+            thought_filter_transport_key(session.transport_health) == fleet.key
+        }
+    }
+}
+
+fn fleet_filter_kind_label(kind: FleetLensBucketKind) -> &'static str {
+    match kind {
+        FleetLensBucketKind::Target => "host",
+        FleetLensBucketKind::Repo => "pwd",
+        FleetLensBucketKind::State => "state",
+        FleetLensBucketKind::Readiness => "ready",
+        FleetLensBucketKind::Transport => "health",
+    }
 }
 
 pub(crate) fn thought_session_label(pwd_label: Option<&str>, tmux_name: &str) -> String {
@@ -877,7 +1124,7 @@ pub(crate) fn session_display_color(
         .unwrap_or_else(|| name_based_color(&session.tmux_name))
 }
 
-fn session_target_label(session: &SessionSummary) -> String {
+pub(crate) fn session_target_label(session: &SessionSummary) -> String {
     if session.environment.scope != SessionEnvironmentScope::Remote {
         return "local".to_string();
     }
@@ -2078,7 +2325,8 @@ fn filter_chip_data(
     let label = filter_chip_label(summary, is_include_active);
     let width = display_width(&label);
     (width > 0).then(|| FilterChipData {
-        cwd: summary.cwd.clone(),
+        cwd: Some(summary.cwd.clone()),
+        fleet: None,
         label,
         color: filter_chip_color(summary, filter, is_include_active),
         width,

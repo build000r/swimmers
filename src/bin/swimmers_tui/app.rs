@@ -1952,6 +1952,7 @@ impl<C: TuiApi> App<C> {
     pub(crate) fn apply_thought_filter_action(&mut self, action: ThoughtPanelAction) {
         match action {
             ThoughtPanelAction::FilterByCwd(cwd) => self.set_thought_filter_cwd(cwd),
+            ThoughtPanelAction::FilterByFleet(fleet) => self.set_thought_filter_fleet(fleet),
             ThoughtPanelAction::ToggleFilterOutMode => self.toggle_thought_filter_out_mode(),
             ThoughtPanelAction::ToggleFilterOutCwd(cwd) => self.toggle_thought_filter_out_cwd(cwd),
             ThoughtPanelAction::OpenSession { session_id, label } => {

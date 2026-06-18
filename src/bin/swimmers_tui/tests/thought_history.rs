@@ -799,6 +799,84 @@ fn active_thought_filter_text_combines_labels_in_stable_order() {
 }
 
 #[test]
+fn header_filter_strip_applies_native_fleet_filters() {
+    let api = MockApi::new();
+    let layout = test_layout(240, 32);
+    let mut app = make_app(api);
+
+    let mut local = session_summary_with_thought(
+        "sess-local",
+        "7",
+        TEST_REPO_SWIMMERS,
+        "local is working",
+        "2026-03-08T14:00:05Z",
+    );
+    local.state = SessionState::Busy;
+
+    let remote_id = remote_sessions::namespace_session_id("skillbox", "sess-remote");
+    let mut remote = session_summary_with_thought(
+        &remote_id,
+        "9",
+        "/srv/skillbox/repos/swimmers",
+        "remote needs review",
+        "2026-03-08T14:00:06Z",
+    );
+    remote.state = SessionState::Attention;
+    remote.transport_health = TransportHealth::Degraded;
+    remote.environment = swimmers::types::SessionEnvironmentSummary::remote(
+        &LaunchTargetSummary {
+            id: "skillbox".to_string(),
+            label: "Skillbox devbox".to_string(),
+            kind: "swimmers_api".to_string(),
+            base_url: None,
+            auth_token_env: None,
+            path_mappings: Vec::new(),
+        },
+        "sess-remote",
+        "/srv/skillbox/repos/swimmers".to_string(),
+        Some(TEST_REPO_SWIMMERS.to_string()),
+        "remote_swimmers_api",
+    );
+
+    app.capture_thought_updates(
+        &[local.clone(), remote.clone()],
+        layout.thought_entry_capacity(),
+    );
+    app.entities = vec![
+        SessionEntity::new(local, layout.overview_field),
+        SessionEntity::new(remote, layout.overview_field),
+    ];
+
+    for (chip_label, filter_text) in [
+        ("host:Skillbox devbox", "filter: host=Skillbox devbox"),
+        ("state:attention", "filter: state=attention"),
+        ("ready:needs attention", "filter: ready=needs attention"),
+        ("health:degraded", "filter: health=degraded"),
+    ] {
+        app.clear_thought_filters();
+        let header = build_header_filter_layout(&app, 240);
+        let chip = header
+            .chips
+            .iter()
+            .find(|chip| chip.label == chip_label)
+            .cloned()
+            .unwrap_or_else(|| panic!("missing header chip {chip_label}"));
+
+        app.handle_header_filter_click(240, chip.rect.x, chip.rect.y);
+
+        assert_eq!(app.active_thought_filter_text(), filter_text);
+        assert_eq!(visible_entity_ids(&app), vec![remote_id.clone()]);
+        assert_eq!(
+            app.visible_thought_entries(layout.thought_entry_capacity())
+                .into_iter()
+                .map(|entry| entry.session_id.clone())
+                .collect::<Vec<_>>(),
+            vec![remote_id.clone()]
+        );
+    }
+}
+
+#[test]
 fn clicking_bracketed_thought_label_opens_that_session() {
     let api = MockApi::new();
     let layout = test_layout(120, 32);

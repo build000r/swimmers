@@ -24,6 +24,7 @@ required_command_keys = {
     "remote_group_write_proxy",
     "same_target_guardrail",
     "fleet_lens",
+    "native_fleet_filters",
     "grouped_display",
     "attention_inbox",
     "advisory_metadata",
@@ -80,6 +81,9 @@ cargo test --bin swimmers-tui \
   -- --test-threads=1
 cargo test --bin swimmers-tui \
   thought_panel_header_summarizes_cross_host_inbox \
+  -- --test-threads=1
+cargo test --bin swimmers-tui \
+  header_filter_strip_applies_native_fleet_filters \
   -- --test-threads=1
 cargo test --bin swimmers-tui \
   thought_panel_marks_advisory_metadata_as_external_and_stale \
