@@ -369,6 +369,18 @@ async fn send_input_response(
         return validation_error("text must not be empty");
     }
 
+    match remote_sessions::denamespace_for_target(&session_id) {
+        Ok(Some((target, remote_session_id))) => {
+            return match remote_sessions::send_remote_input(&target, remote_session_id, body).await
+            {
+                Ok(response) => (StatusCode::OK, Json(response)).into_response(),
+                Err(err) => err.into_response(),
+            };
+        }
+        Ok(None) => {}
+        Err(err) => return err.into_response(),
+    }
+
     match deliver_session_input(state, &session_id, body).await {
         Ok(delivery) => session_input_delivery_response(session_id, delivery),
         Err(response) => response,

@@ -182,7 +182,6 @@ async fn send_group_input_sends_only_ready_sessions() {
                 "ready".to_string(),
                 "busy".to_string(),
                 "missing".to_string(),
-                remote_sessions::namespace_session_id("jeremy-skillbox", "remote-ready"),
             ],
             text: "continue".to_string(),
         }),
@@ -193,12 +192,9 @@ async fn send_group_input_sends_only_ready_sessions() {
     assert_eq!(response.status(), StatusCode::MULTI_STATUS);
     let json = response_json(response).await;
     assert_eq!(json["delivered"], 1);
-    assert_eq!(json["skipped"], 3);
+    assert_eq!(json["skipped"], 2);
     let results = json["results"].as_array().expect("results");
-    assert_eq!(results.len(), 4, "duplicate session IDs should be deduped");
-    assert_eq!(results[3]["session_id"], "jeremy-skillbox::remote-ready");
-    assert_eq!(results[3]["ok"], false);
-    assert_eq!(results[3]["error"]["code"], "SESSION_NOT_FOUND");
+    assert_eq!(results.len(), 3, "duplicate session IDs should be deduped");
     assert_eq!(
         ready_write_rx.recv().await.expect("ready write"),
         b"continue\r\r".to_vec()

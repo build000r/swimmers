@@ -1,8 +1,9 @@
 use super::*;
 use crate::types::{
-    CreateSessionsBatchResult, SessionBatchMembership, SessionState, SessionTimelinePinned,
-    SessionTimelineResponse, SpawnTool, ThoughtState, TransportHealth,
-    SUMMARY_CAUSE_REMOTE_POLL_DEGRADED,
+    CreateSessionsBatchResult, SessionBatchMembership, SessionGroupInputRequest,
+    SessionGroupInputResponse, SessionGroupInputResult, SessionInputRequest, SessionInputResponse,
+    SessionState, SessionTimelinePinned, SessionTimelineResponse, SpawnTool, ThoughtState,
+    TransportHealth, SUMMARY_CAUSE_REMOTE_POLL_DEGRADED,
 };
 use axum::http::HeaderMap;
 use axum::routing::{get, post};
@@ -297,6 +298,62 @@ async fn remote_smoke_create_batch(
         .into_response()
 }
 
+async fn remote_smoke_send_input(
+    axum::extract::State(state): axum::extract::State<RemoteSmokeState>,
+    headers: HeaderMap,
+    axum::extract::Path(session_id): axum::extract::Path<String>,
+    AxumJson(body): AxumJson<SessionInputRequest>,
+) -> Response {
+    let path = format!("/v1/sessions/{session_id}/input");
+    state
+        .capture(
+            "POST",
+            path,
+            &headers,
+            serde_json::to_value(&body).expect("serialize input body"),
+        )
+        .await;
+    if remote_smoke_scope(&headers) != RemoteSmokeScope::Operator {
+        return remote_smoke_auth_error(&headers, "operator");
+    }
+    AxumJson(SessionInputResponse {
+        ok: true,
+        session_id,
+        delivered: true,
+        delivery_method: Some("remote-test".to_string()),
+        message: None,
+    })
+    .into_response()
+}
+
+async fn remote_smoke_group_input(
+    axum::extract::State(state): axum::extract::State<RemoteSmokeState>,
+    headers: HeaderMap,
+    AxumJson(body): AxumJson<SessionGroupInputRequest>,
+) -> Response {
+    state
+        .capture(
+            "POST",
+            "/v1/sessions/group-input",
+            &headers,
+            serde_json::to_value(&body).expect("serialize group input body"),
+        )
+        .await;
+    if remote_smoke_scope(&headers) != RemoteSmokeScope::Operator {
+        return remote_smoke_auth_error(&headers, "operator");
+    }
+    let results = body
+        .session_ids
+        .into_iter()
+        .map(|session_id| SessionGroupInputResult {
+            session_id,
+            ok: true,
+            error: None,
+        })
+        .collect();
+    AxumJson(SessionGroupInputResponse::from_results(results)).into_response()
+}
+
 async fn remote_smoke_agent_context(
     axum::extract::State(state): axum::extract::State<RemoteSmokeState>,
     headers: HeaderMap,
@@ -364,6 +421,11 @@ async fn spawn_remote_smoke_server() -> (String, tokio::task::JoinHandle<()>, Re
             get(remote_smoke_list_sessions).post(remote_smoke_create_session),
         )
         .route("/v1/sessions/batch", post(remote_smoke_create_batch))
+        .route(
+            "/v1/sessions/{session_id}/input",
+            post(remote_smoke_send_input),
+        )
+        .route("/v1/sessions/group-input", post(remote_smoke_group_input))
         .route(
             "/v1/sessions/{session_id}/agent-context",
             get(remote_smoke_agent_context),
@@ -686,7 +748,7 @@ fn denamespace_uses_longest_configured_target_prefix() {
     long.label = "West Zone".to_string();
 
     let (target, remote_session_id) =
-        denamespace_for_configured_targets("zone::west::other::sess", vec![short, long])
+        denamespace_for_configured_targets("zone::west::other::sess", &[short, long])
             .expect("denamespace succeeds")
             .expect("remote session");
 
@@ -836,6 +898,92 @@ async fn create_remote_session_posts_without_recursive_launch_target_and_namespa
     drop(requests);
     handle.abort();
     std::env::remove_var("SWIMMERS_REMOTE_TEST_TOKEN");
+}
+
+#[tokio::test]
+async fn send_remote_input_posts_denamespaced_session_and_namespaces_response() {
+    let _guard = crate::test_support::ENV_LOCK
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
+    std::env::set_var(REMOTE_OPERATOR_TOKEN_ENV, REMOTE_OPERATOR_TOKEN);
+    let (base_url, handle, state) = spawn_remote_smoke_server().await;
+    let target = remote_smoke_target(&base_url, REMOTE_OPERATOR_TOKEN_ENV);
+
+    let response = send_remote_input(
+        &target,
+        "sess/input?x#frag",
+        SessionInputRequest {
+            text: "status".to_string(),
+            submit: true,
+        },
+    )
+    .await
+    .expect("remote input");
+
+    assert_eq!(
+        response.session_id,
+        namespace_session_id("jeremy-skillbox", "sess/input?x#frag")
+    );
+    assert!(response.delivered);
+    assert_eq!(response.delivery_method.as_deref(), Some("remote-test"));
+    let requests = state.requests.lock().await;
+    let request = requests
+        .iter()
+        .find(|request| {
+            request.method == "POST" && request.path == "/v1/sessions/sess/input?x#frag/input"
+        })
+        .expect("remote input request");
+    assert_eq!(
+        request.auth.as_deref(),
+        Some(format!("Bearer {REMOTE_OPERATOR_TOKEN}").as_str())
+    );
+    assert_eq!(request.body["text"], "status");
+    assert_eq!(request.body["submit"], true);
+    drop(requests);
+    handle.abort();
+    std::env::remove_var(REMOTE_OPERATOR_TOKEN_ENV);
+}
+
+#[tokio::test]
+async fn send_remote_group_input_denamespaces_request_and_namespaces_results() {
+    let _guard = crate::test_support::ENV_LOCK
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
+    std::env::set_var(REMOTE_OPERATOR_TOKEN_ENV, REMOTE_OPERATOR_TOKEN);
+    let (base_url, handle, state) = spawn_remote_smoke_server().await;
+    let target = remote_smoke_target(&base_url, REMOTE_OPERATOR_TOKEN_ENV);
+
+    let response = send_remote_group_input(
+        &target,
+        vec!["sess-a".to_string(), "sess-b".to_string()],
+        "continue".to_string(),
+    )
+    .await
+    .expect("remote group input");
+
+    assert_eq!(response.delivered, 2);
+    assert_eq!(response.skipped, 0);
+    assert_eq!(
+        response.results[0].session_id,
+        namespace_session_id("jeremy-skillbox", "sess-a")
+    );
+    assert_eq!(
+        response.results[1].session_id,
+        namespace_session_id("jeremy-skillbox", "sess-b")
+    );
+    let requests = state.requests.lock().await;
+    let request = requests
+        .iter()
+        .find(|request| request.method == "POST" && request.path == "/v1/sessions/group-input")
+        .expect("remote group input request");
+    assert_eq!(
+        request.body["session_ids"],
+        serde_json::json!(["sess-a", "sess-b"])
+    );
+    assert_eq!(request.body["text"], "continue");
+    drop(requests);
+    handle.abort();
+    std::env::remove_var(REMOTE_OPERATOR_TOKEN_ENV);
 }
 
 #[tokio::test]

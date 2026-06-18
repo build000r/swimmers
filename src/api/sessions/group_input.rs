@@ -8,13 +8,14 @@ use std::time::Duration;
 use tokio::sync::oneshot;
 
 use crate::api::envelope::error_body;
-use crate::api::AppState;
+use crate::api::{remote_sessions, AppState};
 use crate::auth::{AuthInfo, AuthScope};
 use crate::operator_pressure::session_ready_for_operator_group_input;
 use crate::session::actor::{ActorHandle, InputDeliveryResult, SessionCommand};
+use crate::session::overlay::default_overlay;
 use crate::types::{
-    ErrorResponse, SessionGroupInputRequest, SessionGroupInputResponse, SessionGroupInputResult,
-    SessionState, SessionSummary,
+    ErrorResponse, LaunchTargetSummary, SessionGroupInputRequest, SessionGroupInputResponse,
+    SessionGroupInputResult, SessionState, SessionSummary,
 };
 
 const INPUT_DELIVERY_ACK_TIMEOUT: Duration = Duration::from_secs(2);
@@ -33,6 +34,7 @@ fn group_input_error_result(
 
 struct ValidatedGroupInputRequest {
     session_ids: Vec<String>,
+    text: String,
     input: Vec<u8>,
 }
 
@@ -64,6 +66,7 @@ fn validate_group_input_request(
 
     Ok(ValidatedGroupInputRequest {
         session_ids,
+        text: text.clone(),
         input: group_input_bytes(&text),
     })
 }
@@ -172,6 +175,18 @@ fn group_input_batch_error_result(
     } else {
         group_input_error_result(session_id, "SESSION_NOT_FOUND", None)
     }
+}
+
+fn group_input_all_error_response(
+    session_ids: Vec<String>,
+    code: &'static str,
+    message: String,
+) -> SessionGroupInputResponse {
+    let results = session_ids
+        .into_iter()
+        .map(|session_id| group_input_error_result(session_id, code, Some(message.clone())))
+        .collect();
+    SessionGroupInputResponse::from_results(results)
 }
 
 #[derive(Default)]
@@ -321,11 +336,128 @@ async fn send_group_input_to_targets(
     SessionGroupInputResponse::from_results(results)
 }
 
+#[derive(Debug)]
+struct RemoteGroupInputTarget {
+    target: LaunchTargetSummary,
+    remote_session_ids: Vec<String>,
+}
+
+#[derive(Debug)]
+struct RemoteGroupInputScopeError {
+    code: &'static str,
+    message: String,
+}
+
+impl RemoteGroupInputScopeError {
+    fn new(code: &'static str, message: impl Into<String>) -> Self {
+        Self {
+            code,
+            message: message.into(),
+        }
+    }
+
+    fn from_remote_error(error: remote_sessions::RemoteSessionError) -> Self {
+        Self::new(error.code(), error.message().to_string())
+    }
+}
+
+fn remote_group_input_target(
+    session_ids: &[String],
+) -> Result<Option<RemoteGroupInputTarget>, RemoteGroupInputScopeError> {
+    let targets = default_overlay()
+        .map(|overlay| overlay.all_launch_targets())
+        .unwrap_or_default();
+    remote_group_input_target_for_targets(session_ids, &targets)
+}
+
+fn remote_group_input_target_for_targets(
+    session_ids: &[String],
+    targets: &[LaunchTargetSummary],
+) -> Result<Option<RemoteGroupInputTarget>, RemoteGroupInputScopeError> {
+    let mut remote_target: Option<LaunchTargetSummary> = None;
+    let mut remote_session_ids = Vec::new();
+    let mut has_local = false;
+
+    for session_id in session_ids {
+        match remote_sessions::denamespace_for_configured_targets(session_id, targets)
+            .map_err(RemoteGroupInputScopeError::from_remote_error)?
+        {
+            Some((target, remote_session_id)) => {
+                if has_local {
+                    return Err(RemoteGroupInputScopeError::new(
+                        "REMOTE_GROUP_INPUT_MIXED_SCOPE",
+                        "group input cannot mix local and remote sessions",
+                    ));
+                }
+                if remote_target
+                    .as_ref()
+                    .is_some_and(|existing| existing.id != target.id)
+                {
+                    return Err(RemoteGroupInputScopeError::new(
+                        "REMOTE_GROUP_INPUT_MIXED_TARGETS",
+                        "remote group input requires sessions from one launch target",
+                    ));
+                }
+                remote_target.get_or_insert(target);
+                remote_session_ids.push(remote_session_id.to_string());
+            }
+            None => {
+                if remote_target.is_some() {
+                    return Err(RemoteGroupInputScopeError::new(
+                        "REMOTE_GROUP_INPUT_MIXED_SCOPE",
+                        "group input cannot mix local and remote sessions",
+                    ));
+                }
+                has_local = true;
+            }
+        }
+    }
+
+    Ok(remote_target.map(|target| RemoteGroupInputTarget {
+        target,
+        remote_session_ids,
+    }))
+}
+
+async fn send_remote_group_input_to_target(
+    session_ids: Vec<String>,
+    target: RemoteGroupInputTarget,
+    text: String,
+) -> SessionGroupInputResponse {
+    match remote_sessions::send_remote_group_input(&target.target, target.remote_session_ids, text)
+        .await
+    {
+        Ok(response) => response,
+        Err(error) => {
+            group_input_all_error_response(session_ids, error.code(), error.message().to_string())
+        }
+    }
+}
+
 pub async fn send_group_input_service(
     state: Arc<AppState>,
     body: SessionGroupInputRequest,
 ) -> Result<SessionGroupInputResponse, ErrorResponse> {
-    let ValidatedGroupInputRequest { session_ids, input } = validate_group_input_request(body)?;
+    let ValidatedGroupInputRequest {
+        session_ids,
+        text,
+        input,
+    } = validate_group_input_request(body)?;
+
+    match remote_group_input_target(&session_ids) {
+        Ok(Some(target)) => {
+            return Ok(send_remote_group_input_to_target(session_ids, target, text).await);
+        }
+        Ok(None) => {}
+        Err(error) => {
+            return Ok(group_input_all_error_response(
+                session_ids,
+                error.code,
+                error.message,
+            ));
+        }
+    }
+
     let summaries = group_input_summary_map(&state).await;
 
     if let Some((code, message)) =
@@ -368,6 +500,17 @@ pub(super) async fn send_group_input(
 mod tests {
     use super::*;
 
+    fn remote_target(id: &str) -> LaunchTargetSummary {
+        LaunchTargetSummary {
+            id: id.to_string(),
+            label: id.to_string(),
+            kind: "swimmers_api".to_string(),
+            base_url: Some("http://127.0.0.1:3210".to_string()),
+            auth_token_env: None,
+            path_mappings: Vec::new(),
+        }
+    }
+
     #[test]
     fn group_input_bytes_appends_double_enter_for_agent_delivery() {
         assert_eq!(group_input_bytes("ship it"), b"ship it\r\r");
@@ -396,6 +539,72 @@ mod tests {
         let (code, message) = scope.error().expect("scope error");
         assert_eq!(code, "SESSION_BATCH_MISMATCH");
         assert_eq!(message, "sessions are not in the same batch");
+    }
+
+    #[test]
+    fn remote_group_input_target_accepts_same_configured_target() {
+        let ids = vec![
+            remote_sessions::namespace_session_id("remote-a", "sess-1"),
+            remote_sessions::namespace_session_id("remote-a", "sess-2"),
+        ];
+        let route = remote_group_input_target_for_targets(&ids, &[remote_target("remote-a")])
+            .expect("route")
+            .expect("remote target");
+
+        assert_eq!(route.target.id, "remote-a");
+        assert_eq!(route.remote_session_ids, vec!["sess-1", "sess-2"]);
+    }
+
+    #[test]
+    fn remote_group_input_target_rejects_mixed_local_and_remote() {
+        let ids = vec![
+            "local-ready".to_string(),
+            remote_sessions::namespace_session_id("remote-a", "sess-1"),
+        ];
+        let error = remote_group_input_target_for_targets(&ids, &[remote_target("remote-a")])
+            .expect_err("mixed local remote must be rejected");
+
+        assert_eq!(error.code, "REMOTE_GROUP_INPUT_MIXED_SCOPE");
+        assert_eq!(
+            error.message,
+            "group input cannot mix local and remote sessions"
+        );
+    }
+
+    #[test]
+    fn remote_group_input_target_rejects_mixed_remote_targets() {
+        let ids = vec![
+            remote_sessions::namespace_session_id("remote-a", "sess-1"),
+            remote_sessions::namespace_session_id("remote-b", "sess-2"),
+        ];
+        let error = remote_group_input_target_for_targets(
+            &ids,
+            &[remote_target("remote-a"), remote_target("remote-b")],
+        )
+        .expect_err("mixed remote targets must be rejected");
+
+        assert_eq!(error.code, "REMOTE_GROUP_INPUT_MIXED_TARGETS");
+        assert_eq!(
+            error.message,
+            "remote group input requires sessions from one launch target"
+        );
+    }
+
+    #[test]
+    fn remote_group_input_target_uses_longest_configured_target_id() {
+        let ids = vec![
+            remote_sessions::namespace_session_id("zone::west", "sess-1"),
+            remote_sessions::namespace_session_id("zone::west", "sess-2"),
+        ];
+        let route = remote_group_input_target_for_targets(
+            &ids,
+            &[remote_target("zone"), remote_target("zone::west")],
+        )
+        .expect("route")
+        .expect("remote target");
+
+        assert_eq!(route.target.id, "zone::west");
+        assert_eq!(route.remote_session_ids, vec!["sess-1", "sess-2"]);
     }
 
     #[tokio::test]

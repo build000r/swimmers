@@ -246,7 +246,7 @@ fn thought_panel_keeps_send_action_off_unbatched_batch_group() {
 }
 
 #[test]
-fn thought_panel_keeps_send_action_off_remote_batch_groups() {
+fn thought_panel_keeps_send_action_off_mixed_local_remote_batch_groups() {
     let api = MockApi::new();
     let layout = test_layout(120, 32);
     let thought_content = layout
@@ -286,6 +286,56 @@ fn thought_panel_keeps_send_action_off_remote_batch_groups() {
     let panel = build_thought_panel(&app, thought_content, layout.thought_entry_capacity());
     assert_eq!(panel.rows[0].line, "v remote-school (2)");
     assert!(panel.rows[0].send_rect.is_none());
+}
+
+#[test]
+fn thought_panel_shows_send_action_for_same_target_remote_batch_groups() {
+    let api = MockApi::new();
+    let layout = test_layout(120, 32);
+    let thought_content = layout
+        .thought_content
+        .expect("wide layout enables thought rail");
+    let mut app = make_app(api);
+    app.thought_group_by = ThoughtGroupBy::Batch;
+
+    let first = with_batch(
+        sleeping_session_with_thought(
+            &remote_sessions::namespace_session_id("jeremy-skillbox", "sess-a"),
+            "[Jeremy] 7",
+            TEST_REPO_SWIMMERS,
+            "patching rail",
+            "2026-03-08T14:00:05Z",
+        ),
+        "batch-remote",
+        "remote-school",
+        0,
+        2,
+    );
+    let second = with_batch(
+        sleeping_session_with_thought(
+            &remote_sessions::namespace_session_id("jeremy-skillbox", "sess-b"),
+            "[Jeremy] 9",
+            TEST_REPO_SKILLS,
+            "checking docs",
+            "2026-03-08T14:00:06Z",
+        ),
+        "batch-remote",
+        "remote-school",
+        1,
+        2,
+    );
+    app.capture_thought_updates(&[first, second], layout.thought_entry_capacity());
+
+    let panel = build_thought_panel(&app, thought_content, layout.thought_entry_capacity());
+    assert_eq!(panel.rows[0].line, "v remote-school (2) [send]");
+    assert!(panel.rows[0].send_rect.is_some());
+    assert_eq!(
+        panel.rows[0].group_session_ids,
+        Some(vec![
+            remote_sessions::namespace_session_id("jeremy-skillbox", "sess-a"),
+            remote_sessions::namespace_session_id("jeremy-skillbox", "sess-b"),
+        ])
+    );
 }
 
 #[test]

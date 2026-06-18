@@ -1141,20 +1141,29 @@ fn group_send_session_ids(group_by: ThoughtGroupBy, group: &ThoughtGroup) -> Opt
     {
         return None;
     }
-    if group
-        .entries
-        .iter()
-        .any(|entry| remote_sessions::split_remote_session_id(&entry.session_id).is_some())
-    {
-        return None;
-    }
     let session_ids = group
         .entries
         .iter()
         .filter(|entry| thought_entry_is_group_input_ready(entry))
         .map(|entry| entry.session_id.clone())
         .collect::<Vec<_>>();
-    (session_ids.len() > 1).then_some(session_ids)
+    (session_ids.len() > 1 && group_send_ids_have_single_scope(&session_ids)).then_some(session_ids)
+}
+
+fn group_send_ids_have_single_scope(session_ids: &[String]) -> bool {
+    let mut scopes = session_ids
+        .iter()
+        .map(|session_id| group_send_scope_key(session_id))
+        .collect::<Vec<_>>();
+    scopes.sort();
+    scopes.dedup();
+    scopes.len() <= 1
+}
+
+fn group_send_scope_key(session_id: &str) -> String {
+    remote_sessions::split_remote_session_id(session_id)
+        .map(|(target, _)| format!("remote:{target}"))
+        .unwrap_or_else(|| "local".to_string())
 }
 
 fn compact_target_label(label: &str) -> String {

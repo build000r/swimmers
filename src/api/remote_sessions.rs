@@ -10,6 +10,7 @@ use axum::Json;
 use chrono::{DateTime, Utc};
 use futures::future::join_all;
 use reqwest::Client;
+use serde::Serialize;
 
 use crate::api::envelope::error_body_msg;
 use crate::config::Config;
@@ -19,6 +20,7 @@ use crate::types::{
     CreateSessionsBatchResponse, DependencyHealthStatus, EnvironmentAuthSummary,
     EnvironmentSummary, ErrorResponse, LaunchPathMapping, LaunchTargetSummary,
     SessionAgentContextResponse, SessionEnvironmentSummary, SessionGitDiffResponse,
+    SessionGroupInputRequest, SessionGroupInputResponse, SessionInputRequest, SessionInputResponse,
     SessionListResponse, SessionSummary, SessionTimelineResponse, SessionTranscriptResponse,
 };
 
@@ -60,7 +62,7 @@ impl RemoteSessionError {
         &self.message
     }
 
-    fn code(&self) -> &'static str {
+    pub(crate) fn code(&self) -> &'static str {
         self.code
     }
 
@@ -83,6 +85,14 @@ pub fn split_remote_session_id(session_id: &str) -> Option<(&str, &str)> {
 
 pub fn namespace_session_id(target_id: &str, remote_session_id: &str) -> String {
     format!("{target_id}{REMOTE_SESSION_SEPARATOR}{remote_session_id}")
+}
+
+fn namespace_response_session_id(target: &LaunchTargetSummary, session_id: &str) -> String {
+    if session_id_has_target_namespace(session_id, &target.id) {
+        session_id.to_string()
+    } else {
+        namespace_session_id(&target.id, session_id)
+    }
 }
 
 fn session_id_has_target_namespace(session_id: &str, target_id: &str) -> bool {
@@ -471,15 +481,16 @@ fn denamespace_for_configured_target(
             .transpose();
     };
 
-    denamespace_for_configured_targets(session_id, overlay.all_launch_targets())
+    denamespace_for_configured_targets(session_id, &overlay.all_launch_targets())
 }
 
-fn denamespace_for_configured_targets(
-    session_id: &str,
-    targets: Vec<LaunchTargetSummary>,
-) -> Result<Option<(LaunchTargetSummary, &str)>, RemoteSessionError> {
+pub(crate) fn denamespace_for_configured_targets<'a>(
+    session_id: &'a str,
+    targets: &[LaunchTargetSummary],
+) -> Result<Option<(LaunchTargetSummary, &'a str)>, RemoteSessionError> {
     let mut targets = targets
-        .into_iter()
+        .iter()
+        .cloned()
         .filter_map(|target| {
             session_id
                 .strip_prefix(&target.id)
@@ -1045,6 +1056,47 @@ pub async fn fetch_remote_git_diff(
         })
 }
 
+pub async fn send_remote_input(
+    target: &LaunchTargetSummary,
+    remote_session_id: &str,
+    body: SessionInputRequest,
+) -> Result<SessionInputResponse, RemoteSessionError> {
+    let session_id = encode_path_segment(remote_session_id);
+    let mut response: SessionInputResponse = post_remote_json(
+        target,
+        &format!("/v1/sessions/{session_id}/input"),
+        &body,
+        "REMOTE_INPUT_FAILED",
+        "send input",
+    )
+    .await?;
+    response.session_id = namespace_response_session_id(target, &response.session_id);
+    Ok(response)
+}
+
+pub async fn send_remote_group_input(
+    target: &LaunchTargetSummary,
+    remote_session_ids: Vec<String>,
+    text: String,
+) -> Result<SessionGroupInputResponse, RemoteSessionError> {
+    let request = SessionGroupInputRequest {
+        session_ids: remote_session_ids,
+        text,
+    };
+    let mut response: SessionGroupInputResponse = post_remote_json(
+        target,
+        "/v1/sessions/group-input",
+        &request,
+        "REMOTE_GROUP_INPUT_FAILED",
+        "send group input",
+    )
+    .await?;
+    for result in &mut response.results {
+        result.session_id = namespace_response_session_id(target, &result.session_id);
+    }
+    Ok(SessionGroupInputResponse::from_results(response.results))
+}
+
 async fn get_remote_json<T>(
     target: &LaunchTargetSummary,
     path: &str,
@@ -1092,6 +1144,52 @@ where
             "REMOTE_SESSION_REQUEST_FAILED",
             format!(
                 "failed to parse remote session response from '{}': {err}",
+                target.id
+            ),
+        )
+    })
+}
+
+async fn post_remote_json<B, T>(
+    target: &LaunchTargetSummary,
+    path: &str,
+    body: &B,
+    code: &'static str,
+    action: &'static str,
+) -> Result<T, RemoteSessionError>
+where
+    B: Serialize + ?Sized,
+    T: serde::de::DeserializeOwned,
+{
+    ensure_swimmers_api_target(target)?;
+    let client = http_client(REMOTE_CREATE_TIMEOUT)?;
+    let url = remote_url(target, path)?;
+    let response = with_remote_auth(client.post(url), target)?
+        .json(body)
+        .send()
+        .await
+        .map_err(|err| {
+            RemoteSessionError::new(
+                StatusCode::BAD_GATEWAY,
+                code,
+                format!("failed to {action} on '{}': {err}", target.id),
+            )
+        })?;
+    if !response.status().is_success() {
+        return Err(remote_response_error(
+            target,
+            response,
+            code,
+            format!("remote target '{}' rejected {action}", target.id),
+        )
+        .await);
+    }
+    response.json::<T>().await.map_err(|err| {
+        RemoteSessionError::new(
+            StatusCode::BAD_GATEWAY,
+            code,
+            format!(
+                "failed to parse remote {action} response from '{}': {err}",
                 target.id
             ),
         )

@@ -4,8 +4,8 @@ use std::collections::HashMap;
 use crate::api::remote_sessions;
 use crate::session_labels::{repo_label_for_key, session_repo_key};
 use crate::types::{
-    ActionCueKind, RestState, SessionBatchMembership, SessionState, SessionSummary,
-    StateConfidence, ThoughtState, TransportHealth,
+    ActionCueKind, RestState, SessionBatchMembership, SessionEnvironmentScope, SessionState,
+    SessionSummary, StateConfidence, ThoughtState, TransportHealth,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -611,11 +611,13 @@ fn batch_send_group_member(session: &SessionSummary) -> Option<BatchSendSession<
 }
 
 fn batch_send_session_is_eligible(session: &SessionSummary) -> bool {
-    remote_sessions::split_remote_session_id(&session.session_id).is_none()
-        && session_ready_for_operator_group_input(session)
+    session_ready_for_operator_group_input(session)
 }
 
 fn advertisable_batch_send_ids(mut sessions: Vec<BatchSendSession<'_>>) -> Option<Vec<String>> {
+    if !batch_send_group_has_single_scope(&sessions) {
+        return None;
+    }
     sessions.sort_by(|(left_batch, left_session), (right_batch, right_session)| {
         left_batch
             .index
@@ -627,6 +629,35 @@ fn advertisable_batch_send_ids(mut sessions: Vec<BatchSendSession<'_>>) -> Optio
         .map(|(_, session)| session.session_id.clone())
         .collect::<Vec<_>>();
     (ids.len() >= 2).then_some(ids)
+}
+
+fn batch_send_group_has_single_scope(sessions: &[BatchSendSession<'_>]) -> bool {
+    let mut scopes = sessions
+        .iter()
+        .map(|(_, session)| batch_send_scope_key(session))
+        .collect::<Vec<_>>();
+    scopes.sort();
+    scopes.dedup();
+    scopes.len() <= 1
+}
+
+fn batch_send_scope_key(session: &SessionSummary) -> String {
+    remote_target_id_for_group_send(session)
+        .map(|target| format!("remote:{target}"))
+        .unwrap_or_else(|| "local".to_string())
+}
+
+fn remote_target_id_for_group_send(session: &SessionSummary) -> Option<String> {
+    if let Some((target_id, _)) = remote_sessions::split_remote_session_id(&session.session_id) {
+        if session.environment.scope == SessionEnvironmentScope::Remote {
+            let environment_target = session.environment.target_id.trim();
+            if !environment_target.is_empty() && environment_target != "local" {
+                return Some(environment_target.to_string());
+            }
+        }
+        return Some(target_id.to_string());
+    }
+    None
 }
 
 fn batch_send_session_entries(ids: Vec<String>) -> Vec<(String, Vec<String>)> {
@@ -1192,7 +1223,39 @@ mod tests {
     }
 
     #[test]
-    fn batch_send_ids_exclude_namespaced_remote_sessions() {
+    fn batch_send_ids_allow_same_target_remote_sessions() {
+        let created_at = Utc::now();
+        let mut first = summary(
+            &remote_sessions::namespace_session_id("jeremy-skillbox", "first"),
+            SessionState::Attention,
+        );
+        let mut second = summary(
+            &remote_sessions::namespace_session_id("jeremy-skillbox", "second"),
+            SessionState::Attention,
+        );
+        assign_batch(&mut first, "batch-remote", 0, 2, created_at);
+        assign_batch(&mut second, "batch-remote", 1, 2, created_at);
+
+        let response = build_operator_pressure_response(&[first, second]);
+        let expected = [
+            remote_sessions::namespace_session_id("jeremy-skillbox", "first"),
+            remote_sessions::namespace_session_id("jeremy-skillbox", "second"),
+        ]
+        .into_iter()
+        .collect::<Vec<_>>();
+
+        assert_eq!(response.summary.batch_send_groups, 1);
+        for session in response.sessions {
+            assert_eq!(
+                session.batch_send_session_ids, expected,
+                "{}",
+                session.session_id
+            );
+        }
+    }
+
+    #[test]
+    fn batch_send_ids_skip_mixed_local_remote_sessions() {
         let created_at = Utc::now();
         let mut local = summary("local", SessionState::Attention);
         let mut remote = summary(
@@ -1216,7 +1279,33 @@ mod tests {
         for session in response.sessions {
             assert!(
                 session.batch_send_session_ids.is_empty(),
-                "remote-backed group input must not be advertised for {}",
+                "mixed local/remote group input must not be advertised for {}",
+                session.session_id
+            );
+        }
+    }
+
+    #[test]
+    fn batch_send_ids_skip_mixed_remote_targets() {
+        let created_at = Utc::now();
+        let mut first = summary(
+            &remote_sessions::namespace_session_id("alpha", "first"),
+            SessionState::Attention,
+        );
+        let mut second = summary(
+            &remote_sessions::namespace_session_id("beta", "second"),
+            SessionState::Attention,
+        );
+        assign_batch(&mut first, "batch-remote", 0, 2, created_at);
+        assign_batch(&mut second, "batch-remote", 1, 2, created_at);
+
+        let response = build_operator_pressure_response(&[first, second]);
+
+        assert_eq!(response.summary.batch_send_groups, 0);
+        for session in response.sessions {
+            assert!(
+                session.batch_send_session_ids.is_empty(),
+                "mixed remote target group input must not be advertised for {}",
                 session.session_id
             );
         }
