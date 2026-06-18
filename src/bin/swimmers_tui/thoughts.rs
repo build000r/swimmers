@@ -1,5 +1,4 @@
 use super::*;
-use swimmers::api::remote_sessions;
 use swimmers::color::hsl_to_rgb;
 use swimmers::fleet_lens::build_fleet_lens_summary;
 use swimmers::session_labels::{session_canonical_cwd_key, session_cwd_label};
@@ -446,6 +445,7 @@ fn gather_filter_chips<C: TuiApi>(app: &App<C>, chip_budget: u16) -> (Vec<Filter
     (included, chips_width)
 }
 
+#[cfg(test)]
 fn filter_chips_for_summaries(
     summaries: &[ThoughtRepoSummary],
     filter: &ThoughtFilter,
@@ -944,6 +944,7 @@ pub(crate) struct ThoughtPanelEntryView {
     pub(crate) label: String,
     pub(crate) tmux_name: String,
     pub(crate) cwd: String,
+    pub(crate) target_key: String,
     pub(crate) target_label: String,
     pub(crate) batch: Option<SessionBatchMembership>,
     pub(crate) state: SessionState,
@@ -1192,6 +1193,7 @@ pub(crate) fn build_thought_panel_entries<C: TuiApi>(app: &App<C>) -> Vec<Though
             label: label.clone(),
             tmux_name: entry.tmux_name.clone(),
             cwd: entry.cwd.clone(),
+            target_key: entry.target_key.clone(),
             target_label: entry.target_label.clone(),
             batch: entry.batch.clone(),
             state: entry.state,
@@ -1225,6 +1227,7 @@ pub(crate) fn build_thought_panel_entries<C: TuiApi>(app: &App<C>) -> Vec<Though
             label: label.clone(),
             tmux_name: entity.session.tmux_name.clone(),
             cwd: session_canonical_cwd_key(&entity.session),
+            target_key: thought_filter_target_key(&entity.session),
             target_label: session_target_label(&entity.session),
             batch: entity.session.batch.clone(),
             state: entity.session.state,
@@ -1393,29 +1396,31 @@ fn group_send_session_ids(group_by: ThoughtGroupBy, group: &ThoughtGroup) -> Opt
     {
         return None;
     }
-    let session_ids = group
+    let ready_entries = group
         .entries
         .iter()
         .filter(|entry| thought_entry_is_group_input_ready(entry))
+        .collect::<Vec<_>>();
+    let session_ids = ready_entries
+        .iter()
         .map(|entry| entry.session_id.clone())
         .collect::<Vec<_>>();
-    (session_ids.len() > 1 && group_send_ids_have_single_scope(&session_ids)).then_some(session_ids)
+    (session_ids.len() > 1 && group_send_ids_have_single_scope(&ready_entries))
+        .then_some(session_ids)
 }
 
-fn group_send_ids_have_single_scope(session_ids: &[String]) -> bool {
-    let mut scopes = session_ids
+fn group_send_ids_have_single_scope(entries: &[&ThoughtPanelEntryView]) -> bool {
+    let mut scopes = entries
         .iter()
-        .map(|session_id| group_send_scope_key(session_id))
+        .map(|entry| group_send_scope_key(entry))
         .collect::<Vec<_>>();
     scopes.sort();
     scopes.dedup();
     scopes.len() <= 1
 }
 
-fn group_send_scope_key(session_id: &str) -> String {
-    remote_sessions::split_remote_session_id(session_id)
-        .map(|(target, _)| format!("remote:{target}"))
-        .unwrap_or_else(|| "local".to_string())
+fn group_send_scope_key(entry: &ThoughtPanelEntryView) -> &str {
+    entry.target_key.as_str()
 }
 
 fn compact_target_label(label: &str) -> String {

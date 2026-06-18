@@ -363,7 +363,7 @@ mod picker {
     }
 
     #[test]
-    fn apply_response_clamps_fallback_selection_and_snaps_search() {
+    fn apply_response_clamps_fallback_selection_snaps_search_and_clears_missing_groups() {
         let mut picker = apply_response_picker(vec![
             apply_response_entry("a", "/tmp/old/a"),
             apply_response_entry("b", "/tmp/old/b"),
@@ -382,11 +382,8 @@ mod picker {
 
         assert_eq!(picker.selection, PickerSelection::Entry(0));
         assert_eq!(picker.scroll, 0);
-        assert_eq!(
-            picker.available_groups,
-            vec!["alpha".to_string(), "beta".to_string()]
-        );
-        assert_eq!(picker.group_edit_target.as_deref(), Some("alpha"));
+        assert!(picker.available_groups.is_empty());
+        assert_eq!(picker.group_edit_target, None);
     }
 
     #[test]

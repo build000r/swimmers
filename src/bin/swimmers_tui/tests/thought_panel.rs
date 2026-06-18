@@ -1,5 +1,31 @@
 use super::*;
 
+fn remote_target(id: &str, label: &str) -> swimmers::types::LaunchTargetSummary {
+    swimmers::types::LaunchTargetSummary {
+        id: id.to_string(),
+        label: label.to_string(),
+        kind: "swimmers_api".to_string(),
+        base_url: Some("http://127.0.0.1:3210".to_string()),
+        auth_token_env: None,
+        path_mappings: Vec::new(),
+    }
+}
+
+fn with_remote_environment(
+    mut session: SessionSummary,
+    target: &swimmers::types::LaunchTargetSummary,
+    remote_session_id: &str,
+) -> SessionSummary {
+    session.environment = swimmers::types::SessionEnvironmentSummary::remote(
+        target,
+        remote_session_id,
+        "/srv/remote/repos/swimmers",
+        Some(TEST_REPO_SWIMMERS.to_string()),
+        "remote_swimmers_api",
+    );
+    session
+}
+
 #[test]
 fn thought_panel_groups_by_pwd_by_default() {
     let api = MockApi::new();
@@ -268,13 +294,18 @@ fn thought_panel_keeps_send_action_off_mixed_local_remote_batch_groups() {
         0,
         2,
     );
+    let target = remote_target("jeremy-skillbox", "Jeremy Skillbox");
     let remote = with_batch(
-        sleeping_session_with_thought(
-            &remote_sessions::namespace_session_id("jeremy-skillbox", "sess-remote"),
-            "[Jeremy] 9",
-            TEST_REPO_SKILLS,
-            "checking docs",
-            "2026-03-08T14:00:06Z",
+        with_remote_environment(
+            sleeping_session_with_thought(
+                &remote_sessions::namespace_session_id("jeremy-skillbox", "sess-remote"),
+                "[Jeremy] 9",
+                TEST_REPO_SKILLS,
+                "checking docs",
+                "2026-03-08T14:00:06Z",
+            ),
+            &target,
+            "sess-remote",
         ),
         "batch-remote",
         "remote-school",
@@ -298,13 +329,18 @@ fn thought_panel_shows_send_action_for_same_target_remote_batch_groups() {
     let mut app = make_app(api);
     app.thought_group_by = ThoughtGroupBy::Batch;
 
+    let target = remote_target("jeremy-skillbox", "Jeremy Skillbox");
     let first = with_batch(
-        sleeping_session_with_thought(
-            &remote_sessions::namespace_session_id("jeremy-skillbox", "sess-a"),
-            "[Jeremy] 7",
-            TEST_REPO_SWIMMERS,
-            "patching rail",
-            "2026-03-08T14:00:05Z",
+        with_remote_environment(
+            sleeping_session_with_thought(
+                &remote_sessions::namespace_session_id("jeremy-skillbox", "sess-a"),
+                "[Jeremy] 7",
+                TEST_REPO_SWIMMERS,
+                "patching rail",
+                "2026-03-08T14:00:05Z",
+            ),
+            &target,
+            "sess-a",
         ),
         "batch-remote",
         "remote-school",
@@ -312,12 +348,16 @@ fn thought_panel_shows_send_action_for_same_target_remote_batch_groups() {
         2,
     );
     let second = with_batch(
-        sleeping_session_with_thought(
-            &remote_sessions::namespace_session_id("jeremy-skillbox", "sess-b"),
-            "[Jeremy] 9",
-            TEST_REPO_SKILLS,
-            "checking docs",
-            "2026-03-08T14:00:06Z",
+        with_remote_environment(
+            sleeping_session_with_thought(
+                &remote_sessions::namespace_session_id("jeremy-skillbox", "sess-b"),
+                "[Jeremy] 9",
+                TEST_REPO_SKILLS,
+                "checking docs",
+                "2026-03-08T14:00:06Z",
+            ),
+            &target,
+            "sess-b",
         ),
         "batch-remote",
         "remote-school",
@@ -336,6 +376,60 @@ fn thought_panel_shows_send_action_for_same_target_remote_batch_groups() {
             remote_sessions::namespace_session_id("jeremy-skillbox", "sess-b"),
         ])
     );
+}
+
+#[test]
+fn thought_panel_hides_send_action_for_mixed_nested_remote_targets() {
+    let api = MockApi::new();
+    let layout = test_layout(120, 32);
+    let thought_content = layout
+        .thought_content
+        .expect("wide layout enables thought rail");
+    let mut app = make_app(api);
+    app.thought_group_by = ThoughtGroupBy::Batch;
+
+    let west = remote_target("zone::west", "West Zone");
+    let east = remote_target("zone::east", "East Zone");
+    let first = with_batch(
+        with_remote_environment(
+            sleeping_session_with_thought(
+                &remote_sessions::namespace_session_id("zone::west", "sess-a"),
+                "[West] 7",
+                TEST_REPO_SWIMMERS,
+                "patching rail",
+                "2026-03-08T14:00:05Z",
+            ),
+            &west,
+            "sess-a",
+        ),
+        "batch-remote",
+        "remote-school",
+        0,
+        2,
+    );
+    let second = with_batch(
+        with_remote_environment(
+            sleeping_session_with_thought(
+                &remote_sessions::namespace_session_id("zone::east", "sess-b"),
+                "[East] 9",
+                TEST_REPO_SKILLS,
+                "checking docs",
+                "2026-03-08T14:00:06Z",
+            ),
+            &east,
+            "sess-b",
+        ),
+        "batch-remote",
+        "remote-school",
+        1,
+        2,
+    );
+    app.capture_thought_updates(&[first, second], layout.thought_entry_capacity());
+
+    let panel = build_thought_panel(&app, thought_content, layout.thought_entry_capacity());
+
+    assert_eq!(panel.rows[0].line, "v remote-school (2)");
+    assert!(panel.rows[0].send_rect.is_none());
 }
 
 #[test]

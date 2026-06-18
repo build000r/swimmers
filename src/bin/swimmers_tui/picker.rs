@@ -501,9 +501,6 @@ impl PickerState {
     }
 
     fn apply_response_groups(&mut self, groups: Vec<String>) {
-        let Some(groups) = non_empty_groups(groups) else {
-            return;
-        };
         self.available_groups = groups;
         self.retain_or_fallback_group_edit_target();
     }
@@ -1490,10 +1487,6 @@ fn preserved_launch_target(
     preserve_selection
         .then_some(previous_launch_target)
         .flatten()
-}
-
-fn non_empty_groups(groups: Vec<String>) -> Option<Vec<String>> {
-    (!groups.is_empty()).then_some(groups)
 }
 
 fn preserved_response_position(
