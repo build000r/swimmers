@@ -168,6 +168,7 @@ test("surface renders grouped session rail with host-disambiguated project label
     currentSession: remote,
     selectedSessionId: "remote",
     sessionGroupMode: "project",
+    attentionInboxCount: 2,
     sessions: [local, remote],
     sessionRailRows: [
       {
@@ -198,6 +199,7 @@ test("surface renders grouped session rail with host-disambiguated project label
   const actionIds = frame.zones.map((zone) => zone.actionId).filter(Boolean);
 
   assert.match(text, /view grouped/);
+  assert.match(text, /sessions grouped \/ inbox 2/);
   assert.match(text, /2x swimmers L\+Skillbox/);
   assert.ok(actionIds.includes("toggle_session_grouping"));
 });

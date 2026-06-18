@@ -214,6 +214,29 @@ test("normalizeOperatorPressureResponse preserves existing Trogdor input fields 
       reason: "dirty check",
       session_ids: ["agent-1", 7],
     }],
+    inbox: [{
+      session_id: "remote::agent-1",
+      repo_key: "/tmp/repos/swimmers",
+      repo_label: "swimmers",
+      target_key: "skillbox",
+      target_label: "Skillbox",
+      pressure: {
+        score: "91",
+        reason: "awaiting user",
+        reason_kind: "awaiting_user",
+        glyph: "!",
+        tone: "danger",
+        needs_input: true,
+        launch_ready: true,
+        commit_ready: false,
+        action_cue_count: "1",
+      },
+      remote: true,
+      degraded: "not-bool",
+      stale: true,
+      transport_health: null,
+      last_activity_at: "2026-06-05T00:00:00Z",
+    }],
     summary: {
       max_score: "42",
       action_cues: "2",
@@ -246,6 +269,29 @@ test("normalizeOperatorPressureResponse preserves existing Trogdor input fields 
       score: 42,
       reason: "dirty check",
       session_ids: ["agent-1", "7"],
+    }],
+    inbox: [{
+      session_id: "remote::agent-1",
+      repo_key: "/tmp/repos/swimmers",
+      repo_label: "swimmers",
+      target_key: "skillbox",
+      target_label: "Skillbox",
+      pressure: {
+        score: 91,
+        reason: "awaiting user",
+        reason_kind: "awaiting_user",
+        glyph: "!",
+        tone: "danger",
+        needs_input: true,
+        launch_ready: true,
+        commit_ready: false,
+        action_cue_count: 1,
+      },
+      remote: true,
+      degraded: false,
+      stale: true,
+      transport_health: "healthy",
+      last_activity_at: "2026-06-05T00:00:00Z",
     }],
     summary: {
       max_score: 42,
@@ -438,6 +484,16 @@ test("normalizeSurfaceModel preserves Trogdor view model fields and null current
       trogdorDismissed: true,
       trogdorSwordsmanVisible: false,
     }],
+    attentionInbox: [{
+      sessionId: "agent-1",
+      state: "attention",
+      lastActivityAt: "2026-06-05T00:00:00Z",
+    }],
+    attentionInboxCount: "1",
+    filteredFleetLens: {
+      total_sessions: "1",
+      buckets: [{ kind: "readiness", key: "needs_attention", label: "needs attention", count: "1" }],
+    },
     currentSession: null,
     selectedSessionId: undefined,
     publishedSessionId: "agent-1",
@@ -456,6 +512,10 @@ test("normalizeSurfaceModel preserves Trogdor view model fields and null current
   assert.equal(model.sessions[0].trogdorBurnt, false);
   assert.equal(model.sessions[0].trogdorDismissed, true);
   assert.equal(model.sessions[0].trogdorSwordsmanVisible, false);
+  assert.equal(model.attentionInbox.length, 1);
+  assert.equal(model.attentionInbox[0].lastActivityAt, "2026-06-05T00:00:00Z");
+  assert.equal(model.attentionInboxCount, 1);
+  assert.equal(model.filteredFleetLens.buckets[0].count, 1);
   assert.equal(model.currentSession, null);
   assert.equal(model.selectedSessionId, null);
   assert.equal(model.publishedSessionId, "agent-1");

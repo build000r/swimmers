@@ -138,6 +138,13 @@ function bucketFor(lens, kind, key = "") {
   return buckets.find((bucket) => bucket.kind === kind && (!key || bucket.key === key)) || null;
 }
 
+function inboxChipLabel(bucket) {
+  if (bucket?.kind === "readiness" && bucket?.key === "needs_attention") {
+    return `inbox ${bucket.count}`;
+  }
+  return `${bucket?.kind || ""} ${bucket?.label || bucket?.key || ""} ${bucket?.count ?? 0}`.trim();
+}
+
 function availableFleetFilter(lens, filter) {
   const active = normalizeFleetFilter(filter);
   if (!active.kind) {
@@ -163,7 +170,7 @@ export function fleetLensChips(lens, filter) {
   if (active.kind) {
     const bucket = bucketFor(lens, active.kind, active.key);
     chips.push({
-      label: `${active.kind} ${bucket?.label || active.key} ${bucket?.count ?? 0}`,
+      label: inboxChipLabel(bucket || { kind: active.kind, key: active.key, label: active.key, count: 0 }),
       kind: active.kind,
       key: active.key,
       active: true,
@@ -176,13 +183,66 @@ export function fleetLensChips(lens, filter) {
   const degraded = firstNonHealthyTransport(lens);
   for (const bucket of [target, repo, needs, degraded].filter(Boolean)) {
     chips.push({
-      label: `${bucket.kind} ${bucket.label} ${bucket.count}`,
+      label: inboxChipLabel(bucket),
       kind: bucket.kind,
       key: bucket.key,
       active: false,
     });
   }
   return chips.slice(0, 5);
+}
+
+function attentionInboxReasonRank(session) {
+  switch (String(session?.operatorPressure?.reason_kind || "").toLowerCase()) {
+    case "awaiting_user":
+      return 5;
+    case "commit_ready":
+      return 4;
+    case "validation_missing_after_edit":
+    case "dirty_check_missing":
+    case "needs_input":
+      return 3;
+    case "error":
+      return 2;
+    case "sleeping":
+    case "untrusted_state":
+    case "stale":
+    case "transport":
+      return 1;
+    default:
+      return 0;
+  }
+}
+
+function attentionInboxPressure(session) {
+  const score = Number(session?.operatorPressure?.score);
+  return Number.isFinite(score) ? Math.max(1, Math.min(99, score)) : 1;
+}
+
+function attentionInboxDegraded(session) {
+  return Boolean(session?.isStale || session?.transportKey !== "healthy");
+}
+
+function attentionInboxTime(session) {
+  const time = Date.parse(session?.lastActivityAt || "");
+  return Number.isFinite(time) ? time : 0;
+}
+
+export function buildAttentionInbox(sessions) {
+  return (Array.isArray(sessions) ? sessions : [])
+    .filter((session) => session.readinessKey === "needs_attention")
+    .slice()
+    .sort((left, right) => (
+      Number(attentionInboxDegraded(left)) - Number(attentionInboxDegraded(right))
+      || attentionInboxPressure(right) - attentionInboxPressure(left)
+      || attentionInboxReasonRank(right) - attentionInboxReasonRank(left)
+      || attentionInboxTime(right) - attentionInboxTime(left)
+      || String(left.sessionId || "").localeCompare(String(right.sessionId || ""))
+    ));
+}
+
+function readinessBucketCount(lens, key) {
+  return bucketFor(lens, "readiness", key)?.count || 0;
 }
 
 function groupHostLabel(session) {
@@ -327,6 +387,7 @@ export function surfaceSession(session, {
     objectiveChangedAt: session.objective_changed_at || "",
     contextLabel: `${session.token_count ?? 0} / ${session.context_limit ?? 0}`,
     skillLabel: session.last_skill || "none",
+    lastActivityAt: session.last_activity_at || "",
     activityLabel: formatTime(session.last_activity_at),
     commandLabel: session.current_command || "idle",
     attachedLabel: String(session.attached_clients ?? 0),
@@ -376,6 +437,8 @@ export function buildSurfaceModel({
   const fleetLens = buildFleetLensSummary(allSurfaceSessions);
   const fleetFilter = availableFleetFilter(fleetLens, state.fleetFilter);
   const surfaceSessions = allSurfaceSessions.filter((session) => sessionMatchesFleetFilter(session, fleetFilter));
+  const filteredFleetLens = buildFleetLensSummary(surfaceSessions);
+  const attentionInbox = buildAttentionInbox(surfaceSessions);
   const terminalReady = Boolean(state.terminal && state.ws && state.ws.readyState === websocketOpen);
   return {
     cols: state.currentCols,
@@ -410,8 +473,11 @@ export function buildSurfaceModel({
     sessionGroupMode,
     sessionRailRows: buildSessionRailRows(surfaceSessions, sessionGroupMode),
     allSessionCount: allSurfaceSessions.length,
+    attentionInbox,
+    attentionInboxCount: readinessBucketCount(filteredFleetLens, "needs_attention"),
     fleetFilter,
     fleetLens,
+    filteredFleetLens,
     fleetChips: fleetLensChips(fleetLens, fleetFilter),
     selectedSessionId: state.selectedSessionId,
     publishedSessionId: normalizeSessionId(state.publishedSelection?.session_id),

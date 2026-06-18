@@ -173,7 +173,7 @@ function drawHeader(frame, layout, model) {
 
 function drawSessionRail(frame, rail, model) {
   const grouped = model?.sessionGroupMode === "project";
-  drawPanel(frame, rail, model?.focusLayout ? "published" : grouped ? "sessions grouped" : "sessions");
+  drawPanel(frame, rail, sessionRailTitle(model, grouped));
   pushMask(frame, rail);
 
   const sessions = Array.isArray(model?.sessions) ? model.sessions : [];
@@ -247,6 +247,15 @@ function drawSessionRail(frame, rail, model) {
       width: rail.w - 4,
     });
   }
+}
+
+function sessionRailTitle(model, grouped) {
+  if (model?.focusLayout) {
+    return "published";
+  }
+  const base = grouped ? "sessions grouped" : "sessions";
+  const count = Number(model?.attentionInboxCount || 0);
+  return count > 0 ? `${base} / inbox ${count}` : base;
 }
 
 function shortProjectLabel(label) {

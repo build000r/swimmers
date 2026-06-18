@@ -2,6 +2,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 use crate::api::remote_sessions;
+use crate::fleet_lens::{session_needs_attention, target_key, target_label};
 use crate::session_labels::{repo_label_for_key, session_repo_key};
 use crate::types::{
     ActionCueKind, RestState, SessionBatchMembership, SessionEnvironmentScope, SessionState,
@@ -58,6 +59,21 @@ pub struct OperatorPressureSession {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OperatorAttentionInboxItem {
+    pub session_id: String,
+    pub repo_key: String,
+    pub repo_label: String,
+    pub target_key: String,
+    pub target_label: String,
+    pub pressure: OperatorPressure,
+    pub remote: bool,
+    pub degraded: bool,
+    pub stale: bool,
+    pub transport_health: TransportHealth,
+    pub last_activity_at: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct OperatorPressureRepo {
     pub repo_key: String,
     pub repo_label: String,
@@ -78,6 +94,7 @@ pub struct OperatorPressureResponse {
     pub sessions: Vec<OperatorPressureSession>,
     pub repos: Vec<OperatorPressureRepo>,
     pub summary: OperatorPressureSummary,
+    pub inbox: Vec<OperatorAttentionInboxItem>,
 }
 
 pub fn operator_pressure_for_session(session: &SessionSummary) -> OperatorPressure {
@@ -114,6 +131,7 @@ struct OperatorPressureResponseBuilder {
     summary: OperatorPressureSummary,
     repos: HashMap<String, OperatorPressureRepo>,
     sessions: Vec<OperatorPressureSession>,
+    inbox: Vec<OperatorAttentionInboxItem>,
 }
 
 impl OperatorPressureResponseBuilder {
@@ -126,6 +144,7 @@ impl OperatorPressureResponseBuilder {
             },
             repos: HashMap::new(),
             sessions: Vec::with_capacity(session_count),
+            inbox: Vec::new(),
         }
     }
 
@@ -136,6 +155,11 @@ impl OperatorPressureResponseBuilder {
 
         update_operator_pressure_summary(&mut self.summary, &pressure);
         update_operator_pressure_repo(&mut self.repos, session, &repo_key, &repo_label, &pressure);
+        if let Some(item) =
+            operator_attention_inbox_item(session, &repo_key, &repo_label, pressure.clone())
+        {
+            self.inbox.push(item);
+        }
         self.sessions.push(operator_pressure_session(
             session,
             repo_key,
@@ -149,11 +173,13 @@ impl OperatorPressureResponseBuilder {
         let mut repos = self.repos.into_values().collect::<Vec<_>>();
         sort_operator_pressure_repos(&mut repos);
         sort_operator_pressure_sessions(&mut self.sessions);
+        sort_operator_attention_inbox(&mut self.inbox);
 
         OperatorPressureResponse {
             sessions: self.sessions,
             repos,
             summary: self.summary,
+            inbox: self.inbox,
         }
     }
 }
@@ -224,6 +250,46 @@ fn operator_pressure_session(
     }
 }
 
+fn operator_attention_inbox_item(
+    session: &SessionSummary,
+    repo_key: &str,
+    repo_label: &str,
+    pressure: OperatorPressure,
+) -> Option<OperatorAttentionInboxItem> {
+    if !session_is_attention_inbox_candidate(session) {
+        return None;
+    }
+    Some(OperatorAttentionInboxItem {
+        session_id: session.session_id.clone(),
+        repo_key: repo_key.to_string(),
+        repo_label: repo_label.to_string(),
+        target_key: target_key(session),
+        target_label: target_label(session),
+        pressure,
+        remote: session_is_remote(session),
+        degraded: session_is_degraded(session),
+        stale: session.is_stale,
+        transport_health: session.transport_health,
+        last_activity_at: session.last_activity_at.to_rfc3339(),
+    })
+}
+
+fn session_is_attention_inbox_candidate(session: &SessionSummary) -> bool {
+    session.session_id != "attention-group"
+        && session.tmux_name != "swimmers-attention"
+        && session.state != SessionState::Exited
+        && session_needs_attention(session)
+}
+
+fn session_is_remote(session: &SessionSummary) -> bool {
+    session.environment.scope == SessionEnvironmentScope::Remote
+        || remote_sessions::split_remote_session_id(&session.session_id).is_some()
+}
+
+fn session_is_degraded(session: &SessionSummary) -> bool {
+    session.is_stale || session.transport_health != TransportHealth::Healthy
+}
+
 fn sort_operator_pressure_repos(repos: &mut [OperatorPressureRepo]) {
     repos.sort_by(|left, right| {
         right
@@ -241,6 +307,36 @@ fn sort_operator_pressure_sessions(sessions: &mut [OperatorPressureSession]) {
             .cmp(&left.pressure.score)
             .then_with(|| left.session_id.cmp(&right.session_id))
     });
+}
+
+fn sort_operator_attention_inbox(items: &mut [OperatorAttentionInboxItem]) {
+    items.sort_by(|left, right| {
+        left.degraded
+            .cmp(&right.degraded)
+            .then_with(|| right.pressure.score.cmp(&left.pressure.score))
+            .then_with(|| {
+                pressure_reason_rank(right.pressure.reason_kind)
+                    .cmp(&pressure_reason_rank(left.pressure.reason_kind))
+            })
+            .then_with(|| right.last_activity_at.cmp(&left.last_activity_at))
+            .then_with(|| left.session_id.cmp(&right.session_id))
+    });
+}
+
+fn pressure_reason_rank(kind: OperatorPressureReasonKind) -> u8 {
+    match kind {
+        OperatorPressureReasonKind::AwaitingUser => 5,
+        OperatorPressureReasonKind::CommitReady => 4,
+        OperatorPressureReasonKind::ValidationMissingAfterEdit
+        | OperatorPressureReasonKind::DirtyCheckMissing
+        | OperatorPressureReasonKind::NeedsInput => 3,
+        OperatorPressureReasonKind::Error => 2,
+        OperatorPressureReasonKind::Sleeping
+        | OperatorPressureReasonKind::UntrustedState
+        | OperatorPressureReasonKind::Stale
+        | OperatorPressureReasonKind::Transport => 1,
+        OperatorPressureReasonKind::Busy | OperatorPressureReasonKind::Idle => 0,
+    }
 }
 
 pub fn session_ready_for_operator_group_input(session: &SessionSummary) -> bool {
@@ -1020,6 +1116,7 @@ mod tests {
 
         assert!(response.sessions.is_empty());
         assert!(response.repos.is_empty());
+        assert!(response.inbox.is_empty());
         assert_eq!(
             response.summary,
             OperatorPressureSummary {
@@ -1120,6 +1217,81 @@ mod tests {
             "/Users/b/repos/opensource/swimmers"
         );
         assert_eq!(remote.cwd, "/srv/skillbox/repos/swimmers");
+    }
+
+    #[test]
+    fn attention_inbox_includes_remote_attention_without_quiet_sessions() {
+        let local = trusted_summary("local", SessionState::Attention);
+        let mut remote = trusted_summary(
+            &remote_sessions::namespace_session_id("skillbox", "remote"),
+            SessionState::Idle,
+        );
+        remote.environment = SessionEnvironmentSummary::remote(
+            &LaunchTargetSummary {
+                id: "skillbox".to_string(),
+                label: "Skillbox devbox".to_string(),
+                kind: "swimmers_api".to_string(),
+                base_url: None,
+                auth_token_env: None,
+                path_mappings: Vec::new(),
+            },
+            "remote",
+            "/srv/skillbox/repos/swimmers".to_string(),
+            Some("/Users/b/repos/opensource/swimmers".to_string()),
+            "remote_swimmers_api",
+        );
+        remote.action_cues = vec![cue(ActionCueKind::AwaitingUser)];
+        let quiet = quiet_summary("quiet");
+
+        let response = build_operator_pressure_response(&[quiet, remote, local]);
+        let ids = response
+            .inbox
+            .iter()
+            .map(|item| item.session_id.clone())
+            .collect::<std::collections::HashSet<_>>();
+
+        assert_eq!(ids.len(), 2);
+        assert!(ids.contains("local"));
+        assert!(ids.contains(&remote_sessions::namespace_session_id("skillbox", "remote")));
+        let remote_item = response
+            .inbox
+            .iter()
+            .find(|item| item.remote)
+            .expect("remote inbox item");
+        assert_eq!(remote_item.target_key, "skillbox");
+        assert_eq!(remote_item.target_label, "Skillbox devbox");
+    }
+
+    #[test]
+    fn attention_inbox_sorts_degraded_remote_below_healthy_attention() {
+        let healthy = trusted_summary("healthy", SessionState::Attention);
+        let mut degraded = trusted_summary(
+            &remote_sessions::namespace_session_id("skillbox", "stale"),
+            SessionState::Attention,
+        );
+        degraded.environment = SessionEnvironmentSummary::remote(
+            &LaunchTargetSummary {
+                id: "skillbox".to_string(),
+                label: "Skillbox devbox".to_string(),
+                kind: "swimmers_api".to_string(),
+                base_url: None,
+                auth_token_env: None,
+                path_mappings: Vec::new(),
+            },
+            "stale",
+            "/srv/skillbox/repos/swimmers".to_string(),
+            Some("/Users/b/repos/opensource/swimmers".to_string()),
+            "remote_swimmers_api",
+        );
+        degraded = degraded.into_remote_poll_degraded(Some(Utc::now()));
+        degraded.action_cues = vec![cue(ActionCueKind::AwaitingUser)];
+
+        let response = build_operator_pressure_response(&[degraded, healthy]);
+
+        assert_eq!(response.inbox[0].session_id, "healthy");
+        assert!(response.inbox[1].remote);
+        assert!(response.inbox[1].degraded);
+        assert!(response.inbox[1].stale);
     }
 
     #[test]

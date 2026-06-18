@@ -1539,13 +1539,26 @@ fn thought_panel_fleet_lens_header<C: TuiApi>(app: &App<C>) -> Option<String> {
         .filter(|bucket| bucket.kind == FleetLensBucketKind::Transport && bucket.key != "healthy")
         .map(|bucket| bucket.count)
         .sum::<usize>();
+    let inbox = lens
+        .buckets
+        .iter()
+        .find(|bucket| {
+            bucket.kind == FleetLensBucketKind::Readiness && bucket.key == "needs_attention"
+        })
+        .map(|bucket| bucket.count)
+        .unwrap_or(0);
+    let inbox_suffix = if inbox > 0 {
+        format!(" · inbox {inbox}")
+    } else {
+        String::new()
+    };
     let degraded_suffix = if degraded > 0 {
         format!(" · {degraded} degraded")
     } else {
         String::new()
     };
     Some(format!(
-        "fleet {target_count} hosts / {repo_count} project{}{degraded_suffix}",
+        "fleet {target_count} hosts / {repo_count} project{}{inbox_suffix}{degraded_suffix}",
         pluralize(repo_count)
     ))
 }

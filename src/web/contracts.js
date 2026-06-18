@@ -288,6 +288,23 @@ export function normalizeOperatorPressureSession(value) {
   };
 }
 
+function normalizeOperatorAttentionInboxItem(value) {
+  const item = objectRecord(value) || {};
+  return {
+    session_id: stringValue(item.session_id),
+    repo_key: stringValue(item.repo_key),
+    repo_label: stringValue(item.repo_label),
+    target_key: stringValue(item.target_key),
+    target_label: stringValue(item.target_label),
+    pressure: normalizeOperatorPressure(item.pressure),
+    remote: booleanValue(item.remote),
+    degraded: booleanValue(item.degraded),
+    stale: booleanValue(item.stale),
+    transport_health: stringValue(item.transport_health, "healthy"),
+    last_activity_at: stringValue(item.last_activity_at),
+  };
+}
+
 function normalizeOperatorPressureRepo(value) {
   const repo = objectRecord(value) || {};
   return {
@@ -305,6 +322,7 @@ export function normalizeOperatorPressureResponse(value) {
   return {
     sessions: objectArray(payload.sessions).map(normalizeOperatorPressureSession),
     repos: objectArray(payload.repos).map(normalizeOperatorPressureRepo),
+    inbox: objectArray(payload.inbox).map(normalizeOperatorAttentionInboxItem),
     summary: {
       max_score: finiteNumber(summary.max_score),
       action_cues: finiteNumber(summary.action_cues),
@@ -843,6 +861,7 @@ export function normalizeTrogdorSurfaceSession(value) {
     objectiveChangedAt: stringValue(session.objectiveChangedAt),
     contextLabel: stringValue(session.contextLabel),
     skillLabel: stringValue(session.skillLabel),
+    lastActivityAt: stringValue(session.lastActivityAt),
     activityLabel: stringValue(session.activityLabel),
     commandLabel: stringValue(session.commandLabel),
     attachedLabel: stringValue(session.attachedLabel),
@@ -902,8 +921,11 @@ export function normalizeSurfaceModel(value) {
     trogdorReaderElapsedMs: finiteNumber(model.trogdorReaderElapsedMs),
     sessions: objectArray(model.sessions).map(normalizeTrogdorSurfaceSession),
     allSessionCount: finiteNumber(model.allSessionCount),
+    attentionInbox: objectArray(model.attentionInbox).map(normalizeTrogdorSurfaceSession),
+    attentionInboxCount: finiteNumber(model.attentionInboxCount),
     fleetFilter: normalizeFleetFilter(model.fleetFilter),
     fleetLens: normalizeFleetLensSummary(model.fleetLens),
+    filteredFleetLens: normalizeFleetLensSummary(model.filteredFleetLens),
     fleetChips: objectArray(model.fleetChips).map(normalizeFleetChip),
     selectedSessionId: optionalString(model.selectedSessionId),
     publishedSessionId: optionalString(model.publishedSessionId),

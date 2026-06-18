@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 
 import {
+  buildAttentionInbox,
   buildSessionRailRows,
   buildSurfaceModel,
   surfaceSession,
@@ -98,6 +99,7 @@ test("surfaceSession preserves labels, pressure fields, and Trogdor enrichment",
   assert.equal(session.activityLabel, "raw-time");
   assert.equal(session.contextLabel, "10 / 100");
   assert.equal(session.skillLabel, "describe");
+  assert.equal(session.lastActivityAt, "raw-time");
   assert.equal(session.attachedLabel, "2");
   assert.equal(session.commitCandidate, true);
   assert.deepEqual(session.operatorPressure, { reason_kind: "awaiting_user", score: 91 });
@@ -176,6 +178,51 @@ test("surfaceSession falls back honestly for unmapped remote cwd", () => {
   assert.equal(session.repoKey, "/srv/skillbox/repos/swimmers");
 });
 
+test("buildAttentionInbox keeps healthy actionable sessions ahead of degraded remote sessions", () => {
+  const healthy = surfaceSession(rawSession({
+    session_id: "healthy",
+    tmux_name: "healthy",
+    state: "attention",
+    is_stale: false,
+    transport_health: "healthy",
+    last_activity_at: "2026-06-05T00:00:00Z",
+  }), {
+    operatorPressure: {
+      pressure: { score: 45, reason_kind: "needs_input" },
+    },
+  });
+  const degradedRemote = surfaceSession(rawSession({
+    session_id: "skillbox::remote",
+    tmux_name: "remote",
+    state: "attention",
+    is_stale: true,
+    transport_health: "degraded",
+    last_activity_at: "2026-06-05T00:10:00Z",
+    environment: {
+      scope: "remote",
+      target_id: "skillbox",
+      target_label: "Skillbox devbox",
+      target_kind: "swimmers_api",
+      display_host: "Skillbox devbox",
+      canonical_cwd: "/Users/b/repos/opensource/swimmers",
+    },
+  }), {
+    operatorPressure: {
+      pressure: { score: 99, reason_kind: "awaiting_user" },
+    },
+  });
+  const quiet = surfaceSession(rawSession({
+    session_id: "quiet",
+    state: "busy",
+    action_cues: [],
+    commit_candidate: false,
+  }));
+
+  const inbox = buildAttentionInbox([degradedRemote, quiet, healthy]);
+
+  assert.deepEqual(inbox.map((session) => session.sessionId), ["healthy", "skillbox::remote"]);
+});
+
 test("buildSurfaceModel preserves selected/current session, terminal, reader, and HUD fields", () => {
   const selected = rawSession({ thought: `${"selected ".repeat(16)}done` });
   const state = baseState({
@@ -220,6 +267,15 @@ test("buildSurfaceModel preserves selected/current session, terminal, reader, an
   assert.equal(model.publishedSessionId, "sess-2");
   assert.equal(model.publishedAtLabel, "published-raw");
   assert.equal(model.sessions.length, 2);
+  assert.equal(model.attentionInboxCount, 2);
+  assert.deepEqual(
+    model.attentionInbox.map((session) => session.sessionId),
+    ["sess-1", "sess-2"],
+  );
+  assert.equal(
+    model.attentionInboxCount,
+    model.filteredFleetLens.buckets.find((bucket) => bucket.kind === "readiness" && bucket.key === "needs_attention")?.count,
+  );
   assert.equal(model.sessions[0].operatorPressure.reason_kind, "commit_ready");
   assert.equal(model.sessions[1].trogdorBurnt, true);
   assert.equal(model.currentSession.sessionId, "sess-1");
@@ -270,6 +326,8 @@ test("buildSurfaceModel applies fleet lens filters without losing bucket counts"
   assert.equal(model.allSessionCount, 2);
   assert.equal(model.sessions.length, 1);
   assert.equal(model.sessions[0].sessionId, "remote");
+  assert.equal(model.attentionInboxCount, 1);
+  assert.equal(model.attentionInbox[0].sessionId, "remote");
   assert.equal(model.fleetLens.total_sessions, 2);
   assert.equal(
     model.fleetLens.buckets.find((bucket) => bucket.kind === "repo")?.count,

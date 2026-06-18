@@ -102,7 +102,7 @@ fn insert_bucket(
     }
 }
 
-fn target_key(session: &SessionSummary) -> String {
+pub(crate) fn target_key(session: &SessionSummary) -> String {
     let environment = &session.environment;
     if environment.scope == SessionEnvironmentScope::Remote {
         return first_non_empty(&[
@@ -116,7 +116,7 @@ fn target_key(session: &SessionSummary) -> String {
     "local".to_string()
 }
 
-fn target_label(session: &SessionSummary) -> String {
+pub(crate) fn target_label(session: &SessionSummary) -> String {
     let environment = &session.environment;
     if environment.scope == SessionEnvironmentScope::Remote {
         return first_non_empty(&[
@@ -192,7 +192,7 @@ fn session_is_degraded(session: &SessionSummary) -> bool {
     session.is_stale || session.transport_health != TransportHealth::Healthy
 }
 
-fn session_needs_attention(session: &SessionSummary) -> bool {
+pub(crate) fn session_needs_attention(session: &SessionSummary) -> bool {
     session.state == SessionState::Attention
         || session.commit_candidate
         || session.action_cues.iter().any(|cue| {

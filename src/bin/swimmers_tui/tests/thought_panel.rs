@@ -778,6 +778,57 @@ fn thought_panel_show_all_toggle_restores_working_agents() {
 }
 
 #[test]
+fn thought_panel_header_summarizes_cross_host_inbox() {
+    let api = MockApi::new();
+    let layout = test_layout(120, 32);
+    let mut app = App::new(test_runtime(), api);
+
+    let local = session_summary_with_thought(
+        "sess-local",
+        "7",
+        TEST_REPO_SWIMMERS,
+        "local is working",
+        "2026-03-08T14:00:05Z",
+    );
+    let mut remote = session_summary_with_thought(
+        &remote_sessions::namespace_session_id("skillbox", "sess-remote"),
+        "9",
+        "/srv/skillbox/repos/swimmers",
+        "remote needs review",
+        "2026-03-08T14:00:06Z",
+    );
+    remote.state = SessionState::Attention;
+    remote.environment = swimmers::types::SessionEnvironmentSummary::remote(
+        &LaunchTargetSummary {
+            id: "skillbox".to_string(),
+            label: "Skillbox devbox".to_string(),
+            kind: "swimmers_api".to_string(),
+            base_url: None,
+            auth_token_env: None,
+            path_mappings: Vec::new(),
+        },
+        "sess-remote",
+        "/srv/skillbox/repos/swimmers".to_string(),
+        Some(TEST_REPO_SWIMMERS.to_string()),
+        "remote_swimmers_api",
+    );
+
+    app.capture_thought_updates(
+        &[local.clone(), remote.clone()],
+        layout.thought_entry_capacity(),
+    );
+    app.entities = vec![
+        SessionEntity::new(local, layout.overview_field),
+        SessionEntity::new(remote, layout.overview_field),
+    ];
+
+    assert_eq!(
+        thought_panel_header(&app),
+        "clawgs / pwd / asleep · 0/2 asleep · > all · fleet 2 hosts / 1 project · inbox 1"
+    );
+}
+
+#[test]
 fn clicking_thought_launch_badge_opens_composer_for_selected_launch_target() {
     let api = MockApi::new();
     let layout = test_layout(120, 32);

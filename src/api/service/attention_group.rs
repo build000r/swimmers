@@ -11,7 +11,7 @@ use crate::operator_pressure::session_ready_for_operator_group_input;
 use crate::session_labels::session_repo_family_key;
 use crate::types::{
     GhosttyOpenMode, NativeAttentionGroupOpenRequest, NativeAttentionGroupOpenResponse,
-    NativeDesktopApp, SessionSummary,
+    NativeDesktopApp, SessionEnvironmentScope, SessionSummary,
 };
 
 const NATIVE_ATTENTION_GROUP_SESSION_ID: &str = "attention-group";
@@ -257,6 +257,7 @@ fn attention_backlog_sessions(
 fn attention_group_session_is_eligible(session: &SessionSummary) -> bool {
     session.session_id != NATIVE_ATTENTION_GROUP_SESSION_ID
         && session.tmux_name != NATIVE_ATTENTION_GROUP_TMUX_NAME
+        && session.environment.scope != SessionEnvironmentScope::Remote
         && remote_sessions::split_remote_session_id(&session.session_id).is_none()
         && session_ready_for_operator_group_input(session)
 }
@@ -727,7 +728,7 @@ mod tests {
     }
 
     #[test]
-    fn attention_group_treats_mapped_remote_cwd_as_same_repo() {
+    fn attention_adjacency_treats_mapped_remote_cwd_as_same_repo() {
         let local = numbered_waiting_session(
             "local-swimmers",
             "61",
@@ -753,9 +754,44 @@ mod tests {
         let unrelated =
             numbered_waiting_session("newer-unrelated", "63", "/Users/b/repos/buildooor", 1);
 
-        let selected = plan_ids(vec![unrelated, local, remote], 2, &[]);
+        let local = AttentionCandidate::from(local);
+        let remote = AttentionCandidate::from(remote);
+        let unrelated = AttentionCandidate::from(unrelated);
 
-        assert_eq!(selected, vec!["remote-swimmers", "local-swimmers"]);
+        assert!(
+            attention_adjacency_score(&local, &remote)
+                > attention_adjacency_score(&local, &unrelated)
+        );
+    }
+
+    #[test]
+    fn attention_queue_excludes_remote_environment_sessions_without_namespaced_ids() {
+        let local = numbered_waiting_session(
+            "local-swimmers",
+            "61",
+            "/Users/b/repos/opensource/swimmers",
+            20,
+        );
+        let mut remote =
+            numbered_waiting_session("remote-swimmers", "62", "/srv/skillbox/repos/swimmers", 10);
+        remote.environment = SessionEnvironmentSummary::remote(
+            &LaunchTargetSummary {
+                id: "skillbox".to_string(),
+                label: "Skillbox devbox".to_string(),
+                kind: "swimmers_api".to_string(),
+                base_url: None,
+                auth_token_env: None,
+                path_mappings: Vec::new(),
+            },
+            "remote-swimmers",
+            remote.cwd.clone(),
+            Some("/Users/b/repos/opensource/swimmers".to_string()),
+            "remote_swimmers_api",
+        );
+
+        let selected = plan_ids(vec![local, remote], 2, &[]);
+
+        assert_eq!(selected, vec!["local-swimmers"]);
     }
 
     #[test]
@@ -893,6 +929,31 @@ mod tests {
             6,
             &[],
         );
+
+        assert_eq!(selected, vec!["ready"]);
+    }
+
+    #[test]
+    fn attention_queue_excludes_remote_namespaced_sessions() {
+        let ready = numbered_waiting_session("ready", "61", "/Users/b/repos/swimmers", 1);
+        let remote_id = remote_sessions::namespace_session_id("skillbox", "remote-ready");
+        let mut remote = numbered_waiting_session(&remote_id, "62", "/Users/b/repos/swimmers", 1);
+        remote.environment = SessionEnvironmentSummary::remote(
+            &LaunchTargetSummary {
+                id: "skillbox".to_string(),
+                label: "Skillbox devbox".to_string(),
+                kind: "swimmers_api".to_string(),
+                base_url: None,
+                auth_token_env: None,
+                path_mappings: Vec::new(),
+            },
+            "remote-ready",
+            "/srv/skillbox/repos/swimmers".to_string(),
+            Some("/Users/b/repos/swimmers".to_string()),
+            "remote_swimmers_api",
+        );
+
+        let selected = plan_ids(vec![remote, ready], 6, &[]);
 
         assert_eq!(selected, vec!["ready"]);
     }
