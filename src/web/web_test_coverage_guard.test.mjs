@@ -39,7 +39,11 @@ test("package scripts keep web behavior tests and TypeScript guard wired", async
 });
 
 test("app behavior suite keeps migration-critical app.js coverage topics", async () => {
-  const source = await readRepoFile("src/web/app_behavior.test.mjs");
+  const source = [
+    await readRepoFile("src/web/app_behavior.test.mjs"),
+    await readRepoFile("src/web/app_interaction_behavior.test.mjs"),
+    await readRepoFile("src/web/app_workbench_behavior.test.mjs"),
+  ].join("\n");
   const requiredSnippets = [
     'await import("./app.js?behavior-test")',
     "FrankenTerm surface validation reports missing methods",
