@@ -1,7 +1,7 @@
 SHELL := /bin/bash
 .DEFAULT_GOAL := help
 
-.PHONY: help server up tailnet kill up-smoke web web-smoke web-workbench-smoke tui tui-check tui-smoke tui-stress glance-smoke remote-auth-smoke release-acceptance release-acceptance-default release-acceptance-source release-acceptance-native release-acceptance-thought release-acceptance-voice release-acceptance-all ci-perf-gates cargo-cov-lcov
+.PHONY: help server up tailnet kill up-smoke web web-smoke web-workbench-smoke tui tui-check tui-smoke tui-stress glance-smoke remote-auth-smoke multi-env-smoke release-acceptance release-acceptance-default release-acceptance-source release-acceptance-native release-acceptance-thought release-acceptance-voice release-acceptance-all ci-perf-gates cargo-cov-lcov
 
 help:
 	@printf '%s\n' \
@@ -21,6 +21,7 @@ help:
 	'  make tui-stress             Concurrent-load regression smoke for /v1/dirs + POST /v1/sessions' \
 	'  make glance-smoke           Render the 10-session Glance fixture and write proof artifacts' \
 	'  make remote-auth-smoke      Verify fake remote API launch/read auth and redaction paths' \
+	'  make multi-env-smoke        Verify configured local+remote cockpit fixture contracts' \
 	'  make release-acceptance     Verify default installed-binary release smoke' \
 	'  make release-acceptance-all Run default, source, native asset, and thought profiles' \
 	'  make release-acceptance-voice Run optional voice-feature acceptance profile' \
@@ -69,6 +70,9 @@ glance-smoke:
 
 remote-auth-smoke:
 	bash ./scripts/test-remote-auth-smoke.sh
+
+multi-env-smoke:
+	bash ./scripts/test-multi-env-cockpit.sh
 
 release-acceptance: release-acceptance-default
 

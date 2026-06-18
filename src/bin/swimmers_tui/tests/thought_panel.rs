@@ -678,6 +678,7 @@ fn thought_panel_defaults_to_stopped_only_and_counts_sleeping_agents() {
         .thought_content
         .expect("wide layout enables thought rail");
     let mut app = make_app(api);
+    app.thought_show_all = false;
 
     let working = session_summary_with_thought(
         "sess-working",
@@ -732,6 +733,7 @@ fn thought_panel_show_all_toggle_restores_working_agents() {
         .thought_content
         .expect("wide layout enables thought rail");
     let mut app = make_app(api);
+    app.thought_show_all = false;
 
     let working = session_summary_with_thought(
         "sess-working",

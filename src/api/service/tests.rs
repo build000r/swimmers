@@ -104,6 +104,11 @@ fn default_launch_target_for_uses_mapping_only_without_explicit_default() {
 
 #[tokio::test]
 async fn list_managed_service_entries_dedupes_dirs_skips_missing_and_keeps_metadata() {
+    let _lock = crate::test_support::ENV_LOCK
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
+    crate::host_actions::clear_inspect_git_repo_cache_for_tests();
+
     let dir = tempfile::tempdir().expect("tempdir");
     let base = dir.path().join("repos");
     let alpha = base.join("alpha");

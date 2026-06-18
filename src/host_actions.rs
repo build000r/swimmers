@@ -425,6 +425,15 @@ pub fn invalidate_inspect_git_repo(path: &Path) {
     }
 }
 
+#[cfg(test)]
+pub fn clear_inspect_git_repo_cache_for_tests() {
+    if let Some(cache) = INSPECT_GIT_REPO_CACHE.get() {
+        if let Ok(mut guard) = cache.lock() {
+            guard.clear();
+        }
+    }
+}
+
 /// Async probe: offloads the blocking git subprocess calls to Tokio's blocking
 /// pool via `spawn_blocking`. Using `tokio::process::Command` with many
 /// concurrent children wedged the runtime on macOS (concurrent process-wait

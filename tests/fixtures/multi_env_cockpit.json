@@ -1,0 +1,145 @@
+{
+  "version": 1,
+  "fixture_id": "multi_env_cockpit",
+  "source_backing": [
+    "docs/VISION.md Strategic Non-Goals",
+    "docs/reports/2026-06-18-multi-env-duel/DUELING_WIZARDS_MULTI_ENV_REPORT.md",
+    "src/api/remote_sessions.rs configured swimmers_api targets",
+    "src/api/sessions/group_input.rs same-target remote write guardrails",
+    "src/bin/swimmers_tui/picker/tests.rs remote launch preview tests",
+    "src/web/surface_model.test.mjs fleet lens and grouping tests"
+  ],
+  "scope": {
+    "truth_source": "one local swimmers API plus overlay-declared remote targets with kind=swimmers_api",
+    "not_supported": [
+      "arbitrary SSH fleet discovery",
+      "cluster scheduling",
+      "FrankenTerm as the orchestration source of truth",
+      "cross-host tmux session merging"
+    ]
+  },
+  "targets": [
+    {
+      "id": "local",
+      "kind": "local",
+      "host_label": "operator-mac",
+      "backend_mode": "embedded_or_loopback",
+      "auth": "local_trust",
+      "path_mappings": [
+        {
+          "local": "/home/operator/repos/opensource",
+          "remote": "/home/operator/repos/opensource"
+        }
+      ]
+    },
+    {
+      "id": "devbox",
+      "kind": "swimmers_api",
+      "host_label": "devbox-tailnet",
+      "backend_mode": "remote_api",
+      "base_url": "http://devbox.tailnet.example:3210",
+      "auth": "tailnet_trust_or_token_env",
+      "credential_rule": "tokens must come from auth_token_env and must not appear in base_url, logs, docs, or UI labels",
+      "path_mappings": [
+        {
+          "local": "/home/operator/repos/opensource",
+          "remote": "/srv/devbox/repos/opensource"
+        },
+        {
+          "local": "/home/operator/repos",
+          "remote": "/srv/devbox/repos"
+        }
+      ]
+    }
+  ],
+  "cwd_cases": [
+    {
+      "id": "local_mapped_repo",
+      "target_id": "local",
+      "local_cwd": "/home/operator/repos/opensource/swimmers",
+      "remote_cwd": "/home/operator/repos/opensource/swimmers",
+      "canonical_repo": "swimmers",
+      "mapping_status": "local"
+    },
+    {
+      "id": "remote_mapped_repo",
+      "target_id": "devbox",
+      "local_cwd": "/home/operator/repos/opensource/swimmers",
+      "remote_cwd": "/srv/devbox/repos/opensource/swimmers",
+      "canonical_repo": "swimmers",
+      "mapping_status": "mapped",
+      "expected_launch_preview": "remote launch is allowed and created sessions are namespaced as devbox::session_id"
+    },
+    {
+      "id": "remote_unmapped_scratch",
+      "target_id": "devbox",
+      "local_cwd": "/home/operator/tmp/scratch",
+      "remote_cwd": null,
+      "canonical_repo": null,
+      "mapping_status": "unmapped",
+      "expected_launch_preview": "remote launch is blocked with stable path-mapping guidance"
+    },
+    {
+      "id": "remote_degraded_cached",
+      "target_id": "devbox",
+      "local_cwd": "/home/operator/repos/opensource/swimmers",
+      "remote_cwd": "/srv/devbox/repos/opensource/swimmers",
+      "canonical_repo": "swimmers",
+      "mapping_status": "mapped",
+      "health_status": "degraded_cached",
+      "expected_attention_behavior": "remote stale sessions can appear in the cross-host inbox but are demoted below fresh local attention work"
+    }
+  ],
+  "session_cases": [
+    {
+      "id": "local_waiting",
+      "target_id": "local",
+      "session_id": "sess_local_waiting",
+      "namespaced_session_id": "sess_local_waiting",
+      "cwd": "/home/operator/repos/opensource/swimmers",
+      "state": "waiting",
+      "expected_group": "operator-mac / swimmers / /home/operator/repos/opensource/swimmers"
+    },
+    {
+      "id": "remote_waiting",
+      "target_id": "devbox",
+      "session_id": "sess_remote_waiting",
+      "namespaced_session_id": "devbox::sess_remote_waiting",
+      "cwd": "/srv/devbox/repos/opensource/swimmers",
+      "mapped_local_cwd": "/home/operator/repos/opensource/swimmers",
+      "state": "waiting",
+      "expected_group": "devbox-tailnet / swimmers / /srv/devbox/repos/opensource/swimmers"
+    },
+    {
+      "id": "remote_running_advisory",
+      "target_id": "devbox",
+      "session_id": "sess_remote_running",
+      "namespaced_session_id": "devbox::sess_remote_running",
+      "cwd": "/srv/devbox/repos/opensource/swimmers",
+      "state": "busy",
+      "advisory_metadata": [
+        {
+          "source": "c0",
+          "label": "group",
+          "value": "once-by-pwd",
+          "status": "external",
+          "stale": true
+        }
+      ]
+    }
+  ],
+  "proof_commands": {
+    "fixture_manifest": "python3 -m json.tool tests/fixtures/multi_env_cockpit.json >/dev/null",
+    "environment_inventory": "cargo test --lib api::remote_sessions::tests::environment_summary_redacts_token_values_and_credentialed_base_url -- --test-threads=1",
+    "health_doctor": "cargo test --lib api::remote_sessions::tests::remote_targets_health_reports_auth_and_mapping_doctor_without_env_names -- --test-threads=1",
+    "remote_first_launch_preview": "cargo test --bin swimmers-tui launch_target_preview_uses_longest_mapping_and_blocks_unmapped_remote_cwds -- --test-threads=1",
+    "remote_write_proxy": "cargo test --lib api::remote_sessions::tests::send_remote_input_posts_denamespaced_session_and_namespaces_response -- --test-threads=1",
+    "remote_group_write_proxy": "cargo test --lib api::remote_sessions::tests::send_remote_group_input_denamespaces_request_and_namespaces_results -- --test-threads=1",
+    "same_target_guardrail": "cargo test --lib api::sessions::group_input::tests::remote_group_input_target_rejects_mixed_remote_targets -- --test-threads=1",
+    "fleet_lens": "node --test src/web/surface_model.test.mjs",
+    "grouped_display": "node --test src/web/rendered_surface.test.mjs",
+    "attention_inbox": "cargo test --bin swimmers-tui thought_panel_header_summarizes_cross_host_inbox -- --test-threads=1",
+    "advisory_metadata": "cargo test --bin swimmers-tui thought_panel_marks_advisory_metadata_as_external_and_stale -- --test-threads=1"
+  },
+  "one_command_smoke": "make multi-env-smoke"
+}

@@ -167,6 +167,14 @@ points the entire TUI at one backend, while launch targets let one local TUI
 spawn selected directory/list runs onto another configured machine and keep
 those sessions visible in the local aquarium.
 
+For the multi-environment cockpit proof lane, see
+[`docs/MULTI_ENV_COCKPIT_PROOF.md`](docs/MULTI_ENV_COCKPIT_PROOF.md) and run
+`make multi-env-smoke`. That lane covers configured local plus
+overlay-declared `swimmers_api` targets, path mappings, remote write proxy
+guardrails, display grouping, fleet filters, attention inbox behavior, and
+advisory badges. It does not claim arbitrary SSH fleet control or make
+FrankenTerm the orchestration source of truth.
+
 ---
 
 ## Bind Address and Network Access
