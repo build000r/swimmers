@@ -5,6 +5,9 @@ import {
   createNativeDesktopSheetController,
   currentNativeModeLabel,
   formatNativeStatus,
+  formatNativeStatusCopy,
+  remoteNativeHandoffAvailable,
+  remoteNativeHandoffMessage,
 } from "./native_desktop_sheet.js";
 
 function classes() {
@@ -33,6 +36,7 @@ function element(value = "") {
 
 function fixture(overrides = {}) {
   const state = {
+    environments: overrides.environments ?? [],
     nativeDesktop: {
       loading: false,
       status: null,
@@ -90,6 +94,44 @@ test("status formatting and current mode label preserve native copy", () => {
   assert.equal(currentNativeModeLabel({ status: { ghosttyMode: "Tab" } }), "tab");
 });
 
+test("remote handoff copy uses non-secret session environment metadata", () => {
+  const session = {
+    session_id: "skillbox::sess_7",
+    tmux_name: "[Skillbox] 7",
+    cwd: "/Users/b/repos/swimmers",
+    environment: {
+      scope: "remote",
+      target_id: "skillbox",
+      target_label: "Skillbox devbox",
+      display_host: "Skillbox devbox",
+      launch_source: "remote_swimmers_api",
+      remote_session_id: "sess_7",
+      remote_cwd: "/srv/skillbox/repos/swimmers",
+    },
+  };
+  const environments = [{
+    id: "skillbox",
+    backend_mode: "remote_swimmers_api",
+  }];
+
+  assert.equal(remoteNativeHandoffAvailable(session), true);
+  assert.equal(remoteNativeHandoffAvailable({ session_id: "local" }), false);
+  assert.equal(
+    remoteNativeHandoffMessage(session, environments),
+    [
+      "Remote handoff: local native open cannot open this remote terminal.",
+      "Open Swimmers on Skillbox devbox (skillbox) to attach.",
+      "backend: remote Swimmers API",
+      "remote session: sess_7",
+      "remote cwd: /srv/skillbox/repos/swimmers",
+    ].join("\n"),
+  );
+  assert.equal(
+    formatNativeStatusCopy({ supported: true, app: "ghostty" }, session, environments),
+    remoteNativeHandoffMessage(session, environments),
+  );
+});
+
 test("renderNativeStatusForm writes status, form fields, copy, diagnostics, and availability", () => {
   const { calls, controller, el, state } = fixture();
 
@@ -120,6 +162,33 @@ test("renderNativeStatusForm writes status, form fields, copy, diagnostics, and 
   assert.equal(el.nativeMode.value, "swap");
   assert.equal(el.nativeMode.disabled, true);
   assert.equal(el.nativeStatusCopy.textContent, "Native open unavailable: unsupported host");
+});
+
+test("renderNativeStatusForm surfaces remote backend handoff in status copy", () => {
+  const { controller, el } = fixture({
+    environments: [{ id: "skillbox", backend_mode: "remote_swimmers_api" }],
+    session: {
+      session_id: "skillbox::sess_7",
+      environment: {
+        scope: "remote",
+        target_id: "skillbox",
+        target_label: "Skillbox devbox",
+        remote_session_id: "sess_7",
+        remote_cwd: "/srv/repos/swimmers",
+      },
+    },
+  });
+
+  controller.renderNativeStatusForm({
+    supported: false,
+    reason: "unsupported host",
+    app_id: "iterm",
+  });
+
+  assert.match(el.nativeStatusCopy.textContent, /local native open cannot open this remote terminal/);
+  assert.match(el.nativeStatusCopy.textContent, /backend: remote Swimmers API/);
+  assert.match(el.nativeStatusCopy.textContent, /Skillbox devbox/);
+  assert.match(el.nativeStatusCopy.textContent, /sess_7/);
 });
 
 test("refreshNativeStatus loads status, replaces diagnostics with summary, and clears loading", async () => {
@@ -219,6 +288,36 @@ test("openSelectedNativeSession posts the selected session id and reports pane d
   assert.deepEqual(JSON.parse(calls.fetches[0][1].body), { session_id: "sess_7" });
   assert.equal(state.nativeDesktop.result, "Opened sess_7 in native app (%42).");
   assert.equal(el.nativeStatusResult.textContent, "Opened sess_7 in native app (%42).");
+  assert.equal(calls.sync, 1);
+});
+
+test("openSelectedNativeSession shows remote handoff instead of posting local native open", async () => {
+  const { calls, controller, el, state } = fixture({
+    environments: [{ id: "skillbox", backend_mode: "remote_swimmers_api" }],
+    session: {
+      session_id: "skillbox::sess_7",
+      tmux_name: "[Skillbox] 7",
+      environment: {
+        scope: "remote",
+        target_id: "skillbox",
+        target_label: "Skillbox devbox",
+        display_host: "Skillbox devbox",
+        launch_source: "remote_swimmers_api",
+        remote_session_id: "sess_7",
+        remote_cwd: "/srv/skillbox/repos/swimmers",
+      },
+    },
+  });
+
+  await controller.openSelectedNativeSession();
+
+  assert.equal(calls.fetches.length, 0);
+  assert.match(state.nativeDesktop.error, /local native open cannot open this remote terminal/);
+  assert.match(state.nativeDesktop.error, /backend: remote Swimmers API/);
+  assert.match(state.nativeDesktop.error, /Skillbox devbox \(skillbox\)/);
+  assert.match(state.nativeDesktop.error, /remote session: sess_7/);
+  assert.match(state.nativeDesktop.error, /remote cwd: \/srv\/skillbox\/repos\/swimmers/);
+  assert.equal(el.nativeStatusResult.classList.contains("error"), true);
   assert.equal(calls.sync, 1);
 });
 

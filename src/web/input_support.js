@@ -1052,6 +1052,7 @@ export function inputAckActionPlan(message = {}) {
 export function sheetActionAvailabilityPlan(context = {}) {
   const writeDisabled = Boolean(context.writeDisabled);
   const hasSession = Boolean(context.hasSession);
+  const nativeHandoffAvailable = Boolean(context.nativeHandoffAvailable);
   return {
     createButtonDisabled: writeDisabled || Boolean(context.singleBlocked) || (!context.batchReady && !context.hasSinglePath),
     createBatchSubmitDisabled: writeDisabled || !context.batchReady || Boolean(context.batchBlocked),
@@ -1060,7 +1061,7 @@ export function sheetActionAvailabilityPlan(context = {}) {
     thoughtConfigTestDisabled: writeDisabled || !context.hasThoughtConfig,
     thoughtConfigSaveDisabled: writeDisabled || !context.hasThoughtConfig,
     nativeSaveDisabled: writeDisabled || !context.hasNativeStatus,
-    nativeOpenDisabled: writeDisabled || !hasSession || !context.nativeSupported,
+    nativeOpenDisabled: writeDisabled || !hasSession || (!context.nativeSupported && !nativeHandoffAvailable),
     nativeRefreshDisabled: false,
     mermaidOpenDisabled: writeDisabled || !hasSession || !context.hasMermaidPath,
     mermaidRefreshDisabled: !hasSession,

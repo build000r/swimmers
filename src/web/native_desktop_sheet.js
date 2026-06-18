@@ -16,6 +16,77 @@ export function formatNativeStatus(status) {
   return `Native open ready: ${app}${mode}`;
 }
 
+function nonEmptyString(...values) {
+  for (const value of values) {
+    const text = String(value ?? "").trim();
+    if (text) {
+      return text;
+    }
+  }
+  return "";
+}
+
+function sessionEnvironment(session) {
+  return session && typeof session.environment === "object" && session.environment
+    ? session.environment
+    : {};
+}
+
+function environmentSummaryForSession(session, environments = []) {
+  const targetId = nonEmptyString(sessionEnvironment(session).target_id);
+  if (!targetId || !Array.isArray(environments)) {
+    return null;
+  }
+  return environments.find((environment) => String(environment?.id || "") === targetId) ?? null;
+}
+
+function backendModeLabel(value) {
+  const text = nonEmptyString(value, "remote");
+  if (text === "remote_swimmers_api") {
+    return "remote Swimmers API";
+  }
+  return text.replace(/[_-]+/g, " ");
+}
+
+export function remoteNativeHandoffAvailable(session) {
+  return String(sessionEnvironment(session).scope || "local").toLowerCase() === "remote";
+}
+
+export function remoteNativeHandoffMessage(session, environments = []) {
+  if (!remoteNativeHandoffAvailable(session)) {
+    return "";
+  }
+  const environment = sessionEnvironment(session);
+  const summary = environmentSummaryForSession(session, environments);
+  const targetLabel = nonEmptyString(
+    environment.display_host,
+    environment.target_label,
+    environment.target_id,
+    "remote target",
+  );
+  const targetId = nonEmptyString(environment.target_id);
+  const mode = backendModeLabel(nonEmptyString(summary?.backend_mode, environment.launch_source, "remote"));
+  const remoteSessionId = nonEmptyString(
+    environment.remote_session_id,
+    session?.session_id,
+    session?.tmux_name,
+    "selected session",
+  );
+  const cwd = nonEmptyString(environment.remote_cwd, environment.canonical_cwd, session?.cwd);
+  const targetSuffix = targetId && targetId !== targetLabel ? ` (${targetId})` : "";
+  return [
+    `Remote handoff: local native open cannot open this remote terminal.`,
+    `Open Swimmers on ${targetLabel}${targetSuffix} to attach.`,
+    `backend: ${mode}`,
+    `remote session: ${remoteSessionId}`,
+    cwd ? `remote cwd: ${cwd}` : null,
+  ].filter(Boolean).join("\n");
+}
+
+export function formatNativeStatusCopy(status, session = null, environments = []) {
+  return remoteNativeHandoffMessage(session, environments) || formatNativeStatus(status);
+}
+
 export function currentNativeModeLabel(nativeDesktopState = {}) {
   const mode = nativeDesktopState.status?.ghostty_mode || nativeDesktopState.status?.ghosttyMode;
   if (!mode) {
@@ -49,7 +120,7 @@ export function createNativeDesktopSheetController(runtime = {}) {
     el.nativeApp.value = String(status?.app_id || status?.app || "iterm").toLowerCase();
     el.nativeMode.value = String(status?.ghostty_mode || "swap").toLowerCase();
     el.nativeMode.disabled = String(el.nativeApp.value) !== "ghostty";
-    el.nativeStatusCopy.textContent = formatNativeStatus(status);
+    el.nativeStatusCopy.textContent = formatNativeStatusCopy(status, currentSession(), state.environments);
     const lines = [
       `supported: ${Boolean(status?.supported)}`,
       status?.platform ? `platform: ${status.platform}` : null,
@@ -114,6 +185,12 @@ export function createNativeDesktopSheetController(runtime = {}) {
   async function openSelectedNativeSession() {
     const session = currentSession();
     if (!session) {
+      return;
+    }
+    const handoff = remoteNativeHandoffMessage(session, state.environments);
+    if (handoff) {
+      setNativeResult(handoff, true);
+      syncSheetActionAvailability();
       return;
     }
 

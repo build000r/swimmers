@@ -17,6 +17,7 @@ import {
 } from "./thought_config_sheet.js";
 import {
   createNativeDesktopSheetController,
+  remoteNativeHandoffAvailable,
 } from "./native_desktop_sheet.js";
 import {
   createTerminalSurfaceIsland,
@@ -156,6 +157,7 @@ const FRANKENTERM_TERMINAL_METHODS = [
 const state = {
   token: "",
   sessions: [],
+  environments: [],
   operatorPressureBySession: new Map(),
   selectedSessionId: null,
   publishedSelection: null,
@@ -1113,6 +1115,7 @@ function syncSheetActionAvailability() {
     hasBrowserPath: Boolean((state.dirBrowser.path || dirsPath || "").trim()),
     hasThoughtConfig: Boolean(state.thoughtConfig.config), hasNativeStatus: Boolean(state.nativeDesktop.status),
     nativeSupported: Boolean(state.nativeDesktop.status?.supported), hasMermaidPath: Boolean(state.mermaidArtifact.artifact?.path),
+    nativeHandoffAvailable: remoteNativeHandoffAvailable(currentSession()),
     hasDirsPath: Boolean(dirsPath), hasParentDir: Boolean(parentDir(dirsPath)),
     sendTargetType: state.sendTarget?.type, sendTargetReady: sendTargetReady(),
   });

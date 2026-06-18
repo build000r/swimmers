@@ -800,6 +800,50 @@ fn clicking_existing_swimmer_still_opens_it_directly() {
 }
 
 #[test]
+fn clicking_remote_swimmer_shows_handoff_without_native_open() {
+    let api = MockApi::new();
+    let field = test_field();
+    let mut session = session_summary("skillbox::sess-7", "[Skillbox devbox] dev", TEST_REPO_DEV);
+    let target = LaunchTargetSummary {
+        id: "skillbox".to_string(),
+        label: "Skillbox devbox".to_string(),
+        kind: "swimmers_api".to_string(),
+        base_url: Some("http://100.64.1.2:3210/?token=secret".to_string()),
+        auth_token_env: Some("SWIMMERS_TOKEN".to_string()),
+        path_mappings: Vec::new(),
+    };
+    session.environment = swimmers::types::SessionEnvironmentSummary::remote(
+        &target,
+        "sess-7",
+        "/srv/skillbox/repos/dev",
+        Some(TEST_REPO_DEV.to_string()),
+        "remote_swimmers_api",
+    );
+    let mut entity = SessionEntity::new(session, field);
+    entity.set_relative_position(29, 5);
+    let mut app = make_app(api.clone());
+    app.sprite_theme_override = Some(SpriteTheme::Jelly);
+    app.entities.push(entity);
+
+    app.handle_field_click(30, 8, field);
+
+    assert!(app.pending_interaction.is_none());
+    assert_eq!(app.selected_id.as_deref(), Some("skillbox::sess-7"));
+    assert!(api.open_calls().is_empty());
+    let message = app
+        .message
+        .as_ref()
+        .map(|(message, _)| message.as_str())
+        .expect("handoff message");
+    assert_eq!(
+        message,
+        "remote handoff: local native open cannot open this remote terminal; open Swimmers on Skillbox devbox (skillbox) for sess-7 @ /srv/skillbox/repos/dev via remote Swimmers API"
+    );
+    assert!(!message.contains("secret"));
+    assert!(!message.contains("SWIMMERS_TOKEN"));
+}
+
+#[test]
 fn clicking_existing_swimmer_ignores_second_click_while_open_is_pending() {
     let api = MockApi::new();
     api.push_open_session(Ok(NativeDesktopOpenResponse {

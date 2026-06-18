@@ -119,6 +119,7 @@
   color: var(--muted);
   font-size: 0.84rem;
   line-height: 1.5;
+  white-space: pre-line;
 }
 
 .sheet-form {

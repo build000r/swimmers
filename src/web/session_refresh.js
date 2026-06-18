@@ -122,6 +122,7 @@ export async function runSessionRefresh(runtime) {
     const pressurePayload = await runtime.responseJsonOrNull(pressureResponse);
     const healthPayload = await runtime.responseJsonOrNull(healthResponse);
     runtime.state.sessions = Array.isArray(payload.sessions) ? payload.sessions : [];
+    runtime.state.environments = Array.isArray(payload.environments) ? payload.environments : [];
     runtime.state.fleetLens = payload.fleet_lens || null;
     runtime.applyOperatorPressure(pressurePayload);
     runtime.applyBackendHealth(healthPayload);
@@ -175,6 +176,7 @@ async function runSessionRefreshSuccessSideEffects(runtime) {
 
 function applySessionRefreshError(error, runtime) {
   runtime.state.sessions = [];
+  runtime.state.environments = [];
   runtime.state.fleetLens = null;
   runtime.state.operatorPressureBySession = new Map();
   runtime.state.backendHealth = null;

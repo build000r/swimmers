@@ -1,4 +1,5 @@
 use super::*;
+use swimmers::types::SessionEnvironmentScope;
 
 const EDITOR_COMMAND: &str = "code";
 const EDITOR_ARG: &str = ".";
@@ -104,6 +105,62 @@ fn attention_group_attach_suffix(
 
 fn prepend_attention_attach_command(command: &str) -> String {
     format!(" | {command}")
+}
+
+pub(super) fn remote_native_handoff_message(session: &SessionSummary) -> Option<String> {
+    if session.environment.scope != SessionEnvironmentScope::Remote {
+        return None;
+    }
+
+    let target = first_non_empty([
+        Some(session.environment.display_host.as_str()),
+        Some(session.environment.target_label.as_str()),
+        Some(session.environment.target_id.as_str()),
+    ])
+    .unwrap_or("remote target");
+    let mode = backend_mode_label(first_non_empty([session
+        .environment
+        .launch_source
+        .as_deref()]));
+    let remote_session_id = first_non_empty([
+        session.environment.remote_session_id.as_deref(),
+        Some(session.session_id.as_str()),
+        Some(session.tmux_name.as_str()),
+    ])
+    .unwrap_or("selected session");
+    let cwd = first_non_empty([
+        session.environment.remote_cwd.as_deref(),
+        session.environment.canonical_cwd.as_deref(),
+        Some(session.cwd.as_str()),
+    ]);
+    let target_suffix = if session.environment.target_id.trim().is_empty()
+        || session.environment.target_id == target
+    {
+        String::new()
+    } else {
+        format!(" ({})", session.environment.target_id)
+    };
+    let cwd_suffix = cwd.map(|cwd| format!(" @ {cwd}")).unwrap_or_default();
+
+    Some(format!(
+        "remote handoff: local native open cannot open this remote terminal; open Swimmers on {target}{target_suffix} for {remote_session_id}{cwd_suffix} via {mode}"
+    ))
+}
+
+fn first_non_empty<'a, const N: usize>(values: [Option<&'a str>; N]) -> Option<&'a str> {
+    values
+        .into_iter()
+        .flatten()
+        .map(str::trim)
+        .find(|value| !value.is_empty())
+}
+
+fn backend_mode_label(value: Option<&str>) -> String {
+    match value.unwrap_or("remote").trim() {
+        "remote_swimmers_api" => "remote Swimmers API".to_string(),
+        "" => "remote".to_string(),
+        other => other.replace(['_', '-'], " "),
+    }
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -270,5 +327,61 @@ mod tests {
             editor_spawn_message(Err(err), "code . -> swimmers".to_string()),
             "failed to run code .: missing code"
         );
+    }
+
+    #[test]
+    fn remote_native_handoff_message_describes_target_without_secret_fields() {
+        let target = LaunchTargetSummary {
+            id: "skillbox".to_string(),
+            label: "Skillbox devbox".to_string(),
+            kind: "swimmers_api".to_string(),
+            base_url: Some("http://100.64.1.2:3210/?token=secret".to_string()),
+            auth_token_env: Some("SWIMMERS_TOKEN".to_string()),
+            path_mappings: Vec::new(),
+        };
+        let mut session = SessionSummary {
+            session_id: "skillbox::sess-7".to_string(),
+            tmux_name: "[Skillbox devbox] 7".to_string(),
+            state: SessionState::Idle,
+            current_command: None,
+            state_evidence: swimmers::types::StateEvidence::new("osc133_prompt"),
+            cwd: "/Users/b/repos/swimmers".to_string(),
+            tool: None,
+            token_count: 0,
+            context_limit: 0,
+            thought: None,
+            thought_state: swimmers::types::ThoughtState::Holding,
+            thought_source: swimmers::types::ThoughtSource::CarryForward,
+            thought_updated_at: None,
+            rest_state: RestState::Drowsy,
+            commit_candidate: false,
+            action_cues: Vec::new(),
+            objective_changed_at: None,
+            last_skill: None,
+            is_stale: false,
+            attached_clients: 0,
+            stale_attached_clients: 0,
+            transport_health: TransportHealth::Healthy,
+            last_activity_at: Utc::now(),
+            repo_theme_id: None,
+            batch: None,
+            environment: Default::default(),
+        };
+        session.environment = swimmers::types::SessionEnvironmentSummary::remote(
+            &target,
+            "sess-7",
+            "/srv/skillbox/repos/swimmers",
+            Some("/Users/b/repos/swimmers".to_string()),
+            "remote_swimmers_api",
+        );
+
+        let message = remote_native_handoff_message(&session).expect("remote handoff");
+
+        assert_eq!(
+            message,
+            "remote handoff: local native open cannot open this remote terminal; open Swimmers on Skillbox devbox (skillbox) for sess-7 @ /srv/skillbox/repos/swimmers via remote Swimmers API"
+        );
+        assert!(!message.contains("secret"));
+        assert!(!message.contains("SWIMMERS_TOKEN"));
     }
 }

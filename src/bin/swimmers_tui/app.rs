@@ -1917,8 +1917,17 @@ impl<C: TuiApi> App<C> {
     }
 
     pub(crate) fn select_and_open_session(&mut self, session_id: String, label: String) {
+        let handoff_message = self
+            .entities
+            .iter()
+            .find(|entity| entity.session.session_id == session_id)
+            .and_then(|entity| native_actions::remote_native_handoff_message(&entity.session));
         self.selected_id = Some(session_id.clone());
         self.sync_selection_publication();
+        if let Some(message) = handoff_message {
+            self.set_message(message);
+            return;
+        }
         self.open_session_for_label(&session_id, &label);
     }
 

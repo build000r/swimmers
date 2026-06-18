@@ -111,7 +111,10 @@ test("runSessionRefresh preserves successful refresh ordering and status side ef
         json: async () => (
           path === "/v1/selection"
             ? { session_id: "agent-1" }
-            : { sessions: [{ session_id: "agent-1" }] }
+            : {
+                sessions: [{ session_id: "agent-1" }],
+                environments: [{ id: "skillbox", backend_mode: "remote_swimmers_api" }],
+              }
         ),
       };
     },
@@ -148,6 +151,8 @@ test("runSessionRefresh preserves successful refresh ordering and status side ef
 
   await runSessionRefresh(runtime);
 
+  assert.equal(runtime.state.environments[0].id, "skillbox");
+  assert.equal(runtime.state.environments[0].backend_mode, "remote_swimmers_api");
   assert.deepEqual(calls, [
     ["apiFetch", "/v1/sessions"],
     ["apiMaybeFetch", "/v1/operator-pressure"],
@@ -175,6 +180,7 @@ test("runSessionRefresh preserves refresh error reset behavior", async () => {
   const runtime = {
     state: {
       sessions: [{ session_id: "agent-1" }],
+      environments: [{ id: "skillbox" }],
       operatorPressureBySession: new Map([["agent-1", {}]]),
       backendHealth: {},
       publishedSelection: { session_id: "agent-1" },
@@ -195,6 +201,7 @@ test("runSessionRefresh preserves refresh error reset behavior", async () => {
   await runSessionRefresh(runtime);
 
   assert.deepEqual(runtime.state.sessions, []);
+  assert.deepEqual(runtime.state.environments, []);
   assert.equal(runtime.state.operatorPressureBySession.size, 0);
   assert.equal(runtime.state.backendHealth, null);
   assert.equal(runtime.state.publishedSelection, null);

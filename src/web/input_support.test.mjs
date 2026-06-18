@@ -1816,6 +1816,17 @@ test("sheetActionAvailabilityPlan blocks single create for unmapped remote cwd",
   assert.equal(plan.createBatchSubmitDisabled, true);
 });
 
+test("sheetActionAvailabilityPlan keeps remote handoff reachable without local native support", () => {
+  const plan = sheetActionAvailabilityPlan({
+    writeDisabled: false,
+    hasSession: true,
+    nativeSupported: false,
+    nativeHandoffAvailable: true,
+  });
+
+  assert.equal(plan.nativeOpenDisabled, false);
+});
+
 test("sheetActionAvailabilityPlan preserves read-only and missing-resource disabled state", () => {
   assert.deepEqual(sheetActionAvailabilityPlan({
     writeDisabled: true,
