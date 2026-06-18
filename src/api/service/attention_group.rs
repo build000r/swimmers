@@ -1,6 +1,5 @@
 use std::cmp::Reverse;
 use std::collections::HashSet;
-use std::path::{Component, Path};
 use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
@@ -9,6 +8,7 @@ use super::NativeOpenServiceError;
 use crate::api::{remote_sessions, AppState};
 use crate::native;
 use crate::operator_pressure::session_ready_for_operator_group_input;
+use crate::session_labels::session_repo_family_key;
 use crate::types::{
     GhosttyOpenMode, NativeAttentionGroupOpenRequest, NativeAttentionGroupOpenResponse,
     NativeDesktopApp, SessionSummary,
@@ -267,7 +267,7 @@ fn tmux_name_is_numbered(tmux_name: &str) -> bool {
 
 impl From<SessionSummary> for AttentionCandidate {
     fn from(session: SessionSummary) -> Self {
-        let repo = attention_repo_key(&session.cwd);
+        let repo = session_repo_family_key(&session);
         let family = attention_project_family(&repo);
         let batch = session.batch.as_ref().map(|batch| batch.id.clone());
         Self {
@@ -387,47 +387,6 @@ fn attention_tools_match(a: &AttentionCandidate, b: &AttentionCandidate) -> bool
     a.session.tool.is_some() && a.session.tool == b.session.tool
 }
 
-fn attention_repo_key(cwd: &str) -> String {
-    let parts = cwd_path_parts(cwd);
-    attention_repo_key_part(&parts).cloned().unwrap_or_default()
-}
-
-fn attention_repo_key_part(parts: &[String]) -> Option<&String> {
-    attention_repo_key_after_repos(parts).or_else(|| parts.last())
-}
-
-fn attention_repo_key_after_repos(parts: &[String]) -> Option<&String> {
-    parts
-        .iter()
-        .position(|part| part == "repos")
-        .and_then(|index| {
-            parts
-                .iter()
-                .skip(index + 1)
-                .find(|part| !repo_namespace_part(part))
-        })
-}
-
-fn repo_namespace_part(part: &str) -> bool {
-    matches!(
-        part,
-        "opensource" | "clients" | "personal" | "work" | "projects"
-    )
-}
-
-fn cwd_path_parts(cwd: &str) -> Vec<String> {
-    Path::new(cwd)
-        .components()
-        .filter_map(|component| match component {
-            Component::Normal(value) => value
-                .to_str()
-                .map(|value| value.trim().to_ascii_lowercase()),
-            _ => None,
-        })
-        .filter(|value| !value.is_empty())
-        .collect()
-}
-
 fn attention_project_family(repo: &str) -> String {
     let family = repo.trim().to_ascii_lowercase();
     ATTENTION_PROJECT_FAMILY_SUFFIXES
@@ -455,9 +414,9 @@ fn select_attention_group_sessions(
 mod tests {
     use super::*;
     use crate::types::{
-        NativeAttentionGroupOpenRequest, NativeAttentionGroupOpenResponse, RestState,
-        SessionBatchMembership, SessionState, SessionSummary, StateEvidence, ThoughtSource,
-        ThoughtState, TransportHealth,
+        LaunchTargetSummary, NativeAttentionGroupOpenRequest, NativeAttentionGroupOpenResponse,
+        RestState, SessionBatchMembership, SessionEnvironmentSummary, SessionState, SessionSummary,
+        StateEvidence, ThoughtSource, ThoughtState, TransportHealth,
     };
     use chrono::{Duration as ChronoDuration, Utc};
 
@@ -765,6 +724,38 @@ mod tests {
             ),
             0
         );
+    }
+
+    #[test]
+    fn attention_group_treats_mapped_remote_cwd_as_same_repo() {
+        let local = numbered_waiting_session(
+            "local-swimmers",
+            "61",
+            "/Users/b/repos/opensource/swimmers",
+            20,
+        );
+        let mut remote =
+            numbered_waiting_session("remote-swimmers", "62", "/srv/skillbox/repos/swimmers", 10);
+        remote.environment = SessionEnvironmentSummary::remote(
+            &LaunchTargetSummary {
+                id: "skillbox".to_string(),
+                label: "Skillbox devbox".to_string(),
+                kind: "swimmers_api".to_string(),
+                base_url: None,
+                auth_token_env: None,
+                path_mappings: Vec::new(),
+            },
+            "remote-swimmers",
+            remote.cwd.clone(),
+            Some("/Users/b/repos/opensource/swimmers".to_string()),
+            "remote_swimmers_api",
+        );
+        let unrelated =
+            numbered_waiting_session("newer-unrelated", "63", "/Users/b/repos/buildooor", 1);
+
+        let selected = plan_ids(vec![unrelated, local, remote], 2, &[]);
+
+        assert_eq!(selected, vec!["remote-swimmers", "local-swimmers"]);
     }
 
     #[test]

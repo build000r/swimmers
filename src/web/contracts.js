@@ -794,6 +794,7 @@ export function normalizeTrogdorSurfaceSession(value) {
     toolLabel: stringValue(session.toolLabel, "shell"),
     cwdLabel: stringValue(session.cwdLabel),
     fullCwd: stringValue(session.fullCwd),
+    canonicalCwd: stringValue(session.canonicalCwd),
     thoughtLabel: stringValue(session.thoughtLabel),
     clawgText: stringValue(session.clawgText),
     thoughtUpdatedAt: stringValue(session.thoughtUpdatedAt),

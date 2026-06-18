@@ -2,6 +2,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 use crate::api::remote_sessions;
+use crate::session_labels::{repo_label_for_key, session_repo_key};
 use crate::types::{
     ActionCueKind, RestState, SessionBatchMembership, SessionState, SessionSummary,
     StateConfidence, ThoughtState, TransportHealth,
@@ -130,8 +131,8 @@ impl OperatorPressureResponseBuilder {
 
     fn push(&mut self, session: &SessionSummary, batch_send_session_ids: Vec<String>) {
         let pressure = operator_pressure_for_session(session);
-        let repo_key = repo_key(session);
-        let repo_label = repo_label(&repo_key);
+        let repo_key = session_repo_key(session);
+        let repo_label = repo_label_for_key(&repo_key);
 
         update_operator_pressure_summary(&mut self.summary, &pressure);
         update_operator_pressure_repo(&mut self.repos, session, &repo_key, &repo_label, &pressure);
@@ -579,23 +580,6 @@ fn pressure_tone_for_low_pressure_state(session: &SessionSummary) -> OperatorPre
     }
 }
 
-fn repo_key(session: &SessionSummary) -> String {
-    let cwd = session.cwd.trim();
-    if cwd.is_empty() {
-        session.tmux_name.clone()
-    } else {
-        cwd.to_string()
-    }
-}
-
-fn repo_label(repo_key: &str) -> String {
-    repo_key
-        .split('/')
-        .rfind(|part| !part.is_empty())
-        .unwrap_or(repo_key)
-        .to_string()
-}
-
 type BatchSendSession<'a> = (&'a SessionBatchMembership, &'a SessionSummary);
 
 fn batch_send_session_map(sessions: &[SessionSummary]) -> HashMap<String, Vec<String>> {
@@ -657,8 +641,8 @@ mod tests {
     use chrono::Utc;
 
     use crate::types::{
-        ActionCue, ActionCueConfidence, ActionCueSource, ActionCueStatus, StateEvidence,
-        ThoughtState,
+        ActionCue, ActionCueConfidence, ActionCueSource, ActionCueStatus, LaunchTargetSummary,
+        SessionEnvironmentSummary, StateEvidence, ThoughtState,
     };
 
     fn cue(kind: ActionCueKind) -> ActionCue {
@@ -1053,6 +1037,58 @@ mod tests {
         assert_eq!(session.pressure.tone, OperatorPressureTone::Working);
         assert!(!session.pressure.needs_input);
         assert!(!session.pressure.commit_ready);
+    }
+
+    #[test]
+    fn operator_pressure_groups_mapped_remote_sessions_by_canonical_repo() {
+        let mut local = trusted_summary("local-swimmers", SessionState::Idle);
+        local.cwd = "/Users/b/repos/opensource/swimmers".to_string();
+        local.environment = SessionEnvironmentSummary::local(local.cwd.clone());
+        local.tool = None;
+
+        let mut remote = trusted_summary("skillbox::remote-swimmers", SessionState::Busy);
+        remote.cwd = "/srv/skillbox/repos/swimmers".to_string();
+        remote.environment = SessionEnvironmentSummary::remote(
+            &LaunchTargetSummary {
+                id: "skillbox".to_string(),
+                label: "Skillbox devbox".to_string(),
+                kind: "swimmers_api".to_string(),
+                base_url: None,
+                auth_token_env: None,
+                path_mappings: Vec::new(),
+            },
+            "remote-swimmers",
+            remote.cwd.clone(),
+            Some("/Users/b/repos/opensource/swimmers".to_string()),
+            "remote_swimmers_api",
+        );
+        remote.tool = None;
+
+        let response = build_operator_pressure_response(&[local, remote.clone()]);
+
+        assert_eq!(response.repos.len(), 1);
+        assert_eq!(
+            response.repos[0].repo_key,
+            "/Users/b/repos/opensource/swimmers"
+        );
+        assert_eq!(response.repos[0].repo_label, "opensource/swimmers");
+        assert_eq!(
+            response.repos[0].session_ids,
+            vec![
+                "local-swimmers".to_string(),
+                "skillbox::remote-swimmers".to_string()
+            ]
+        );
+        let remote_pressure = response
+            .sessions
+            .iter()
+            .find(|session| session.session_id == "skillbox::remote-swimmers")
+            .expect("remote pressure session");
+        assert_eq!(
+            remote_pressure.repo_key,
+            "/Users/b/repos/opensource/swimmers"
+        );
+        assert_eq!(remote.cwd, "/srv/skillbox/repos/swimmers");
     }
 
     #[test]

@@ -1,4 +1,5 @@
 use super::*;
+use swimmers::session_labels::{session_canonical_cwd_key, session_cwd_label};
 
 impl<C: TuiApi> App<C> {
     pub(crate) fn trim_thought_log(&mut self, capacity: usize) {
@@ -56,10 +57,10 @@ impl<C: TuiApi> App<C> {
         let mut grouped = HashMap::<String, ThoughtRepoSummary>::new();
         for (index, entity) in self.entities.iter().enumerate() {
             let session = &entity.session;
-            let Some(label) = path_tail_label(&session.cwd) else {
+            let cwd = session_canonical_cwd_key(session);
+            let Some(label) = path_tail_label(&cwd) else {
                 continue;
             };
-            let cwd = normalize_path(&session.cwd);
             let color = session_display_color(session, &self.repo_themes);
 
             let summary = grouped
@@ -161,8 +162,8 @@ impl<C: TuiApi> App<C> {
                 continue;
             };
             entry.tmux_name = session.tmux_name.clone();
-            entry.cwd = normalize_path(&session.cwd);
-            entry.pwd_label = path_tail_label(&session.cwd);
+            entry.cwd = session_canonical_cwd_key(session);
+            entry.pwd_label = session_cwd_label(session);
             entry.batch = session.batch.clone();
             entry.state = session.state;
             entry.current_command = session.current_command.clone();

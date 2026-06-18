@@ -1,6 +1,7 @@
 use super::*;
 use swimmers::api::remote_sessions;
 use swimmers::color::hsl_to_rgb;
+use swimmers::session_labels::{session_canonical_cwd_key, session_cwd_label};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 const THOUGHT_COMMIT_LABEL: &str = "[commit]";
@@ -47,8 +48,8 @@ impl ThoughtLogEntry {
         Self {
             session_id: session.session_id.clone(),
             tmux_name: session.tmux_name.clone(),
-            cwd: normalize_path(&session.cwd),
-            pwd_label: path_tail_label(&session.cwd),
+            cwd: session_canonical_cwd_key(session),
+            pwd_label: session_cwd_label(session),
             batch: session.batch.clone(),
             state: session.state,
             current_command: session.current_command.clone(),
@@ -95,13 +96,14 @@ impl ThoughtFilter {
     }
 
     pub(crate) fn matches_session(&self, session: &SessionSummary) -> bool {
+        let canonical_cwd = session_canonical_cwd_key(session);
         let cwd_matches = self
             .cwd
             .as_ref()
-            .map(|cwd| normalize_path(&session.cwd) == *cwd)
+            .map(|cwd| canonical_cwd == *cwd)
             .or_else(|| {
                 (!self.excluded_cwds.is_empty())
-                    .then_some(!self.excluded_cwds.contains(&normalize_path(&session.cwd)))
+                    .then_some(!self.excluded_cwds.contains(&canonical_cwd))
             })
             .unwrap_or(true);
         let tmux_matches = self
@@ -689,7 +691,6 @@ pub(crate) struct ThoughtPanelEntryView {
     pub(crate) label: String,
     pub(crate) tmux_name: String,
     pub(crate) cwd: String,
-    pub(crate) pwd_label: Option<String>,
     pub(crate) batch: Option<SessionBatchMembership>,
     pub(crate) state: SessionState,
     pub(crate) current_command: Option<String>,
@@ -920,7 +921,6 @@ pub(crate) fn build_thought_panel_entries<C: TuiApi>(app: &App<C>) -> Vec<Though
             label: label.clone(),
             tmux_name: entry.tmux_name.clone(),
             cwd: entry.cwd.clone(),
-            pwd_label: entry.pwd_label.clone(),
             batch: entry.batch.clone(),
             state: entry.state,
             current_command: entry.current_command.clone(),
@@ -945,14 +945,13 @@ pub(crate) fn build_thought_panel_entries<C: TuiApi>(app: &App<C>) -> Vec<Though
             continue;
         }
         let artifact = app.mermaid_artifacts.get(&entity.session.session_id);
-        let cwd_label = path_tail_label(&entity.session.cwd);
+        let cwd_label = session_cwd_label(&entity.session);
         let label = thought_session_label(cwd_label.as_deref(), &entity.session.tmux_name);
         entries.push(ThoughtPanelEntryView {
             session_id: entity.session.session_id.clone(),
             label: label.clone(),
             tmux_name: entity.session.tmux_name.clone(),
-            cwd: normalize_path(&entity.session.cwd),
-            pwd_label: cwd_label,
+            cwd: session_canonical_cwd_key(&entity.session),
             batch: entity.session.batch.clone(),
             state: entity.session.state,
             current_command: entity.session.current_command.clone(),
@@ -999,7 +998,7 @@ pub(crate) fn thought_group_label(
     entry: &ThoughtPanelEntryView,
 ) -> String {
     match group_by {
-        ThoughtGroupBy::Pwd => entry.pwd_label.clone().unwrap_or_else(|| entry.cwd.clone()),
+        ThoughtGroupBy::Pwd => path_tail_label(&entry.cwd).unwrap_or_else(|| entry.cwd.clone()),
         ThoughtGroupBy::Batch => entry
             .batch
             .as_ref()

@@ -14,6 +14,7 @@ pub mod persistence;
 pub mod repo_theme;
 pub mod scroll;
 pub mod session;
+pub mod session_labels;
 pub mod startup;
 pub mod state;
 #[cfg(test)]

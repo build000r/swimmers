@@ -239,6 +239,7 @@ async fn spawn_delayed_api_server(
                     sessions: vec![session_summary("sess-1", "7", TEST_REPO_SWIMMERS)],
                     version: 1,
                     repo_themes: HashMap::new(),
+                    environments: Vec::new(),
                 })
             }),
         )
@@ -554,6 +555,7 @@ async fn startup_preflight_retries_until_local_listener_is_ready() {
                         sessions: vec![session_summary("sess-1", "7", TEST_REPO_SWIMMERS)],
                         version: 1,
                         repo_themes: HashMap::new(),
+                        environments: Vec::new(),
                     })
                 }),
             )

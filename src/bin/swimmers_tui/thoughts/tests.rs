@@ -55,7 +55,6 @@ fn thought_entry(session_id: &str, label: &str, thought: &str) -> ThoughtPanelEn
         label: label.to_string(),
         tmux_name: label.to_string(),
         cwd: format!("/repo/{label}"),
-        pwd_label: None,
         batch: None,
         state: SessionState::Idle,
         current_command: None,

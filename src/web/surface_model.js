@@ -9,6 +9,24 @@ export function relativeCwd(cwd) {
   return parts.slice(-2).join("/");
 }
 
+export function canonicalCwd(session) {
+  return session?.environment?.canonical_cwd || session?.cwd || "";
+}
+
+export function sessionHostLabel(session) {
+  const environment = session?.environment || {};
+  if (String(environment.scope || "local").toLowerCase() !== "remote") {
+    return "";
+  }
+  return environment.display_host || environment.target_label || environment.target_id || "";
+}
+
+export function sessionCwdLabel(session) {
+  const label = relativeCwd(canonicalCwd(session));
+  const host = sessionHostLabel(session);
+  return host ? `${label} @ ${host}` : label;
+}
+
 export function formatTime(raw) {
   if (!raw) return "unknown";
   const date = new Date(raw);
@@ -73,8 +91,9 @@ export function surfaceSession(session, {
     restLabel: String(session.rest_state || "unknown"),
     transportLabel: String(session.transport_health || "unknown"),
     toolLabel: session.tool || "shell",
-    cwdLabel: relativeCwd(session.cwd),
+    cwdLabel: sessionCwdLabel(session),
     fullCwd: session.cwd || "",
+    canonicalCwd: canonicalCwd(session),
     thoughtLabel: detail ? session.thought || "No thought snapshot yet." : summarizeThought(session),
     clawgText: session.thought || "",
     thoughtUpdatedAt: session.thought_updated_at || "",
@@ -90,8 +109,8 @@ export function surfaceSession(session, {
     batchSendSessionIds: Array.isArray(operatorPressure?.batch_send_session_ids)
       ? operatorPressure.batch_send_session_ids
       : [],
-    repoKey: operatorPressure?.repo_key || session.cwd || "",
-    repoLabel: operatorPressure?.repo_label || relativeCwd(session.cwd),
+    repoKey: operatorPressure?.repo_key || canonicalCwd(session),
+    repoLabel: operatorPressure?.repo_label || relativeCwd(canonicalCwd(session)),
     isStale: Boolean(session.is_stale),
   };
   Object.assign(surface, trogdorSurfaceSessionTrogdorState(surface, {

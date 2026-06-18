@@ -130,6 +130,51 @@ test("surfaceSession marks low or unobserved state as uncertain and keeps detail
   assert.equal(detail.thoughtLabel, longThought);
 });
 
+test("surfaceSession separates raw cwd from mapped canonical cwd and host label", () => {
+  const session = surfaceSession(rawSession({
+    cwd: "/srv/skillbox/repos/swimmers",
+    environment: {
+      scope: "remote",
+      target_id: "skillbox",
+      target_label: "Skillbox devbox",
+      target_kind: "swimmers_api",
+      display_host: "Skillbox devbox",
+      remote_session_id: "remote-1",
+      remote_cwd: "/srv/skillbox/repos/swimmers",
+      local_cwd: "/Users/b/repos/opensource/swimmers",
+      canonical_cwd: "/Users/b/repos/opensource/swimmers",
+    },
+  }));
+
+  assert.equal(session.fullCwd, "/srv/skillbox/repos/swimmers");
+  assert.equal(session.canonicalCwd, "/Users/b/repos/opensource/swimmers");
+  assert.equal(session.cwdLabel, "opensource/swimmers @ Skillbox devbox");
+  assert.equal(session.repoKey, "/Users/b/repos/opensource/swimmers");
+  assert.equal(session.repoLabel, "opensource/swimmers");
+});
+
+test("surfaceSession falls back honestly for unmapped remote cwd", () => {
+  const session = surfaceSession(rawSession({
+    cwd: "/srv/skillbox/repos/swimmers",
+    environment: {
+      scope: "remote",
+      target_id: "skillbox",
+      target_label: "Skillbox devbox",
+      target_kind: "swimmers_api",
+      display_host: "Skillbox devbox",
+      remote_session_id: "remote-1",
+      remote_cwd: "/srv/skillbox/repos/swimmers",
+      local_cwd: null,
+      canonical_cwd: "/srv/skillbox/repos/swimmers",
+    },
+  }));
+
+  assert.equal(session.fullCwd, "/srv/skillbox/repos/swimmers");
+  assert.equal(session.canonicalCwd, "/srv/skillbox/repos/swimmers");
+  assert.equal(session.cwdLabel, "repos/swimmers @ Skillbox devbox");
+  assert.equal(session.repoKey, "/srv/skillbox/repos/swimmers");
+});
+
 test("buildSurfaceModel preserves selected/current session, terminal, reader, and HUD fields", () => {
   const selected = rawSession({ thought: `${"selected ".repeat(16)}done` });
   const state = baseState({
