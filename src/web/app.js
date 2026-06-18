@@ -1102,9 +1102,11 @@ function syncSheetActionAvailability() {
   const writeDisabled = Boolean(state.readOnly);
   const batchCount = state.dirBrowser.batchSelected instanceof Set ? state.dirBrowser.batchSelected.size : 0;
   const batchReady = batchCount > 0;
+  const batchBlocked = Array.isArray(state.dirBrowser.batchLaunchBlockers) && state.dirBrowser.batchLaunchBlockers.length > 0;
+  const singleBlocked = Boolean(state.dirBrowser.singleLaunchBlocker?.blocked);
   const dirsPath = el.dirsPath.value.trim();
   const plan = sheetActionAvailabilityPlan({
-    writeDisabled, hasSession: Boolean(currentSession()), batchReady,
+    writeDisabled, hasSession: Boolean(currentSession()), batchReady, batchBlocked, singleBlocked,
     hasSinglePath: Boolean(el.createCwd.value.trim()), visibleSelectableCount: visibleSelectableDirPaths().length,
     hasBrowserPath: Boolean((state.dirBrowser.path || dirsPath || "").trim()),
     hasThoughtConfig: Boolean(state.thoughtConfig.config), hasNativeStatus: Boolean(state.nativeDesktop.status),

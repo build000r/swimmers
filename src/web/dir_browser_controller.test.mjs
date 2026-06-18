@@ -25,6 +25,7 @@ function createRuntime(overrides = {}) {
   const el = {
     createCwd: { value: "" },
     createLaunchTarget: null,
+    createRequest: { value: "" },
     createTool: { value: "grok" },
     dirsManagedOnly: { checked: false },
     dirsPath: { value: "" },
@@ -64,6 +65,24 @@ function createRuntime(overrides = {}) {
     storage,
     statuses,
     syncCount: () => syncCount,
+  };
+}
+
+function devboxTarget() {
+  return {
+    id: "devbox",
+    label: "Devbox",
+    kind: "swimmers_api",
+    path_mappings: [{ local_prefix: "/workspace", remote_prefix: "/srv/workspace" }],
+  };
+}
+
+function submitEvent() {
+  return {
+    prevented: false,
+    preventDefault() {
+      this.prevented = true;
+    },
   };
 }
 
@@ -123,4 +142,82 @@ test("directory browser controller delegates dynamic view rendering while preser
     isError: false,
   }]);
   assert.equal(syncCount(), 1);
+});
+
+test("directory browser controller blocks unmapped remote single creates before fetch", async () => {
+  const calls = [];
+  const { runtime, state, el, statuses } = createRuntime({
+    apiFetch: async (...args) => {
+      calls.push(args);
+      return { json: async () => ({ session: { session_id: "s1" } }) };
+    },
+  });
+  state.readOnly = false;
+  state.dirBrowser.launchTargets = [devboxTarget()];
+  el.createLaunchTarget = { value: "devbox" };
+  el.createCwd.value = "/tmp/outside";
+
+  const controller = createDirBrowserController(runtime);
+  const event = submitEvent();
+  await controller.handleCreateFormSubmit(event);
+
+  assert.equal(event.prevented, true);
+  assert.equal(calls.length, 0);
+  assert.deepEqual(statuses.at(-1), {
+    message: "Devbox: unmapped cwd for /tmp/outside",
+    isError: true,
+  });
+});
+
+test("directory browser controller keeps local override explicit in single create payload", async () => {
+  const calls = [];
+  const { runtime, state, el } = createRuntime({
+    apiFetch: async (...args) => {
+      calls.push(args);
+      return { json: async () => ({ session: { session_id: "s1" } }) };
+    },
+  });
+  state.readOnly = false;
+  state.dirBrowser.launchTargets = [devboxTarget()];
+  el.createLaunchTarget = { value: "local" };
+  el.createCwd.value = "/tmp/outside";
+  el.createRequest.value = "start here";
+
+  const controller = createDirBrowserController(runtime);
+  await controller.handleCreateFormSubmit(submitEvent());
+
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0][0], "/v1/sessions");
+  assert.deepEqual(JSON.parse(calls[0][1].body), {
+    cwd: "/tmp/outside",
+    spawn_tool: "grok",
+    launch_target: null,
+    initial_request: "start here",
+  });
+});
+
+test("directory browser controller recomputes remote batch blockers before fetch", async () => {
+  const calls = [];
+  const { runtime, state, el, statuses } = createRuntime({
+    apiFetch: async (...args) => {
+      calls.push(args);
+      return { json: async () => ({ results: [] }) };
+    },
+  });
+  state.readOnly = false;
+  state.dirBrowser.launchTargets = [devboxTarget()];
+  state.dirBrowser.batchSelected = new Set(["/workspace/swimmers", "/tmp/outside"]);
+  state.dirBrowser.batchLaunchBlockers = [];
+  el.createLaunchTarget = { value: "devbox" };
+  el.createCwd.value = "/workspace/swimmers";
+
+  const controller = createDirBrowserController(runtime);
+  await controller.handleCreateFormSubmit(submitEvent());
+
+  assert.equal(calls.length, 0);
+  assert.equal(state.dirBrowser.batchLaunchBlockers.length, 1);
+  assert.deepEqual(statuses.at(-1), {
+    message: "Remote batch has unmapped directories: /tmp/outside",
+    isError: true,
+  });
 });

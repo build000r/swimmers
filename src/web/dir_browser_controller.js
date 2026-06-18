@@ -5,10 +5,14 @@ import {
   dirGroupMembershipClickPlan,
   dirRowClickPlan,
   ensureDirBrowserBatchSelection as ensureDirBrowserBatchSelectionState,
+  launchTargetBlockersForPaths as dirBrowserLaunchTargetBlockersForPaths,
   launchTargetPayload as dirBrowserLaunchTargetPayload,
+  launchTargetPreviewForPath as dirBrowserLaunchTargetPreviewForPath,
+  launchTargetStatusTextForPreview as dirBrowserLaunchTargetStatusTextForPreview,
   renderCreateBatchBar as renderDirBrowserCreateBatchBar,
   renderDirEntries as renderDirBrowserEntries,
   selectedLaunchTarget as dirBrowserSelectedLaunchTarget,
+  selectedLaunchTargetSummary as dirBrowserSelectedLaunchTargetSummary,
   visibleDirBatchPlan,
   visibleSelectableDirPaths as dirBrowserVisibleSelectableDirPaths,
 } from "./dir_browser.js";
@@ -75,8 +79,37 @@ export function createDirBrowserController(runtime) {
     return dirBrowserSelectedLaunchTarget(el, state.dirBrowser);
   }
 
+  function selectedLaunchTargetSummary() {
+    return dirBrowserSelectedLaunchTargetSummary(el, state.dirBrowser);
+  }
+
   function launchTargetPayload() {
     return dirBrowserLaunchTargetPayload(el, state.dirBrowser);
+  }
+
+  function launchTargetPreviewForPath(path) {
+    return dirBrowserLaunchTargetPreviewForPath(path, selectedLaunchTargetSummary());
+  }
+
+  function launchTargetStatusForPreview(preview) {
+    return dirBrowserLaunchTargetStatusTextForPreview(preview);
+  }
+
+  function syncCreateLaunchTargetStatus() {
+    const path = String(el.createCwd?.value || state.dirBrowser.path || "").trim();
+    if (!path) {
+      state.dirBrowser.singleLaunchBlocker = null;
+      return;
+    }
+    const preview = launchTargetPreviewForPath(path);
+    state.dirBrowser.singleLaunchBlocker = preview.blocked ? preview : null;
+    setDirStatus(launchTargetStatusForPreview(preview), preview.blocked);
+  }
+
+  function batchLaunchBlockersForPaths(paths) {
+    const blockers = dirBrowserLaunchTargetBlockersForPaths(paths, selectedLaunchTargetSummary());
+    state.dirBrowser.batchLaunchBlockers = blockers;
+    return blockers;
   }
 
   function renderCreateBatchBar() {
@@ -108,6 +141,7 @@ export function createDirBrowserController(runtime) {
     selected.clear();
     for (const path of plan.paths) selected.add(path);
     if (plan.firstPath) el.createCwd.value = plan.firstPath;
+    batchLaunchBlockersForPaths(plan.paths);
     renderDirEntries(currentDirListingPayload());
     setDirStatus(plan.statusLabel, plan.statusMuted);
   }
@@ -123,6 +157,9 @@ export function createDirBrowserController(runtime) {
     const selected = ensureDirBrowserBatchSelection();
     (plan.type === "add" ? selected.add : selected.delete).call(selected, plan.path);
     if (plan.type === "add") el.createCwd.value = plan.path;
+    batchLaunchBlockersForPaths(Array.from(selected));
+    renderCreateBatchBar();
+    syncCreateLaunchTargetStatus();
     syncSheetActionAvailability();
     return true;
   }
@@ -260,6 +297,14 @@ export function createDirBrowserController(runtime) {
   }
 
   async function createBatchSessionsFromSheet(dirs, spawnTool, initialRequest) {
+    const blockers = batchLaunchBlockersForPaths(dirs);
+    if (blockers.length > 0) {
+      const preview = blockers.slice(0, 3).map((blocker) => blocker.localCwd).join(", ");
+      const overflow = blockers.length > 3 ? ` (+${blockers.length - 3} more)` : "";
+      setDirStatus(`Remote batch has unmapped directories: ${preview}${overflow}`, true);
+      return;
+    }
+
     const response = await apiFetch("/v1/sessions/batch", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -317,6 +362,13 @@ export function createDirBrowserController(runtime) {
       return;
     }
 
+    const launchPreview = launchTargetPreviewForPath(cwd);
+    state.dirBrowser.singleLaunchBlocker = launchPreview.blocked ? launchPreview : null;
+    if (launchPreview.blocked) {
+      setDirStatus(launchTargetStatusForPreview(launchPreview), true);
+      return;
+    }
+
     const response = await apiFetch("/v1/sessions", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -368,6 +420,8 @@ export function createDirBrowserController(runtime) {
   function handleCreateLaunchTargetChange() {
     state.dirBrowser.launchTarget = selectedLaunchTarget();
     renderCreateBatchBar();
+    batchLaunchBlockersForPaths(selectedBatchDirs());
+    syncCreateLaunchTargetStatus();
     syncSheetActionAvailability();
   }
 
@@ -383,6 +437,7 @@ export function createDirBrowserController(runtime) {
 
   function handleCreateCwdInput() {
     el.dirsPath.value = el.createCwd.value;
+    syncCreateLaunchTargetStatus();
     syncSheetActionAvailability();
   }
 

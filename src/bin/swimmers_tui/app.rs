@@ -101,6 +101,15 @@ enum PickerActivationPlan {
     },
 }
 
+fn launch_target_blocker_message(preview: &LaunchTargetPreview) -> String {
+    format!(
+        "{}: {} for {}",
+        preview.target_label,
+        preview.blocked_reason.unwrap_or("blocked"),
+        shorten_path(&preview.local_cwd, 32)
+    )
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct GroupInputTargets {
     pub(crate) session_ids: Vec<String>,
@@ -1632,10 +1641,11 @@ impl<C: TuiApi> App<C> {
     }
 
     pub(crate) fn open_batch_initial_request_for_visible_entries(&mut self) {
-        let Some((visible_count, dirs)) = self.picker.as_ref().map(|picker| {
+        let Some((visible_count, dirs, blockers)) = self.picker.as_ref().map(|picker| {
             (
                 picker.visible_entries().len(),
                 picker.batch_dirs_for_visible_entries(),
+                picker.batch_launch_blockers(),
             )
         }) else {
             return;
@@ -1649,6 +1659,15 @@ impl<C: TuiApi> App<C> {
             }
             return;
         };
+
+        if let Some(blocker) = blockers.first() {
+            self.set_message(format!(
+                "remote batch has {} blocked dirs: {}",
+                blockers.len(),
+                launch_target_blocker_message(blocker)
+            ));
+            return;
+        }
 
         self.cancel_voice_recording();
         self.initial_request_generation = self.initial_request_generation.saturating_add(1);
@@ -2004,6 +2023,15 @@ impl<C: TuiApi> App<C> {
                 path,
                 launch_target,
             }) => {
+                if let Some(blocker) = self
+                    .picker
+                    .as_ref()
+                    .map(|picker| picker.launch_target_preview_for_path(&path))
+                    .filter(LaunchTargetPreview::is_blocked)
+                {
+                    self.set_message(launch_target_blocker_message(&blocker));
+                    return;
+                }
                 self.launch_target = launch_target.clone();
                 self.open_initial_request(path, launch_target);
             }

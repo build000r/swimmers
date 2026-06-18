@@ -1033,8 +1033,8 @@ export function sheetActionAvailabilityPlan(context = {}) {
   const writeDisabled = Boolean(context.writeDisabled);
   const hasSession = Boolean(context.hasSession);
   return {
-    createButtonDisabled: writeDisabled || (!context.batchReady && !context.hasSinglePath),
-    createBatchSubmitDisabled: writeDisabled || !context.batchReady,
+    createButtonDisabled: writeDisabled || Boolean(context.singleBlocked) || (!context.batchReady && !context.hasSinglePath),
+    createBatchSubmitDisabled: writeDisabled || !context.batchReady || Boolean(context.batchBlocked),
     createBatchVisibleDisabled: writeDisabled || context.visibleSelectableCount < 1,
     dirsSpawnHereDisabled: writeDisabled || !context.hasBrowserPath,
     thoughtConfigTestDisabled: writeDisabled || !context.hasThoughtConfig,

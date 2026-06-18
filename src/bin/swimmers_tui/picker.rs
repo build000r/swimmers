@@ -83,6 +83,21 @@ pub(crate) struct PickerGroupUpdatePlan {
     pub(crate) group: Option<String>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct LaunchTargetPreview {
+    pub(crate) target_id: String,
+    pub(crate) target_label: String,
+    pub(crate) local_cwd: String,
+    pub(crate) remote_cwd: Option<String>,
+    pub(crate) blocked_reason: Option<&'static str>,
+}
+
+impl LaunchTargetPreview {
+    pub(crate) fn is_blocked(&self) -> bool {
+        self.blocked_reason.is_some()
+    }
+}
+
 pub(crate) fn picker_managed_only_reload_plan(
     picker: &PickerState,
     managed_only: bool,
@@ -398,6 +413,14 @@ impl PickerState {
             .collect()
     }
 
+    pub(crate) fn batch_launch_blockers(&self) -> Vec<LaunchTargetPreview> {
+        self.batch_dirs_for_visible_entries()
+            .into_iter()
+            .map(|path| self.launch_target_preview_for_path(&path))
+            .filter(LaunchTargetPreview::is_blocked)
+            .collect()
+    }
+
     pub(crate) fn batch_included_count(&self) -> usize {
         self.batch_dirs_for_visible_entries().len()
     }
@@ -634,6 +657,19 @@ impl PickerState {
             .unwrap_or_else(|| current.to_string())
     }
 
+    pub(crate) fn selected_launch_target(&self) -> LaunchTargetSummary {
+        let current = self.launch_target.as_deref().unwrap_or("local");
+        self.launch_targets
+            .iter()
+            .find(|target| target.id == current)
+            .cloned()
+            .unwrap_or_else(LaunchTargetSummary::local)
+    }
+
+    pub(crate) fn launch_target_preview_for_path(&self, path: &str) -> LaunchTargetPreview {
+        launch_target_preview_for_path(path, &self.selected_launch_target())
+    }
+
     pub(crate) fn cycle_group_edit_target(&mut self) -> Option<String> {
         if self.available_groups.is_empty() {
             self.group_edit_target = None;
@@ -775,6 +811,41 @@ fn select_launch_target(
         .or_else(|| fallback.filter(|id| targets.iter().any(|target| target.id == *id)))
         .unwrap_or("local");
     Some(candidate.to_string())
+}
+
+pub(crate) fn launch_target_preview_for_path(
+    path: &str,
+    target: &LaunchTargetSummary,
+) -> LaunchTargetPreview {
+    let local_cwd = normalize_path(path);
+    let mut preview = LaunchTargetPreview {
+        target_id: target.id.clone(),
+        target_label: target.label.clone(),
+        local_cwd: local_cwd.clone(),
+        remote_cwd: None,
+        blocked_reason: None,
+    };
+
+    if target.id == "local" || target.kind == "local" {
+        return preview;
+    }
+
+    if target.kind != "swimmers_api" {
+        preview.blocked_reason = Some("unsupported target");
+        return preview;
+    }
+
+    match swimmers::api::remote_sessions::map_path_with_mappings(&local_cwd, &target.path_mappings)
+    {
+        Some(remote_cwd) => {
+            preview.remote_cwd = Some(remote_cwd);
+        }
+        None => {
+            preview.blocked_reason = Some("unmapped cwd");
+        }
+    }
+
+    preview
 }
 
 pub(crate) fn normalize_path(path: &str) -> String {

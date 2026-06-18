@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 
 import {
+  batchLaunchTargetBlockers,
   createRequestPreviewText,
   dirCheckboxChangePlan,
   dirEntryBatchSelectable,
@@ -12,9 +13,15 @@ import {
   dirGroupMembershipClickPlan,
   dirRowClickPlan,
   joinPath,
+  launchTargetBlockersForPaths,
   launchTargetPayload,
+  launchTargetPreviewForPath,
+  launchTargetStatusTextForPreview,
+  launchTargetPreviewText,
+  mapPathWithLaunchTarget,
   renderCreateBatchBar,
   selectedLaunchTarget,
+  selectedLaunchTargetSummary,
   visibleDirBatchPlan,
   visibleDirEntries,
   visibleSelectableDirPaths,
@@ -295,18 +302,61 @@ test("launch target and batch bar helpers preserve payload and label semantics",
   };
   const dirBrowser = {
     launchTarget: "local",
+    launchTargets: [{
+      id: "remote-a",
+      label: "Remote A",
+      kind: "swimmers_api",
+      path_mappings: [{ local_prefix: "/srv/repos", remote_prefix: "/workspace/repos" }],
+    }],
     batchSelected: new Set(["/srv/repos/swimmers", "/srv/repos/other"]),
   };
 
   assert.equal(selectedLaunchTarget(el, dirBrowser), "remote-a");
   assert.equal(launchTargetPayload(el, dirBrowser), "remote-a");
+  assert.equal(selectedLaunchTargetSummary(el, dirBrowser).label, "Remote A");
   renderCreateBatchBar({ el, dirBrowser });
 
   assert.equal(el.createBatchBar.classList.contains("hidden"), false);
   assert.equal(el.createBatchCount.textContent, "2 selected");
-  assert.equal(el.createBatchTool.textContent, "tool: codex -> remote-a");
-  assert.equal(el.createBatchPreview.textContent, "request: run the smoke tests with extra spacing");
+  assert.equal(el.createBatchTool.textContent, "tool: codex -> Remote A");
+  assert.equal(el.createBatchPreview.textContent, "target: Remote A: 2 mapped · request: run the smoke tests with extra spacing");
   assert.equal(createRequestPreviewText({ createRequest: element("") }), "(none)");
+});
+
+test("launch target preview maps longest prefix and blocks unmapped remote batches", () => {
+  const target = {
+    id: "devbox",
+    label: "Devbox",
+    kind: "swimmers_api",
+    path_mappings: [
+      { local_prefix: "/Users/tester/repos", remote_prefix: "/srv/repos" },
+      { local_prefix: "/Users/tester/repos/opensource", remote_prefix: "/srv/opensource" },
+    ],
+  };
+  assert.equal(mapPathWithLaunchTarget("/Users/tester/repos/opensource/swimmers", target), "/srv/opensource/swimmers");
+  assert.equal(launchTargetPreviewForPath("/Users/tester/repos/opensource/swimmers", target).remoteCwd, "/srv/opensource/swimmers");
+  assert.equal(
+    launchTargetPreviewText("/Users/tester/repos/opensource/swimmers", target),
+    "Devbox: /srv/opensource/swimmers",
+  );
+  assert.equal(launchTargetPreviewForPath("/tmp/outside", target).blocked, true);
+  assert.equal(
+    launchTargetStatusTextForPreview(launchTargetPreviewForPath("/tmp/outside", target)),
+    "Devbox: unmapped cwd for /tmp/outside",
+  );
+
+  const dirBrowser = {
+    launchTargets: [target],
+    batchSelected: new Set(["/Users/tester/repos/opensource/swimmers", "/tmp/outside"]),
+  };
+  assert.deepEqual(
+    batchLaunchTargetBlockers(dirBrowser, target).map((preview) => preview.localCwd),
+    ["/tmp/outside"],
+  );
+  assert.deepEqual(
+    launchTargetBlockersForPaths(["/tmp/outside"], target).map((preview) => preview.reason),
+    ["unmapped cwd"],
+  );
 });
 
 test("directory browser controller helpers preserve retry gate and batch failure copy", () => {

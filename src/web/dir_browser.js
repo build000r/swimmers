@@ -227,6 +227,118 @@ export function launchTargetPayload(el, dirBrowser) {
   return target && target !== "local" ? target : null;
 }
 
+export function launchTargetById(dirBrowser, targetId) {
+  const normalizedId = String(targetId || "local").trim() || "local";
+  const targets = Array.isArray(dirBrowser?.launchTargets) ? dirBrowser.launchTargets : [];
+  return targets.find((target) => String(target?.id || "") === normalizedId)
+    || (normalizedId === "local" ? { id: "local", label: "Local machine", kind: "local", path_mappings: [] } : null);
+}
+
+export function selectedLaunchTargetSummary(el, dirBrowser) {
+  return launchTargetById(dirBrowser, selectedLaunchTarget(el, dirBrowser))
+    || { id: selectedLaunchTarget(el, dirBrowser), label: selectedLaunchTarget(el, dirBrowser), kind: "", path_mappings: [] };
+}
+
+function normalizeLaunchPath(path) {
+  const raw = String(path || "").trim();
+  const absolute = raw.startsWith("/");
+  const parts = [];
+  for (const part of raw.split("/")) {
+    if (!part || part === ".") continue;
+    if (part === "..") {
+      parts.pop();
+    } else {
+      parts.push(part);
+    }
+  }
+  const joined = parts.join("/");
+  return absolute ? `/${joined}` || "/" : joined || ".";
+}
+
+function relativeLaunchPath(path, prefix) {
+  const normalizedPath = normalizeLaunchPath(path);
+  const normalizedPrefix = normalizeLaunchPath(prefix).replace(/\/+$/g, "") || "/";
+  if (normalizedPath === normalizedPrefix) {
+    return "";
+  }
+  const prefixWithSlash = normalizedPrefix === "/" ? "/" : `${normalizedPrefix}/`;
+  return normalizedPath.startsWith(prefixWithSlash) ? normalizedPath.slice(prefixWithSlash.length) : null;
+}
+
+function joinLaunchPath(prefix, relative) {
+  const normalizedPrefix = normalizeLaunchPath(prefix).replace(/\/+$/g, "") || "/";
+  const normalizedRelative = String(relative || "").replace(/^\/+/, "");
+  if (!normalizedRelative) {
+    return normalizedPrefix;
+  }
+  return normalizedPrefix === "/" ? `/${normalizedRelative}` : `${normalizedPrefix}/${normalizedRelative}`;
+}
+
+export function mapPathWithLaunchTarget(path, target) {
+  const mappings = Array.isArray(target?.path_mappings) ? target.path_mappings : [];
+  let best = null;
+  for (const mapping of mappings) {
+    const relative = relativeLaunchPath(path, mapping?.local_prefix);
+    if (relative === null) continue;
+    const score = normalizeLaunchPath(mapping?.local_prefix).split("/").filter(Boolean).length;
+    if (!best || score > best.score) {
+      best = { score, path: joinLaunchPath(mapping?.remote_prefix, relative) };
+    }
+  }
+  return best?.path || null;
+}
+
+export function launchTargetPreviewForPath(path, target) {
+  const targetId = String(target?.id || "local").trim() || "local";
+  const targetLabel = String(target?.label || targetId || "Local machine");
+  const localCwd = String(path || "").trim();
+  if (targetId === "local" || String(target?.kind || "local") === "local") {
+    return { targetId, targetLabel, localCwd, remoteCwd: null, blocked: false, reason: "" };
+  }
+  if (String(target?.kind || "") !== "swimmers_api") {
+    return { targetId, targetLabel, localCwd, remoteCwd: null, blocked: true, reason: "unsupported target" };
+  }
+  const remoteCwd = mapPathWithLaunchTarget(localCwd, target);
+  return remoteCwd
+    ? { targetId, targetLabel, localCwd, remoteCwd, blocked: false, reason: "" }
+    : { targetId, targetLabel, localCwd, remoteCwd: null, blocked: true, reason: "unmapped cwd" };
+}
+
+export function launchTargetPreviewText(path, target) {
+  const preview = launchTargetPreviewForPath(path, target);
+  if (preview.targetId === "local") {
+    return `local: ${preview.localCwd || "(no cwd)"}`;
+  }
+  if (preview.blocked) {
+    return `${preview.targetLabel}: ${preview.reason}`;
+  }
+  return `${preview.targetLabel}: ${preview.remoteCwd}`;
+}
+
+export function launchTargetStatusTextForPreview(preview) {
+  if (!preview) {
+    return "";
+  }
+  if (preview.targetId === "local") {
+    return `Launch target local: ${preview.localCwd || "(no cwd)"}`;
+  }
+  if (preview.blocked) {
+    return `${preview.targetLabel}: ${preview.reason} for ${preview.localCwd || "(no cwd)"}`;
+  }
+  return `${preview.targetLabel}: ${preview.localCwd || "(no cwd)"} -> ${preview.remoteCwd}`;
+}
+
+export function launchTargetBlockersForPaths(paths = [], target) {
+  return (Array.isArray(paths) ? paths : [])
+    .map((path) => launchTargetPreviewForPath(path, target))
+    .filter((preview) => preview.blocked);
+}
+
+export function batchLaunchTargetBlockers(dirBrowser, target) {
+  const selected = ensureDirBrowserBatchSelection(dirBrowser);
+  return launchTargetBlockersForPaths(Array.from(selected), target);
+}
+
 function renderLaunchTargetOptions(response, { el, dirBrowser }) {
   if (!el.createLaunchTarget) {
     return;
@@ -262,6 +374,9 @@ export function createRequestPreviewText(el) {
 export function renderCreateBatchBar({ el, dirBrowser }) {
   const selected = ensureDirBrowserBatchSelection(dirBrowser);
   const count = selected.size;
+  const target = selectedLaunchTargetSummary(el, dirBrowser);
+  const blockers = batchLaunchTargetBlockers(dirBrowser, target);
+  dirBrowser.batchLaunchBlockers = blockers;
   if (el.createBatchBar) {
     el.createBatchBar.classList.toggle("hidden", count < 1);
   }
@@ -269,10 +384,16 @@ export function renderCreateBatchBar({ el, dirBrowser }) {
     el.createBatchCount.textContent = `${count} selected`;
   }
   if (el.createBatchTool) {
-    el.createBatchTool.textContent = `tool: ${String(el.createTool?.value || "grok").toLowerCase()} -> ${selectedLaunchTarget(el, dirBrowser)}`;
+    const targetLabel = String(target?.label || target?.id || "local");
+    const blockedSuffix = blockers.length ? ` (${blockers.length} unmapped)` : "";
+    el.createBatchTool.textContent = `tool: ${String(el.createTool?.value || "grok").toLowerCase()} -> ${targetLabel}${blockedSuffix}`;
   }
   if (el.createBatchPreview) {
-    el.createBatchPreview.textContent = `request: ${createRequestPreviewText(el)}`;
+    const firstPath = selected.values().next().value || el.createCwd?.value || "";
+    const targetPreview = count > 1 && !blockers.length && String(target?.id || "local") !== "local"
+      ? `${target.label}: ${count} mapped`
+      : launchTargetPreviewText(firstPath, target);
+    el.createBatchPreview.textContent = `target: ${targetPreview} · request: ${createRequestPreviewText(el)}`;
   }
 }
 

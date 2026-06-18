@@ -5,7 +5,7 @@ mod picker {
         InitialRequestInputRenderModel, PickerFilterRenderItem,
     };
     use super::super::*;
-    use swimmers::types::RepoActionStatus;
+    use swimmers::types::{LaunchPathMapping, RepoActionStatus};
 
     fn rect(x: u16, y: u16, width: u16) -> Rect {
         Rect {
@@ -154,6 +154,26 @@ mod picker {
         }
     }
 
+    fn mapped_response_target(id: &str) -> LaunchTargetSummary {
+        LaunchTargetSummary {
+            id: id.to_string(),
+            label: format!("{id} target"),
+            kind: "swimmers_api".to_string(),
+            base_url: Some("http://127.0.0.1:3210".to_string()),
+            auth_token_env: None,
+            path_mappings: vec![
+                LaunchPathMapping {
+                    local_prefix: "/Users/tester/repos".to_string(),
+                    remote_prefix: "/srv/repos".to_string(),
+                },
+                LaunchPathMapping {
+                    local_prefix: "/Users/tester/repos/opensource".to_string(),
+                    remote_prefix: "/srv/opensource".to_string(),
+                },
+            ],
+        }
+    }
+
     fn apply_response_picker(entries: Vec<DirEntry>) -> PickerState {
         PickerState::new(
             0,
@@ -285,6 +305,61 @@ mod picker {
         );
         assert_eq!(picker.group_edit_target.as_deref(), Some("gamma"));
         assert!(picker.batch_excluded_paths.is_empty());
+    }
+
+    #[test]
+    fn launch_target_preview_uses_longest_mapping_and_blocks_unmapped_remote_cwds() {
+        let target = mapped_response_target("devbox");
+
+        let preview =
+            launch_target_preview_for_path("/Users/tester/repos/opensource/swimmers", &target);
+        assert_eq!(preview.target_id, "devbox");
+        assert_eq!(preview.target_label, "devbox target");
+        assert_eq!(
+            preview.remote_cwd.as_deref(),
+            Some("/srv/opensource/swimmers")
+        );
+        assert_eq!(preview.blocked_reason, None);
+
+        let blocker = launch_target_preview_for_path("/tmp/outside", &target);
+        assert_eq!(blocker.remote_cwd, None);
+        assert_eq!(blocker.blocked_reason, Some("unmapped cwd"));
+
+        let unsupported = launch_target_preview_for_path(
+            "/Users/tester/repos/swimmers",
+            &apply_response_target("legacy"),
+        );
+        assert_eq!(unsupported.blocked_reason, Some("unsupported target"));
+    }
+
+    #[test]
+    fn batch_launch_blockers_find_unmapped_remote_rows_only() {
+        let mut picker = PickerState::new(
+            0,
+            0,
+            DirListResponse {
+                path: "/Users/tester/repos".to_string(),
+                entries: vec![
+                    apply_response_entry("swimmers", "/Users/tester/repos/opensource/swimmers"),
+                    apply_response_entry("outside", "/tmp/outside"),
+                ],
+                overlay_label: None,
+                groups: Vec::new(),
+                launch_targets: vec![mapped_response_target("devbox")],
+                default_launch_target: Some("devbox".to_string()),
+            },
+            true,
+            SpawnTool::Codex,
+            None,
+        );
+
+        let blockers = picker.batch_launch_blockers();
+        assert_eq!(blockers.len(), 1);
+        assert_eq!(blockers[0].local_cwd, "/tmp/outside");
+        assert_eq!(blockers[0].blocked_reason, Some("unmapped cwd"));
+
+        picker.launch_target = Some("local".to_string());
+        assert!(picker.batch_launch_blockers().is_empty());
     }
 
     #[test]
@@ -858,6 +933,10 @@ mod picker {
         let request = InitialRequestState::new("/fixture/projects/swimmers".to_string(), None);
         let batch_request =
             InitialRequestState::new_batch(vec!["/tmp/a".to_string(), "/tmp/b".to_string()], None);
+        let remote_batch_request = InitialRequestState::new_batch(
+            vec!["/tmp/a".to_string(), "/tmp/b".to_string()],
+            Some("devbox".to_string()),
+        );
 
         assert_eq!(
             initial_request_context_line(
@@ -870,6 +949,10 @@ mod picker {
         assert_eq!(
             initial_request_context_line(&batch_request, &wide_layout, None),
             "batch: 2 included dirs"
+        );
+        assert_eq!(
+            initial_request_context_line(&remote_batch_request, &wide_layout, None),
+            "batch: 2 included dirs -> devbox"
         );
         assert_eq!(
             initial_request_context_line(&request, &narrow_layout, None),

@@ -2267,6 +2267,52 @@ test("sheetActionAvailabilityPlan preserves enabled action state", () => {
   });
 });
 
+test("sheetActionAvailabilityPlan blocks batch submit for unmapped remote rows", () => {
+  const plan = sheetActionAvailabilityPlan({
+    writeDisabled: false,
+    hasSession: true,
+    batchReady: true,
+    batchBlocked: true,
+    hasSinglePath: true,
+    visibleSelectableCount: 1,
+    hasBrowserPath: true,
+    hasThoughtConfig: true,
+    hasNativeStatus: true,
+    nativeSupported: true,
+    hasMermaidPath: true,
+    hasDirsPath: true,
+    hasParentDir: true,
+    sendTargetType: "session",
+    sendTargetReady: true,
+  });
+
+  assert.equal(plan.createButtonDisabled, false);
+  assert.equal(plan.createBatchSubmitDisabled, true);
+});
+
+test("sheetActionAvailabilityPlan blocks single create for unmapped remote cwd", () => {
+  const plan = sheetActionAvailabilityPlan({
+    writeDisabled: false,
+    hasSession: true,
+    batchReady: false,
+    singleBlocked: true,
+    hasSinglePath: true,
+    visibleSelectableCount: 1,
+    hasBrowserPath: true,
+    hasThoughtConfig: true,
+    hasNativeStatus: true,
+    nativeSupported: true,
+    hasMermaidPath: true,
+    hasDirsPath: true,
+    hasParentDir: true,
+    sendTargetType: "session",
+    sendTargetReady: true,
+  });
+
+  assert.equal(plan.createButtonDisabled, true);
+  assert.equal(plan.createBatchSubmitDisabled, true);
+});
+
 test("sheetActionAvailabilityPlan preserves read-only and missing-resource disabled state", () => {
   assert.deepEqual(sheetActionAvailabilityPlan({
     writeDisabled: true,

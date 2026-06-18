@@ -3,8 +3,8 @@ use super::{
     picker_batch_exclude_label, picker_entry_action_advance, picker_entry_actions,
     picker_entry_actions_start_x, picker_entry_actions_width, picker_layout, shorten_path,
     tail_text, toggle_hint, tool_button_label, truncate_label, ActionLabel, Color, DirEntry,
-    InitialRequestLayout, InitialRequestState, PickerLayout, PickerSelection, PickerState, Rect,
-    Renderer, VoiceUiState, INITIAL_REQUEST_HEIGHT, INITIAL_REQUEST_WIDTH,
+    InitialRequestLayout, InitialRequestState, LaunchTargetPreview, PickerLayout, PickerSelection,
+    PickerState, Rect, Renderer, VoiceUiState, INITIAL_REQUEST_HEIGHT, INITIAL_REQUEST_WIDTH,
 };
 
 pub(crate) fn render_picker(renderer: &mut Renderer, picker: &PickerState, field: Rect) {
@@ -96,8 +96,19 @@ fn render_picker_path_row(
         })
         .unwrap_or(layout.content.x);
     let path_width = layout.content.right().saturating_sub(path_x) as usize;
-    let path_label = truncate_label(&picker.relative_label(), path_width);
+    let path_label = picker_path_row_label(picker);
+    let path_label = truncate_label(&path_label, path_width);
     renderer.draw_text(path_x, layout.content.y + 1, &path_label, picker_color);
+}
+
+fn picker_path_row_label(picker: &PickerState) -> String {
+    let base = picker.relative_label();
+    picker_launch_preview_suffix(
+        &picker.launch_target_preview_for_path(&picker.current_path),
+        36,
+    )
+    .map(|suffix| format!("{base} | {suffix}"))
+    .unwrap_or(base)
 }
 
 fn render_picker_filter_row(renderer: &mut Renderer, picker: &PickerState, layout: &PickerLayout) {
@@ -324,13 +335,41 @@ fn picker_entry_row_index(
 }
 
 fn picker_entry_row_line(picker: &PickerState, index: usize, entry: &DirEntry) -> String {
+    let launch_suffix = picker
+        .path_for_entry(index)
+        .and_then(|path| {
+            picker_launch_preview_suffix(&picker.launch_target_preview_for_path(&path), 32)
+        })
+        .map(|suffix| format!(" [{suffix}]"))
+        .unwrap_or_default();
     format!(
-        "{} {} {}{}",
+        "{} {} {}{}{}",
         picker_entry_row_marker(picker, index),
         picker_entry_row_icon(entry),
         entry.name,
-        picker_entry_row_running_suffix(entry)
+        picker_entry_row_running_suffix(entry),
+        launch_suffix
     )
+}
+
+fn picker_launch_preview_suffix(
+    preview: &LaunchTargetPreview,
+    max_remote_chars: usize,
+) -> Option<String> {
+    if preview.target_id == "local" {
+        return None;
+    }
+    if let Some(remote_cwd) = preview.remote_cwd.as_deref() {
+        return Some(format!(
+            "{}: {}",
+            preview.target_label,
+            shorten_path(remote_cwd, max_remote_chars)
+        ));
+    }
+    if let Some(reason) = preview.blocked_reason {
+        return Some(format!("{}: {reason}", preview.target_label));
+    }
+    Some(preview.target_label.clone())
 }
 
 fn picker_entry_row_marker(picker: &PickerState, index: usize) -> &'static str {
@@ -499,20 +538,30 @@ pub(super) fn initial_request_context_line(
     layout: &InitialRequestLayout,
     group_context: Option<(&str, usize)>,
 ) -> String {
+    let target_suffix = initial_request_launch_target_suffix(initial_request);
     let line = if let Some((label, count)) = group_context {
         format!("school: {} ({} sessions)", label, count)
     } else if let Some(dirs) = initial_request.batch_dirs.as_ref() {
-        format!("batch: {} included dirs", dirs.len())
+        format!("batch: {} included dirs{}", dirs.len(), target_suffix)
     } else {
+        let cwd_width = layout
+            .content
+            .width
+            .saturating_sub(5 + target_suffix.len() as u16) as usize;
         format!(
-            "cwd: {}",
-            shorten_path(
-                &initial_request.cwd,
-                layout.content.width.saturating_sub(5) as usize,
-            )
+            "cwd: {}{}",
+            shorten_path(&initial_request.cwd, cwd_width,),
+            target_suffix
         )
     };
     truncate_label(&line, layout.content.width as usize)
+}
+
+fn initial_request_launch_target_suffix(initial_request: &InitialRequestState) -> String {
+    match initial_request.launch_target.as_deref() {
+        Some(target) if target != "local" => format!(" -> {target}"),
+        _ => String::new(),
+    }
 }
 
 pub(super) fn initial_request_hint(

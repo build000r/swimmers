@@ -1,4 +1,19 @@
 use super::*;
+use swimmers::types::LaunchPathMapping;
+
+fn remote_target_mapping_alpha() -> LaunchTargetSummary {
+    LaunchTargetSummary {
+        id: "devbox".to_string(),
+        label: "Devbox".to_string(),
+        kind: "swimmers_api".to_string(),
+        base_url: Some("http://127.0.0.1:3210".to_string()),
+        auth_token_env: None,
+        path_mappings: vec![LaunchPathMapping {
+            local_prefix: TEST_REPO_ALPHA.to_string(),
+            remote_prefix: "/srv/repos/alpha".to_string(),
+        }],
+    }
+}
 
 #[test]
 fn render_picker_uses_current_repo_theme_color() {
@@ -1250,6 +1265,41 @@ fn spawn_here_opens_initial_request_for_current_path() {
 }
 
 #[test]
+fn remote_picker_activation_blocks_unmapped_entry_before_composer() {
+    let api = MockApi::new();
+    let field = test_field();
+    let mut response = dir_response(TEST_REPOS_ROOT, &[("alpha", false), ("beta", false)]);
+    response.launch_targets = vec![LaunchTargetSummary::local(), remote_target_mapping_alpha()];
+    response.default_launch_target = Some("devbox".to_string());
+    let mut app = make_app(api.clone());
+    app.picker = Some(PickerState::new(
+        10,
+        10,
+        response,
+        true,
+        SpawnTool::Codex,
+        None,
+    ));
+
+    app.activate_picker_entry(1, field);
+
+    assert!(app.initial_request.is_none());
+    assert!(app
+        .visible_message()
+        .is_some_and(|message| message.contains("unmapped cwd")));
+    assert!(api.create_calls().is_empty());
+
+    app.activate_picker_entry(0, field);
+
+    assert_eq!(
+        app.initial_request
+            .as_ref()
+            .map(|request| request.cwd.as_str()),
+        Some(TEST_REPO_ALPHA)
+    );
+}
+
+#[test]
 fn toggling_to_all_reloads_same_path_without_reordering() {
     let api = MockApi::new();
     api.push_list_dirs(Ok(dir_response(TEST_REPOS_ROOT, &[("opensource", true)])));
@@ -1639,6 +1689,40 @@ fn picker_batch_exclusion_removes_dirs_from_batch_composer() {
     );
     assert!(api.create_calls().is_empty());
     assert!(api.create_batch_calls().is_empty());
+}
+
+#[test]
+fn remote_batch_blocks_unmapped_dirs_before_composer_and_allows_local_override() {
+    let api = MockApi::new();
+    let mut response = dir_response(TEST_REPOS_ROOT, &[("alpha", true), ("beta", true)]);
+    response.launch_targets = vec![LaunchTargetSummary::local(), remote_target_mapping_alpha()];
+    response.default_launch_target = Some("devbox".to_string());
+    let mut app = make_app(api.clone());
+    app.picker = Some(PickerState::new(
+        10,
+        10,
+        response,
+        true,
+        SpawnTool::Codex,
+        None,
+    ));
+
+    app.open_batch_initial_request_for_visible_entries();
+
+    assert!(app.initial_request.is_none());
+    assert!(app
+        .visible_message()
+        .is_some_and(|message| message.contains("remote batch")));
+    assert!(api.create_batch_calls().is_empty());
+
+    app.picker.as_mut().expect("picker").launch_target = Some("local".to_string());
+    app.open_batch_initial_request_for_visible_entries();
+
+    let request = app.initial_request.as_ref().expect("composer");
+    assert_eq!(
+        request.batch_dirs.as_deref(),
+        Some(&[TEST_REPO_ALPHA.to_string(), TEST_REPO_BETA.to_string()][..])
+    );
 }
 
 #[test]
