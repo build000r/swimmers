@@ -34,6 +34,22 @@ function relativeCwd(cwd) {
   return parts.slice(-2).join("/");
 }
 
+function sessionTargetLabel(session) {
+  return String(session?.targetLabel || "local").trim() || "local";
+}
+
+function hostSummaryForSessions(sessions) {
+  const counts = new Map();
+  for (const session of sessions) {
+    const label = sessionTargetLabel(session);
+    counts.set(label, (counts.get(label) || 0) + 1);
+  }
+  return Array.from(counts.entries())
+    .sort((left, right) => right[1] - left[1] || left[0].localeCompare(right[0]))
+    .map(([label, count]) => (count > 1 ? `${label} x${count}` : label))
+    .join(" + ");
+}
+
 function actionCuesForSession(session) {
   return Array.isArray(session?.actionCues) ? session.actionCues : [];
 }
@@ -87,10 +103,12 @@ export function buildTrogdorDomGroups(sessions) {
       key,
       label: session.repoLabel || relativeCwd(key),
       sessions: [],
+      hostSummary: "",
       pressure: 0,
       reason: "quiet",
     };
     existing.sessions.push(session);
+    existing.hostSummary = hostSummaryForSessions(existing.sessions);
     const pressure = trogdorDomPressure(session);
     if (pressure >= existing.pressure) {
       existing.pressure = pressure;

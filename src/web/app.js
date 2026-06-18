@@ -234,6 +234,7 @@ const state = {
   backendHealth: null,
   fleetFilter: { kind: "", key: "" },
   fleetLens: null,
+  sessionGroupMode: "flat",
   surfaceZones: [],
   surfaceMasks: [],
   surfaceClickSuppressUntil: 0,
@@ -1706,6 +1707,7 @@ async function handleSurfaceAction(zone) {
   if (plan.type === "toggle_trogdor_atlas") return toggleTrogdorAtlasSurfaceAction();
   if (plan.type === "focus_terminal") return focusTerminalSurfaceAction();
   if (plan.type === "set_fleet_filter") return setFleetFilter(plan.filter);
+  if (plan.type === "toggle_session_grouping") return toggleSessionGrouping();
   return runSurfaceActionExecution(surfaceActionExecutionForZone(plan, zone));
 }
 
@@ -1718,6 +1720,11 @@ function setFleetFilter(filter = {}) {
   state.fleetFilter = current.kind === next.kind && current.key === next.key
     ? { kind: "", key: "" }
     : next;
+  renderHudSurface();
+}
+
+function toggleSessionGrouping() {
+  state.sessionGroupMode = state.sessionGroupMode === "project" ? "flat" : "project";
   renderHudSurface();
 }
 

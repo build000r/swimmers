@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 
 import {
+  buildSessionRailRows,
   buildSurfaceModel,
   surfaceSession,
 } from "./surface_model.js";
@@ -278,6 +279,72 @@ test("buildSurfaceModel applies fleet lens filters without losing bucket counts"
   assert.equal(model.fleetChips[0].label, "all 2");
   assert.equal(model.fleetChips[1].label, "target Skillbox devbox 1");
   assert.equal(model.fleetChips[1].active, true);
+});
+
+test("buildSurfaceModel builds display-only project groups across local and remote sessions", () => {
+  const local = rawSession({
+    session_id: "local",
+    tmux_name: "local-agent",
+    cwd: "/Users/b/repos/opensource/swimmers",
+    environment: {
+      scope: "local",
+      target_id: "local",
+      target_label: "Local machine",
+      target_kind: "local",
+      display_host: "local",
+      canonical_cwd: "/Users/b/repos/opensource/swimmers",
+    },
+  });
+  const remote = rawSession({
+    session_id: "remote",
+    tmux_name: "remote-agent",
+    cwd: "/srv/skillbox/repos/swimmers",
+    environment: {
+      scope: "remote",
+      target_id: "skillbox",
+      target_label: "Skillbox devbox",
+      target_kind: "swimmers_api",
+      display_host: "Skillbox devbox",
+      canonical_cwd: "/Users/b/repos/opensource/swimmers",
+    },
+  });
+  const other = rawSession({
+    session_id: "other",
+    tmux_name: "other-agent",
+    cwd: "/Users/b/repos/opensource/skills",
+    environment: {
+      scope: "local",
+      target_id: "local",
+      target_label: "Local machine",
+      target_kind: "local",
+      display_host: "local",
+      canonical_cwd: "/Users/b/repos/opensource/skills",
+    },
+  });
+
+  const model = buildSurfaceModel({
+    state: baseState({
+      sessions: [other, remote, local],
+      selectedSessionId: "remote",
+      sessionGroupMode: "project",
+    }),
+    boot: { focus_layout: false, franken_term_available: true },
+    websocketOpen: 7,
+  });
+
+  assert.equal(model.sessionGroupMode, "project");
+  assert.deepEqual(
+    model.sessionRailRows.map((row) => [row.session.sessionId, row.group.label, row.group.count, row.group.hostSummary, row.group.first]),
+    [
+      ["local", "opensource/swimmers", 2, "local + Skillbox devbox", true],
+      ["remote", "opensource/swimmers", 2, "local + Skillbox devbox", false],
+      ["other", "opensource/skills", 1, "local", true],
+    ],
+  );
+  assert.deepEqual(
+    buildSessionRailRows(model.sessions, "flat").map((row) => row.session.sessionId),
+    ["other", "remote", "local"],
+  );
 });
 
 test("buildSurfaceModel reports terminal not ready without the expected websocket state", () => {

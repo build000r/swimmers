@@ -22,6 +22,8 @@ export function surfaceActionDispatchPlan(zone, context = {}) {
       return { type: "trogdor_wpm", actionId: zone.actionId };
     case "toggle_trogdor_atlas":
       return { type: "toggle_trogdor_atlas" };
+    case "toggle_session_grouping":
+      return { type: "toggle_session_grouping" };
     case "trogdor_send":
     case "trogdor_group_send":
       return { type: "open_send_sheet_for_zone" };
@@ -157,6 +159,7 @@ export function surfaceActionExecutionPlan(plan = {}, context = {}) {
     case "open_mermaid":
     case "launch_commit":
     case "toggle_follow":
+    case "toggle_session_grouping":
     case "toggle_select":
     case "copy_selection":
     case "refresh":

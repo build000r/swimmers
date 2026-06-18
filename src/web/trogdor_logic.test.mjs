@@ -916,6 +916,32 @@ test("Trogdor groups sort by pressure and summarize score/action cues", () => {
   assert.deepEqual(summary, { score: "9074", level: 90, actionCues: 2 });
 });
 
+test("Trogdor groups preserve cross-host repo grouping metadata", () => {
+  const local = session({
+    sessionId: "local",
+    repoKey: "/Users/b/repos/opensource/swimmers",
+    repoLabel: "opensource/swimmers",
+    targetLabel: "local",
+    actionCues: [],
+  });
+  const remote = session({
+    sessionId: "remote",
+    repoKey: "/Users/b/repos/opensource/swimmers",
+    repoLabel: "opensource/swimmers",
+    targetLabel: "Skillbox devbox",
+    actionCues: [],
+    operatorPressure: { score: 60, reason: "remote waiting" },
+  });
+
+  const groups = buildTrogdorDomGroups([local, remote]);
+
+  assert.equal(groups.length, 1);
+  assert.equal(groups[0].label, "opensource/swimmers");
+  assert.equal(groups[0].sessions.length, 2);
+  assert.equal(groups[0].hostSummary, "local + Skillbox devbox");
+  assert.equal(groups[0].reason, "remote waiting");
+});
+
 test("Trogdor dragon pose focuses burnt sessions and keeps 8-way body frames", () => {
   const positions = [{ x: 18, y: 40 }, { x: 70, y: 60 }];
   const groups = [

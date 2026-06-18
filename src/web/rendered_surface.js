@@ -99,6 +99,15 @@ function drawHeader(frame, layout, model) {
       },
     ),
     chipSpec(
+      model?.sessionGroupMode === "project" ? "view grouped" : "view flat",
+      model?.sessionGroupMode === "project" ? COLORS.success : COLORS.text,
+      model?.sessionGroupMode === "project" ? COLORS.chipActiveBg : COLORS.chipBg,
+      {
+        type: "action",
+        actionId: "toggle_session_grouping",
+      },
+    ),
+    chipSpec(
       model?.followPublishedSelection ? "published follow on" : "published follow off",
       model?.followPublishedSelection ? COLORS.success : COLORS.muted,
       model?.followPublishedSelection ? COLORS.chipActiveBg : COLORS.chipBg,
@@ -130,7 +139,8 @@ function drawHeader(frame, layout, model) {
 
   let cursorX = layout.header.x + 2;
   const chipY = layout.header.y + 2;
-  const chipLimit = layout.header.x + layout.header.w - 2;
+  const secondaryReserve = Math.max(16, Math.floor(layout.header.w * 0.42)) + 2;
+  const chipLimit = layout.header.x + layout.header.w - 2 - secondaryReserve;
   for (const chip of chips) {
     const width = chip.label.length + 4;
     if (cursorX + width > chipLimit) {
@@ -162,7 +172,8 @@ function drawHeader(frame, layout, model) {
 }
 
 function drawSessionRail(frame, rail, model) {
-  drawPanel(frame, rail, model?.focusLayout ? "published" : "sessions");
+  const grouped = model?.sessionGroupMode === "project";
+  drawPanel(frame, rail, model?.focusLayout ? "published" : grouped ? "sessions grouped" : "sessions");
   pushMask(frame, rail);
 
   const sessions = Array.isArray(model?.sessions) ? model.sessions : [];
@@ -173,31 +184,48 @@ function drawSessionRail(frame, rail, model) {
     return;
   }
 
-  const entryHeight = 4;
+  const rows = Array.isArray(model?.sessionRailRows) && model.sessionRailRows.length
+    ? model.sessionRailRows
+    : sessions.map((session) => ({ type: "session", session }));
+  const entryHeight = grouped ? 5 : 4;
   const availableRows = Math.max(1, rail.h - 3);
   const visibleCount = Math.max(1, Math.floor(availableRows / entryHeight));
-  const selectedIndex = Math.max(0, sessions.findIndex((session) => session.sessionId === model?.selectedSessionId));
-  const start = clampInt(selectedIndex - Math.floor(visibleCount / 2), 0, 0, Math.max(0, sessions.length - visibleCount));
-  const end = Math.min(sessions.length, start + visibleCount);
+  const selectedIndex = Math.max(0, rows.findIndex((row) => row.session?.sessionId === model?.selectedSessionId));
+  const start = clampInt(selectedIndex - Math.floor(visibleCount / 2), 0, 0, Math.max(0, rows.length - visibleCount));
+  const end = Math.min(rows.length, start + visibleCount);
 
   let y = rail.y + 1;
   for (let index = start; index < end; index += 1) {
-    const session = sessions[index];
+    const row = rows[index];
+    const session = row.session;
+    if (!session) continue;
     const isSelected = session.sessionId === model?.selectedSessionId;
     const isPublished = session.sessionId === model?.publishedSessionId;
     const bg = isSelected ? COLORS.sessionActiveBg : isPublished ? COLORS.sessionPublishedBg : COLORS.transparent;
     const fg = isSelected ? COLORS.text : COLORS.text;
     fillRect(frame, rail.x + 1, y, rail.w - 2, entryHeight - 1, bg);
-    drawText(frame, rail.x + 2, y, truncate(session.name, rail.w - 6), {
+    if (grouped) {
+      const groupPrefix = row.group?.first ? "v " : "  ";
+      const groupLabel = row.group
+        ? `${groupPrefix}${row.group.count}x ${shortProjectLabel(row.group.label)} ${compactHostSummary(row.group.hostSummary)}`
+        : `${groupPrefix}${session.repoLabel || session.cwdLabel}`;
+      drawText(frame, rail.x + 2, y, truncate(groupLabel, rail.w - 6), {
+        fg: row.group?.first ? COLORS.accent : COLORS.muted,
+        attrs: row.group?.first ? STYLE_BOLD : 0,
+        width: rail.w - 4,
+      });
+    }
+    const nameY = grouped ? y + 1 : y;
+    drawText(frame, rail.x + 2, nameY, truncate(session.name, rail.w - 6), {
       fg: isSelected ? COLORS.success : fg,
       attrs: STYLE_BOLD,
       width: rail.w - 4,
     });
-    drawText(frame, rail.x + 2, y + 1, truncate(`${stateDisplayLabel(session)} / ${session.toolLabel}`, rail.w - 6), {
+    drawText(frame, rail.x + 2, nameY + 1, truncate(`${stateDisplayLabel(session)} / ${session.toolLabel}`, rail.w - 6), {
       fg: stateEvidenceIsUnverified(session) || session.transportLabel !== "healthy" ? COLORS.warning : COLORS.muted,
       width: rail.w - 4,
     });
-    drawText(frame, rail.x + 2, y + 2, truncate(`${session.cwdLabel} :: ${session.thoughtLabel}`, rail.w - 6), {
+    drawText(frame, rail.x + 2, nameY + 2, truncate(`${session.cwdLabel} :: ${session.thoughtLabel}`, rail.w - 6), {
       fg: COLORS.muted,
       width: rail.w - 4,
     });
@@ -212,13 +240,31 @@ function drawSessionRail(frame, rail, model) {
     y += entryHeight;
   }
 
-  if (end < sessions.length) {
-    drawText(frame, rail.x + 2, rail.y + rail.h - 2, truncate(`more ${sessions.length - end} below`, rail.w - 4), {
+  if (end < rows.length) {
+    drawText(frame, rail.x + 2, rail.y + rail.h - 2, truncate(`more ${rows.length - end} below`, rail.w - 4), {
       fg: COLORS.muted,
       attrs: STYLE_ITALIC,
       width: rail.w - 4,
     });
   }
+}
+
+function shortProjectLabel(label) {
+  const parts = String(label || "").split("/").filter(Boolean);
+  return parts[parts.length - 1] || String(label || "project");
+}
+
+function compactHostSummary(summary) {
+  return String(summary || "")
+    .split(" + ")
+    .map((label) => {
+      const trimmed = label.trim();
+      if (!trimmed) return "";
+      if (trimmed.toLowerCase() === "local") return "L";
+      return trimmed.split(/\s+/).find(Boolean) || trimmed;
+    })
+    .filter(Boolean)
+    .join("+");
 }
 
 function drawDetailRail(frame, rail, model) {
@@ -510,7 +556,8 @@ function drawTrogdorRepoRow(frame, x, y, width, group, model) {
     attrs: STYLE_BOLD,
     width: Math.min(width, labelWidth + 4),
   });
-  drawText(frame, x, y + 1, truncate(`|##| pressure ${pressure} ${group.reason}`, width), {
+  const hostSuffix = group.hostSummary ? ` @ ${group.hostSummary}` : "";
+  drawText(frame, x, y + 1, truncate(`|##| pressure ${pressure} ${group.reason}${hostSuffix}`, width), {
     fg: accent,
     width,
   });
@@ -637,10 +684,12 @@ function buildTrogdorRepoGroups(sessions) {
       key,
       label,
       sessions: [],
+      hostSummary: "",
       pressure: 0,
       reason: "quiet",
     };
     existing.sessions.push(session);
+    existing.hostSummary = hostSummaryForSessions(existing.sessions);
     const pressure = trogdorPressureScore(session);
     if (pressure > existing.pressure) {
       existing.pressure = pressure;
@@ -651,6 +700,18 @@ function buildTrogdorRepoGroups(sessions) {
   return Array.from(groups.values()).sort((left, right) => {
     return right.pressure - left.pressure || left.label.localeCompare(right.label);
   });
+}
+
+function hostSummaryForSessions(sessions) {
+  const counts = new Map();
+  for (const session of sessions) {
+    const label = safeLabel(session.targetLabel, "local");
+    counts.set(label, (counts.get(label) || 0) + 1);
+  }
+  return Array.from(counts.entries())
+    .sort((left, right) => right[1] - left[1] || left[0].localeCompare(right[0]))
+    .map(([label, count]) => (count > 1 ? `${label} x${count}` : label))
+    .join(" + ");
 }
 
 function repoLabel(value) {

@@ -55,6 +55,7 @@ fn thought_entry(session_id: &str, label: &str, thought: &str) -> ThoughtPanelEn
         label: label.to_string(),
         tmux_name: label.to_string(),
         cwd: format!("/repo/{label}"),
+        target_label: "local".to_string(),
         batch: None,
         state: SessionState::Idle,
         current_command: None,
@@ -68,6 +69,28 @@ fn thought_entry(session_id: &str, label: &str, thought: &str) -> ThoughtPanelEn
         mermaid_label: None,
         has_commit_candidate: false,
     }
+}
+
+#[test]
+fn pwd_group_header_label_compacts_cross_host_targets() {
+    let mut local = thought_entry("local", "local-agent", "ready");
+    local.cwd = "/repo/swimmers".to_string();
+    local.target_label = "local".to_string();
+    let mut remote = thought_entry("remote", "remote-agent", "waiting");
+    remote.cwd = "/repo/swimmers".to_string();
+    remote.target_label = "Skillbox devbox".to_string();
+
+    let groups = build_thought_groups(&[local, remote], ThoughtGroupBy::Pwd);
+
+    assert_eq!(groups.len(), 1);
+    assert_eq!(
+        thought_group_header_label(ThoughtGroupBy::Pwd, &groups[0]),
+        "swimmers L+Skillbox"
+    );
+    assert_eq!(
+        thought_group_header_label(ThoughtGroupBy::Batch, &groups[0]),
+        "swimmers"
+    );
 }
 
 #[test]

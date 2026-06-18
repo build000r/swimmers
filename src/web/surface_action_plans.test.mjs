@@ -27,6 +27,9 @@ test("surface action dispatch guards null, disabled, and direct zones", () => {
       filter: { kind: "target", key: "skillbox" },
     },
   );
+  assert.deepEqual(surfaceActionDispatchPlan({ actionId: "toggle_session_grouping" }), {
+    type: "toggle_session_grouping",
+  });
 });
 
 test("surface action dispatch preserves gated current-session send behavior", () => {
@@ -82,6 +85,9 @@ test("surface action execution plans preserve payload passthroughs", () => {
     surfaceActionExecutionPlan({ type: "set_fleet_filter", filter: { kind: "repo", key: "/tmp/repo" } }),
     { type: "set_fleet_filter", filter: { kind: "repo", key: "/tmp/repo" } },
   );
+  assert.deepEqual(surfaceActionExecutionPlan({ type: "toggle_session_grouping" }), {
+    type: "toggle_session_grouping",
+  });
   assert.deepEqual(surfaceActionExecutionPlan({ type: "focus_terminal" }), { type: "ignore" });
 });
 

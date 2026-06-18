@@ -36,6 +36,10 @@ export function normalizeFleetFilter(filter) {
   return { kind, key };
 }
 
+export function normalizeSessionGroupMode(mode) {
+  return String(mode || "").trim().toLowerCase() === "project" ? "project" : "flat";
+}
+
 export function sessionReadiness(session) {
   const state = String(session?.state || "").toLowerCase();
   const rest = String(session?.rest_state || "").toLowerCase();
@@ -173,6 +177,70 @@ export function fleetLensChips(lens, filter) {
   return chips.slice(0, 5);
 }
 
+function groupHostLabel(session) {
+  return session.targetLabel || "local";
+}
+
+function groupHostSummary(sessions) {
+  const counts = new Map();
+  for (const session of sessions) {
+    const label = groupHostLabel(session);
+    counts.set(label, (counts.get(label) || 0) + 1);
+  }
+  return Array.from(counts.entries())
+    .sort((left, right) => right[1] - left[1] || left[0].localeCompare(right[0]))
+    .map(([label, count]) => (count > 1 ? `${label} x${count}` : label))
+    .join(" + ");
+}
+
+export function buildSessionRailRows(sessions, mode = "flat") {
+  const items = Array.isArray(sessions) ? sessions : [];
+  if (normalizeSessionGroupMode(mode) !== "project") {
+    return items.map((session) => ({ type: "session", session }));
+  }
+
+  const groups = new Map();
+  for (const session of items) {
+    const key = session.repoKey || session.canonicalCwd || session.fullCwd || session.cwdLabel || session.name;
+    const existing = groups.get(key) || {
+      key,
+      label: session.repoLabel || relativeCwd(key),
+      sessions: [],
+    };
+    existing.sessions.push(session);
+    groups.set(key, existing);
+  }
+
+  return Array.from(groups.values())
+    .map((group) => ({
+      ...group,
+      hostSummary: groupHostSummary(group.sessions),
+    }))
+    .sort((left, right) => (
+      right.sessions.length - left.sessions.length
+      || left.label.localeCompare(right.label)
+      || left.key.localeCompare(right.key)
+    ))
+    .flatMap((group) => group.sessions
+      .slice()
+      .sort((left, right) => (
+        left.targetLabel.localeCompare(right.targetLabel)
+        || left.name.localeCompare(right.name)
+        || left.sessionId.localeCompare(right.sessionId)
+      ))
+      .map((session, index) => ({
+        type: "session",
+        session,
+        group: {
+          key: group.key,
+          label: group.label,
+          count: group.sessions.length,
+          hostSummary: group.hostSummary,
+          first: index === 0,
+        },
+      })));
+}
+
 export function formatTime(raw) {
   if (!raw) return "unknown";
   const date = new Date(raw);
@@ -297,6 +365,7 @@ export function buildSurfaceModel({
   });
   const allSurfaceSessions = state.sessions.map((session) => surfaceSession(session, surfaceOptions(session)));
   const fleetFilter = normalizeFleetFilter(state.fleetFilter);
+  const sessionGroupMode = normalizeSessionGroupMode(state.sessionGroupMode);
   const fleetLens = buildFleetLensSummary(allSurfaceSessions);
   const surfaceSessions = allSurfaceSessions.filter((session) => sessionMatchesFleetFilter(session, fleetFilter));
   const terminalReady = Boolean(state.terminal && state.ws && state.ws.readyState === websocketOpen);
@@ -330,6 +399,8 @@ export function buildSurfaceModel({
       ? Math.max(0, now() - state.trogdorReaderStartedAt)
       : 0,
     sessions: surfaceSessions,
+    sessionGroupMode,
+    sessionRailRows: buildSessionRailRows(surfaceSessions, sessionGroupMode),
     allSessionCount: allSurfaceSessions.length,
     fleetFilter,
     fleetLens,

@@ -3,7 +3,7 @@ use swimmers::api::remote_sessions;
 use swimmers::color::hsl_to_rgb;
 use swimmers::fleet_lens::build_fleet_lens_summary;
 use swimmers::session_labels::{session_canonical_cwd_key, session_cwd_label};
-use swimmers::types::FleetLensBucketKind;
+use swimmers::types::{FleetLensBucketKind, SessionEnvironmentScope};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 const THOUGHT_COMMIT_LABEL: &str = "[commit]";
@@ -28,6 +28,7 @@ pub(crate) struct ThoughtLogEntry {
     pub(crate) tmux_name: String,
     pub(crate) cwd: String,
     pub(crate) pwd_label: Option<String>,
+    pub(crate) target_label: String,
     pub(crate) batch: Option<SessionBatchMembership>,
     pub(crate) state: SessionState,
     pub(crate) current_command: Option<String>,
@@ -52,6 +53,7 @@ impl ThoughtLogEntry {
             tmux_name: session.tmux_name.clone(),
             cwd: session_canonical_cwd_key(session),
             pwd_label: session_cwd_label(session),
+            target_label: session_target_label(session),
             batch: session.batch.clone(),
             state: session.state,
             current_command: session.current_command.clone(),
@@ -693,6 +695,7 @@ pub(crate) struct ThoughtPanelEntryView {
     pub(crate) label: String,
     pub(crate) tmux_name: String,
     pub(crate) cwd: String,
+    pub(crate) target_label: String,
     pub(crate) batch: Option<SessionBatchMembership>,
     pub(crate) state: SessionState,
     pub(crate) current_command: Option<String>,
@@ -871,6 +874,22 @@ pub(crate) fn session_display_color(
         .unwrap_or_else(|| name_based_color(&session.tmux_name))
 }
 
+fn session_target_label(session: &SessionSummary) -> String {
+    if session.environment.scope != SessionEnvironmentScope::Remote {
+        return "local".to_string();
+    }
+    [
+        session.environment.display_host.as_str(),
+        session.environment.target_label.as_str(),
+        session.environment.target_id.as_str(),
+    ]
+    .into_iter()
+    .map(str::trim)
+    .find(|value| !value.is_empty())
+    .unwrap_or("remote")
+    .to_string()
+}
+
 pub(crate) fn session_state_evidence_unverified(session: &SessionSummary) -> bool {
     session.state_evidence.observed_at.is_none()
         || matches!(session.state_evidence.confidence, StateConfidence::Low)
@@ -923,6 +942,7 @@ pub(crate) fn build_thought_panel_entries<C: TuiApi>(app: &App<C>) -> Vec<Though
             label: label.clone(),
             tmux_name: entry.tmux_name.clone(),
             cwd: entry.cwd.clone(),
+            target_label: entry.target_label.clone(),
             batch: entry.batch.clone(),
             state: entry.state,
             current_command: entry.current_command.clone(),
@@ -954,6 +974,7 @@ pub(crate) fn build_thought_panel_entries<C: TuiApi>(app: &App<C>) -> Vec<Though
             label: label.clone(),
             tmux_name: entity.session.tmux_name.clone(),
             cwd: session_canonical_cwd_key(&entity.session),
+            target_label: session_target_label(&entity.session),
             batch: entity.session.batch.clone(),
             state: entity.session.state,
             current_command: entity.session.current_command.clone(),
@@ -1136,6 +1157,39 @@ fn group_send_session_ids(group_by: ThoughtGroupBy, group: &ThoughtGroup) -> Opt
     (session_ids.len() > 1).then_some(session_ids)
 }
 
+fn compact_target_label(label: &str) -> String {
+    let trimmed = label.trim();
+    if trimmed.eq_ignore_ascii_case("local") {
+        return "L".to_string();
+    }
+    trimmed
+        .split_whitespace()
+        .next()
+        .filter(|value| !value.is_empty())
+        .unwrap_or("remote")
+        .to_string()
+}
+
+fn thought_group_target_summary(group_by: ThoughtGroupBy, group: &ThoughtGroup) -> Option<String> {
+    if group_by != ThoughtGroupBy::Pwd {
+        return None;
+    }
+    let mut labels = group
+        .entries
+        .iter()
+        .map(|entry| compact_target_label(&entry.target_label))
+        .collect::<Vec<_>>();
+    labels.sort();
+    labels.dedup();
+    (labels.len() > 1).then(|| labels.join("+"))
+}
+
+fn thought_group_header_label(group_by: ThoughtGroupBy, group: &ThoughtGroup) -> String {
+    thought_group_target_summary(group_by, group)
+        .map(|summary| format!("{} {}", group.label, summary))
+        .unwrap_or_else(|| group.label.clone())
+}
+
 fn group_header_row<C: TuiApi>(
     app: &App<C>,
     group: &ThoughtGroup,
@@ -1143,7 +1197,11 @@ fn group_header_row<C: TuiApi>(
     thought_content: Rect,
 ) -> ThoughtRowLayout {
     let plan = plan_for_group(app, group_by, group);
-    let base_label = format!("v {} ({})", group.label, group.entries.len());
+    let base_label = format!(
+        "v {} ({})",
+        thought_group_header_label(group_by, group),
+        group.entries.len()
+    );
     let send_session_ids = group_send_session_ids(group_by, group);
     let send_start = send_session_ids
         .as_ref()

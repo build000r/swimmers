@@ -283,6 +283,7 @@ export function renderTrogdorStructure(group, index, pos, dragonPose = null, opt
   ].filter(Boolean).join(" ");
   const label = escapeHtml(group.label);
   const reason = escapeHtml(group.reason);
+  const hostSummary = group.hostSummary ? ` · ${escapeHtml(group.hostSummary)}` : "";
   const style = `--x:${pos.x}%; --y:${pos.y}%; --delay:${index * 130}ms;`;
   const swordsmen = group.sessions.filter((session) => session.trogdorSwordsmanVisible);
 
@@ -291,7 +292,7 @@ export function renderTrogdorStructure(group, index, pos, dragonPose = null, opt
       ${renderStructureSvg(variant, burning)}
       <div class="trogdor-repo-label">
         <strong>${label}</strong>
-        <span>${pressure} / ${reason}</span>
+        <span>${pressure} / ${reason}${hostSummary}</span>
       </div>
       <div class="trogdor-agent-pack">
         ${swordsmen.map((session, agentIndex) => renderTrogdorAgent(session, agentIndex, pos, dragonPose, options)).join("")}

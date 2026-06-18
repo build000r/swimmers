@@ -147,6 +147,61 @@ test("surface exposes parity actions for the selected session", () => {
   assert.match(frameText(frame), /live terminal/);
 });
 
+test("surface renders grouped session rail with host-disambiguated project labels", () => {
+  const local = session({
+    sessionId: "local",
+    name: "local-agent",
+    targetLabel: "local",
+    repoKey: "/Users/b/repos/opensource/swimmers",
+    repoLabel: "opensource/swimmers",
+    cwdLabel: "opensource/swimmers",
+  });
+  const remote = session({
+    sessionId: "remote",
+    name: "remote-agent",
+    targetLabel: "Skillbox devbox",
+    repoKey: "/Users/b/repos/opensource/swimmers",
+    repoLabel: "opensource/swimmers",
+    cwdLabel: "opensource/swimmers @ Skillbox devbox",
+  });
+  const frame = buildSurfaceFrame(baseModel({
+    currentSession: remote,
+    selectedSessionId: "remote",
+    sessionGroupMode: "project",
+    sessions: [local, remote],
+    sessionRailRows: [
+      {
+        type: "session",
+        session: local,
+        group: {
+          key: "/Users/b/repos/opensource/swimmers",
+          label: "opensource/swimmers",
+          count: 2,
+          hostSummary: "local + Skillbox devbox",
+          first: true,
+        },
+      },
+      {
+        type: "session",
+        session: remote,
+        group: {
+          key: "/Users/b/repos/opensource/swimmers",
+          label: "opensource/swimmers",
+          count: 2,
+          hostSummary: "local + Skillbox devbox",
+          first: false,
+        },
+      },
+    ],
+  }));
+  const text = frameText(frame);
+  const actionIds = frame.zones.map((zone) => zone.actionId).filter(Boolean);
+
+  assert.match(text, /view grouped/);
+  assert.match(text, /2x swimmers L\+Skillbox/);
+  assert.ok(actionIds.includes("toggle_session_grouping"));
+});
+
 test("surface shows an overview prompt when no session is selected", () => {
   const frame = buildSurfaceFrame(
     baseModel({
