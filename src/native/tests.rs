@@ -382,6 +382,7 @@ fn attention_group_summary(session_id: &str, tmux_name: &str) -> SessionSummary 
         last_activity_at: chrono::Utc::now(),
         repo_theme_id: None,
         batch: None,
+        environment: Default::default(),
     }
 }
 

@@ -128,6 +128,21 @@ export interface SessionBatchMembership {
   prompt_excerpt?: Nullable<string>;
 }
 
+export type SessionEnvironmentScope = "local" | "remote" | string;
+
+export interface SessionEnvironmentSummary {
+  scope: SessionEnvironmentScope;
+  target_id: string;
+  target_label: string;
+  target_kind: string;
+  display_host: string;
+  remote_session_id: Nullable<string>;
+  launch_source: Nullable<string>;
+  local_cwd: Nullable<string>;
+  remote_cwd: Nullable<string>;
+  canonical_cwd: Nullable<string>;
+}
+
 export interface SessionSummary {
   session_id: string;
   tmux_name: string;
@@ -154,6 +169,7 @@ export interface SessionSummary {
   last_activity_at: IsoDateTime;
   repo_theme_id: Nullable<string>;
   batch: Nullable<SessionBatchMembership | Record<string, unknown>>;
+  environment: SessionEnvironmentSummary;
 }
 
 export interface RepoTheme {
@@ -164,10 +180,31 @@ export interface RepoTheme {
   sprite?: Nullable<string>;
 }
 
+export interface EnvironmentAuthSummary {
+  mode: string;
+  token_env_present: Nullable<boolean>;
+}
+
+export interface EnvironmentSummary {
+  id: string;
+  label: string;
+  kind: string;
+  backend_mode: string;
+  base_url: Nullable<string>;
+  auth: EnvironmentAuthSummary;
+  path_mapping_count: number;
+  status: string;
+  last_seen_at: Nullable<IsoDateTime>;
+  last_error_at: Nullable<IsoDateTime>;
+  last_error: Nullable<string>;
+  freshness_ms: Nullable<number>;
+}
+
 export interface SessionListResponse {
   sessions: SessionSummary[];
   version: number;
   repo_themes: Record<string, RepoTheme | Record<string, unknown>>;
+  environments: EnvironmentSummary[];
 }
 
 export interface ErrorResponse {

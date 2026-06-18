@@ -89,6 +89,7 @@ fn summary(session_id: &str, state: SessionState) -> crate::types::SessionSummar
         last_activity_at: Utc::now(),
         repo_theme_id: None,
         batch: None,
+        environment: Default::default(),
     }
 }
 

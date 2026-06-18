@@ -149,6 +149,53 @@ export function normalizeSessionSummary(value) {
     last_activity_at: stringValue(session.last_activity_at),
     repo_theme_id: optionalString(session.repo_theme_id),
     batch: objectRecord(session.batch),
+    environment: normalizeSessionEnvironmentSummary(session.environment),
+  };
+}
+
+export function normalizeSessionEnvironmentSummary(value) {
+  const environment = objectRecord(value) || {};
+  return {
+    scope: stringValue(environment.scope, "local"),
+    target_id: stringValue(environment.target_id, "local"),
+    target_label: stringValue(environment.target_label, "Local machine"),
+    target_kind: stringValue(environment.target_kind, "local"),
+    display_host: stringValue(environment.display_host, "local"),
+    remote_session_id: optionalString(environment.remote_session_id),
+    launch_source: optionalString(environment.launch_source),
+    local_cwd: optionalString(environment.local_cwd),
+    remote_cwd: optionalString(environment.remote_cwd),
+    canonical_cwd: optionalString(environment.canonical_cwd),
+  };
+}
+
+function normalizeEnvironmentAuthSummary(value) {
+  const auth = objectRecord(value) || {};
+  const tokenEnvPresent =
+    typeof auth.token_env_present === "boolean" ? auth.token_env_present : null;
+  return {
+    mode: stringValue(auth.mode, "none"),
+    token_env_present: tokenEnvPresent,
+  };
+}
+
+export function normalizeEnvironmentSummary(value) {
+  const environment = objectRecord(value) || {};
+  return {
+    id: stringValue(environment.id, "local"),
+    label: stringValue(environment.label, "Local machine"),
+    kind: stringValue(environment.kind, "local"),
+    backend_mode: stringValue(environment.backend_mode, "local"),
+    base_url: optionalString(environment.base_url),
+    auth: normalizeEnvironmentAuthSummary(environment.auth),
+    path_mapping_count: finiteNumber(environment.path_mapping_count),
+    status: stringValue(environment.status, "Unknown"),
+    last_seen_at: optionalString(environment.last_seen_at),
+    last_error_at: optionalString(environment.last_error_at),
+    last_error: optionalString(environment.last_error),
+    freshness_ms: environment.freshness_ms === null || environment.freshness_ms === undefined
+      ? null
+      : finiteNumber(environment.freshness_ms),
   };
 }
 
@@ -159,6 +206,7 @@ export function normalizeSessionListResponse(value) {
     sessions: objectArray(payload.sessions).map(normalizeSessionSummary).filter(Boolean),
     version: finiteNumber(payload.version),
     repo_themes: objectMap(payload.repo_themes),
+    environments: objectArray(payload.environments).map(normalizeEnvironmentSummary),
   };
 }
 

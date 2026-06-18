@@ -244,6 +244,7 @@ fn create_session_response_serializes_repo_theme() {
             last_activity_at: chrono::Utc::now(),
             repo_theme_id: Some("/tmp/proj".into()),
             batch: None,
+            environment: Default::default(),
         },
         repo_theme: Some(theme),
     };
@@ -306,6 +307,7 @@ fn session_created_payload_serializes_repo_theme() {
             last_activity_at: chrono::Utc::now(),
             repo_theme_id: Some("/tmp".into()),
             batch: None,
+            environment: Default::default(),
         },
         repo_theme: Some(theme),
     };

@@ -28,6 +28,7 @@ fn thought_snapshot_for_summary_matches_active_tmux_pane() {
         last_activity_at: Utc::now(),
         repo_theme_id: None,
         batch: None,
+        environment: Default::default(),
     };
 
     let older = DateTime::parse_from_rfc3339("2026-03-08T14:00:05Z")
@@ -114,6 +115,7 @@ fn thought_snapshot_for_summary_does_not_fall_back_to_latest_tmux_pane_without_a
         last_activity_at: Utc::now(),
         repo_theme_id: None,
         batch: None,
+        environment: Default::default(),
     };
 
     let snapshots = HashMap::from([

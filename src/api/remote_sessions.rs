@@ -16,9 +16,10 @@ use crate::config::Config;
 use crate::session::overlay::default_overlay;
 use crate::types::{
     CreateSessionRequest, CreateSessionResponse, CreateSessionsBatchRequest,
-    CreateSessionsBatchResponse, ErrorResponse, LaunchPathMapping, LaunchTargetSummary,
-    SessionAgentContextResponse, SessionGitDiffResponse, SessionListResponse, SessionSummary,
-    SessionTimelineResponse, SessionTranscriptResponse,
+    CreateSessionsBatchResponse, DependencyHealthStatus, EnvironmentAuthSummary,
+    EnvironmentSummary, ErrorResponse, LaunchPathMapping, LaunchTargetSummary,
+    SessionAgentContextResponse, SessionEnvironmentSummary, SessionGitDiffResponse,
+    SessionListResponse, SessionSummary, SessionTimelineResponse, SessionTranscriptResponse,
 };
 
 const REMOTE_LIST_TIMEOUT: Duration = Duration::from_millis(900);
@@ -107,13 +108,129 @@ pub fn namespace_session_summary(
     target: &LaunchTargetSummary,
     mut session: SessionSummary,
 ) -> SessionSummary {
+    let remote_session_id = remote_session_id_for_target(&session.session_id, &target.id)
+        .unwrap_or_else(|| session.session_id.clone());
+    let remote_cwd = session.cwd.clone();
+    let local_cwd = map_remote_cwd_to_local(target, &remote_cwd);
     if !session_id_has_target_namespace(&session.session_id, &target.id) {
         session.session_id = namespace_session_id(&target.id, &session.session_id);
     }
     if !session.tmux_name.starts_with('[') {
         session.tmux_name = format!("[{}] {}", target.label, session.tmux_name);
     }
+    session.environment = SessionEnvironmentSummary::remote(
+        target,
+        remote_session_id,
+        remote_cwd,
+        local_cwd,
+        "remote_swimmers_api",
+    );
     session
+}
+
+fn remote_session_id_for_target(session_id: &str, target_id: &str) -> Option<String> {
+    session_id
+        .strip_prefix(target_id)
+        .and_then(|suffix| suffix.strip_prefix(REMOTE_SESSION_SEPARATOR))
+        .filter(|remote_session_id| !remote_session_id.is_empty())
+        .map(str::to_string)
+}
+
+pub fn environment_summaries(include_remote: bool) -> Vec<EnvironmentSummary> {
+    let mut environments = vec![EnvironmentSummary::local()];
+    if !include_remote {
+        return environments;
+    }
+
+    let Some(overlay) = default_overlay() else {
+        return environments;
+    };
+    environments.extend(
+        overlay
+            .all_launch_targets()
+            .into_iter()
+            .filter(is_swimmers_api_target)
+            .map(|target| environment_summary_for_target(&target)),
+    );
+    environments
+}
+
+fn environment_summary_for_target(target: &LaunchTargetSummary) -> EnvironmentSummary {
+    let (status, last_seen_at, freshness_ms) = remote_target_environment_health(&target.id);
+    EnvironmentSummary {
+        id: target.id.clone(),
+        label: target.label.clone(),
+        kind: target.kind.clone(),
+        backend_mode: "remote_swimmers_api".to_string(),
+        base_url: sanitized_target_base_url(target),
+        auth: environment_auth_summary(target),
+        path_mapping_count: target.path_mappings.len(),
+        status,
+        last_seen_at,
+        last_error_at: None,
+        last_error: None,
+        freshness_ms,
+    }
+}
+
+fn sanitized_target_base_url(target: &LaunchTargetSummary) -> Option<String> {
+    let raw = target.base_url.as_deref()?.trim();
+    if raw.is_empty() {
+        return None;
+    }
+    let mut url = reqwest::Url::parse(raw).ok()?;
+    if !url.username().is_empty() {
+        let _ = url.set_username("");
+    }
+    let _ = url.set_password(None);
+    url.set_query(None);
+    url.set_fragment(None);
+    Some(url.to_string())
+}
+
+fn environment_auth_summary(target: &LaunchTargetSummary) -> EnvironmentAuthSummary {
+    target
+        .auth_token_env
+        .as_deref()
+        .map(str::trim)
+        .filter(|env_key| !env_key.is_empty())
+        .map(|env_key| EnvironmentAuthSummary {
+            mode: "token_env".to_string(),
+            token_env_present: Some(std::env::var_os(env_key).is_some()),
+        })
+        .unwrap_or_else(|| EnvironmentAuthSummary {
+            mode: "none".to_string(),
+            token_env_present: None,
+        })
+}
+
+fn remote_target_environment_health(
+    target_id: &str,
+) -> (DependencyHealthStatus, Option<DateTime<Utc>>, Option<u64>) {
+    let now = Utc::now();
+    with_remote_target_session_cache(|cache| {
+        let Some(entry) = cache.get(target_id) else {
+            return (DependencyHealthStatus::Unknown, None, None);
+        };
+        let status = if now_ms() < entry.backoff_until_ms {
+            if entry.last_seen_at.is_some() {
+                DependencyHealthStatus::Degraded
+            } else {
+                DependencyHealthStatus::Unavailable
+            }
+        } else if entry.last_seen_at.is_some() {
+            DependencyHealthStatus::Healthy
+        } else {
+            DependencyHealthStatus::Unknown
+        };
+        let freshness_ms = entry.last_seen_at.and_then(|seen| {
+            now.signed_duration_since(seen)
+                .to_std()
+                .ok()
+                .map(|duration| duration.as_millis().min(u128::from(u64::MAX)) as u64)
+        });
+        (status, entry.last_seen_at, freshness_ms)
+    })
 }
 
 pub fn denamespace_for_target(
@@ -878,6 +995,18 @@ pub fn map_cwd_for_target(
             ),
         )
     })
+}
+
+fn map_remote_cwd_to_local(target: &LaunchTargetSummary, remote_cwd: &str) -> Option<String> {
+    let reverse_mappings = target
+        .path_mappings
+        .iter()
+        .map(|mapping| LaunchPathMapping {
+            local_prefix: mapping.remote_prefix.clone(),
+            remote_prefix: mapping.local_prefix.clone(),
+        })
+        .collect::<Vec<_>>();
+    map_path_with_mappings(remote_cwd, &reverse_mappings)
 }
 
 pub fn map_path_with_mappings(cwd: &str, mappings: &[LaunchPathMapping]) -> Option<String> {

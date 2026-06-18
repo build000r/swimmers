@@ -235,6 +235,7 @@ mod tests {
             last_activity_at: Utc::now(),
             repo_theme_id: None,
             batch: None,
+            environment: Default::default(),
         }
     }
 

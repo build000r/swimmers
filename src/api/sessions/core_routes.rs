@@ -39,6 +39,7 @@ pub(super) async fn list_sessions(
         sessions,
         version: 0,
         repo_themes: Default::default(),
+        environments: remote_sessions::environment_summaries(true),
     }))
 }
 

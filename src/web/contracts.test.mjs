@@ -71,6 +71,23 @@ test("normalizeSessionListResponse preserves SessionSummary-derived web fields w
       },
       null,
     ],
+    environments: [
+      {
+        id: "remote",
+        label: "Remote",
+        kind: "swimmers_api",
+        backend_mode: "remote_swimmers_api",
+        base_url: "https://remote.example.test",
+        auth: { mode: "token_env", token_env_present: true },
+        path_mapping_count: "2",
+        status: "Healthy",
+        last_seen_at: "2026-06-05T00:01:00Z",
+        last_error_at: null,
+        last_error: 404,
+        freshness_ms: "5",
+      },
+      null,
+    ],
   });
 
   assert.equal(payload.version, 7);
@@ -111,7 +128,33 @@ test("normalizeSessionListResponse preserves SessionSummary-derived web fields w
     last_activity_at: "2026-06-05T00:00:00Z",
     repo_theme_id: null,
     batch: null,
+    environment: {
+      scope: "local",
+      target_id: "local",
+      target_label: "Local machine",
+      target_kind: "local",
+      display_host: "local",
+      remote_session_id: null,
+      launch_source: null,
+      local_cwd: null,
+      remote_cwd: null,
+      canonical_cwd: null,
+    },
   });
+  assert.deepEqual(payload.environments, [{
+    id: "remote",
+    label: "Remote",
+    kind: "swimmers_api",
+    backend_mode: "remote_swimmers_api",
+    base_url: "https://remote.example.test",
+    auth: { mode: "token_env", token_env_present: true },
+    path_mapping_count: 2,
+    status: "Healthy",
+    last_seen_at: "2026-06-05T00:01:00Z",
+    last_error_at: null,
+    last_error: "404",
+    freshness_ms: 5,
+  }]);
 });
 
 test("normalizeOperatorPressureResponse preserves existing Trogdor input fields only", () => {

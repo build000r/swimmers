@@ -32,6 +32,7 @@ fn session_summary(session_id: &str, tmux_name: &str, cwd: &str) -> SessionSumma
         last_activity_at: Utc::now(),
         repo_theme_id: None,
         batch: None,
+        environment: Default::default(),
     }
 }
 

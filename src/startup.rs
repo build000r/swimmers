@@ -921,6 +921,7 @@ mod tests {
             last_activity_at: Utc::now(),
             repo_theme_id: None,
             batch: None,
+            environment: Default::default(),
         };
         supervisor
             .insert_test_handle(spawn_summary_handle(summary).await)
@@ -1008,6 +1009,7 @@ mod tests {
             last_activity_at: Utc::now(),
             repo_theme_id: None,
             batch: None,
+            environment: Default::default(),
         };
         state
             .supervisor

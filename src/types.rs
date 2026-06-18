@@ -463,6 +463,135 @@ impl LaunchTargetSummary {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SessionEnvironmentScope {
+    Local,
+    Remote,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionEnvironmentSummary {
+    pub scope: SessionEnvironmentScope,
+    pub target_id: String,
+    pub target_label: String,
+    pub target_kind: String,
+    pub display_host: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub remote_session_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub launch_source: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub local_cwd: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub remote_cwd: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub canonical_cwd: Option<String>,
+}
+
+impl SessionEnvironmentSummary {
+    pub fn local(cwd: impl Into<String>) -> Self {
+        let cwd = cwd.into();
+        Self {
+            canonical_cwd: (!cwd.is_empty()).then_some(cwd.clone()),
+            local_cwd: (!cwd.is_empty()).then_some(cwd),
+            ..Self::default()
+        }
+    }
+
+    pub fn remote(
+        target: &LaunchTargetSummary,
+        remote_session_id: impl Into<String>,
+        remote_cwd: impl Into<String>,
+        local_cwd: Option<String>,
+        launch_source: impl Into<String>,
+    ) -> Self {
+        let remote_cwd = remote_cwd.into();
+        let canonical_cwd = local_cwd
+            .clone()
+            .or_else(|| (!remote_cwd.is_empty()).then_some(remote_cwd.clone()));
+        Self {
+            scope: SessionEnvironmentScope::Remote,
+            target_id: target.id.clone(),
+            target_label: target.label.clone(),
+            target_kind: target.kind.clone(),
+            display_host: target.label.clone(),
+            remote_session_id: Some(remote_session_id.into()),
+            launch_source: Some(launch_source.into()),
+            local_cwd,
+            remote_cwd: (!remote_cwd.is_empty()).then_some(remote_cwd),
+            canonical_cwd,
+        }
+    }
+}
+
+impl Default for SessionEnvironmentSummary {
+    fn default() -> Self {
+        Self {
+            scope: SessionEnvironmentScope::Local,
+            target_id: "local".to_string(),
+            target_label: "Local machine".to_string(),
+            target_kind: "local".to_string(),
+            display_host: "local".to_string(),
+            remote_session_id: None,
+            launch_source: Some("local_supervisor".to_string()),
+            local_cwd: None,
+            remote_cwd: None,
+            canonical_cwd: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EnvironmentAuthSummary {
+    pub mode: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub token_env_present: Option<bool>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EnvironmentSummary {
+    pub id: String,
+    pub label: String,
+    pub kind: String,
+    pub backend_mode: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base_url: Option<String>,
+    pub auth: EnvironmentAuthSummary,
+    pub path_mapping_count: usize,
+    pub status: DependencyHealthStatus,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_seen_at: Option<DateTime<Utc>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_error_at: Option<DateTime<Utc>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_error: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub freshness_ms: Option<u64>,
+}
+
+impl EnvironmentSummary {
+    pub fn local() -> Self {
+        Self {
+            id: "local".to_string(),
+            label: "Local machine".to_string(),
+            kind: "local".to_string(),
+            backend_mode: "local".to_string(),
+            base_url: None,
+            auth: EnvironmentAuthSummary {
+                mode: "none".to_string(),
+                token_env_present: None,
+            },
+            path_mapping_count: 0,
+            status: DependencyHealthStatus::Healthy,
+            last_seen_at: Some(Utc::now()),
+            last_error_at: None,
+            last_error: None,
+            freshness_ms: Some(0),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RepoActionKind {
@@ -662,6 +791,8 @@ pub struct SessionSummary {
     pub repo_theme_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub batch: Option<SessionBatchMembership>,
+    #[serde(default)]
+    pub environment: SessionEnvironmentSummary,
 }
 
 impl SessionSummary {
@@ -678,13 +809,14 @@ impl SessionSummary {
         last_activity_at: DateTime<Utc>,
     ) -> Self {
         let context_limit = context_limit_for_tool(tool.as_deref());
+        let cwd = cwd.into();
         Self {
             session_id: session_id.into(),
             tmux_name: tmux_name.into(),
             state,
             current_command,
             state_evidence,
-            cwd: cwd.into(),
+            cwd: cwd.clone(),
             tool,
             token_count: 0,
             context_limit,
@@ -704,6 +836,7 @@ impl SessionSummary {
             last_activity_at,
             repo_theme_id: None,
             batch: None,
+            environment: SessionEnvironmentSummary::local(cwd),
         }
     }
 
@@ -792,6 +925,7 @@ impl SessionSummary {
         self.attached_clients = 0;
         self.stale_attached_clients = 0;
         self.transport_health = TransportHealth::Healthy;
+        self.environment = SessionEnvironmentSummary::local(self.cwd.clone());
         self
     }
 }
@@ -1422,6 +1556,8 @@ pub struct SessionListResponse {
     pub version: u64,
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub repo_themes: HashMap<String, RepoTheme>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub environments: Vec<EnvironmentSummary>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

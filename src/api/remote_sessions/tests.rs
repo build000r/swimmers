@@ -81,6 +81,7 @@ async fn capture_list_sessions() -> AxumJson<SessionListResponse> {
         sessions: vec![summary("sess_1")],
         version: 0,
         repo_themes: Default::default(),
+        environments: Vec::new(),
     })
 }
 
@@ -225,6 +226,7 @@ async fn remote_smoke_list_sessions(
             sessions: vec![summary("sess_list")],
             version: 0,
             repo_themes: Default::default(),
+            environments: Vec::new(),
         })
         .into_response(),
         RemoteSmokeScope::Unauthenticated => remote_smoke_auth_error(&headers, "read"),
@@ -512,6 +514,28 @@ fn namespaces_remote_session_summary() {
         namespace_session_id("jeremy-skillbox", "sess_0")
     );
     assert_eq!(session.tmux_name, "[Jeremy Skillbox] 7");
+    assert_eq!(
+        session.environment.scope,
+        crate::types::SessionEnvironmentScope::Remote
+    );
+    assert_eq!(session.environment.target_id, "jeremy-skillbox");
+    assert_eq!(session.environment.target_label, "Jeremy Skillbox");
+    assert_eq!(
+        session.environment.remote_session_id.as_deref(),
+        Some("sess_0")
+    );
+    assert_eq!(
+        session.environment.remote_cwd.as_deref(),
+        Some("/monoserver/opensource/swimmers")
+    );
+    assert_eq!(
+        session.environment.local_cwd.as_deref(),
+        Some("/workspace/repos/opensource/swimmers")
+    );
+    assert_eq!(
+        session.environment.canonical_cwd.as_deref(),
+        Some("/workspace/repos/opensource/swimmers")
+    );
 }
 
 #[test]
@@ -520,6 +544,10 @@ fn namespace_session_summary_preserves_current_target_namespace_only() {
 
     let same_target = namespace_session_summary(&target, summary("jeremy-skillbox::sess_nested"));
     assert_eq!(same_target.session_id, "jeremy-skillbox::sess_nested");
+    assert_eq!(
+        same_target.environment.remote_session_id.as_deref(),
+        Some("sess_nested")
+    );
 
     let other_target = namespace_session_summary(&target, summary("other-target::sess_nested"));
     assert_eq!(
@@ -529,6 +557,10 @@ fn namespace_session_summary_preserves_current_target_namespace_only() {
     assert_eq!(
         split_remote_session_id(&other_target.session_id),
         Some(("jeremy-skillbox", "other-target::sess_nested"))
+    );
+    assert_eq!(
+        other_target.environment.remote_session_id.as_deref(),
+        Some("other-target::sess_nested")
     );
 }
 
@@ -540,12 +572,47 @@ fn namespace_session_summary_matches_full_target_id_with_separator() {
 
     let same_target = namespace_session_summary(&target, summary("zone::west::sess_nested"));
     assert_eq!(same_target.session_id, "zone::west::sess_nested");
+    assert_eq!(
+        same_target.environment.remote_session_id.as_deref(),
+        Some("sess_nested")
+    );
 
     let other_target = namespace_session_summary(&target, summary("zone::east::sess_nested"));
     assert_eq!(
         other_target.session_id,
         "zone::west::zone::east::sess_nested"
     );
+    assert_eq!(
+        other_target.environment.remote_session_id.as_deref(),
+        Some("zone::east::sess_nested")
+    );
+}
+
+#[test]
+fn environment_summary_redacts_token_values_and_credentialed_base_url() {
+    let _guard = crate::test_support::ENV_LOCK
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
+    std::env::set_var("SWIMMERS_REMOTE_TEST_TOKEN", "secret-token");
+    let mut target = target();
+    target.auth_token_env = Some("SWIMMERS_REMOTE_TEST_TOKEN".to_string());
+    target.base_url =
+        Some("http://secret-token@127.0.0.1:3210/?token=secret-token#secret-token".to_string());
+
+    let environment = environment_summary_for_target(&target);
+    let json = serde_json::to_string(&environment).expect("serialize environment");
+
+    assert_eq!(environment.auth.mode, "token_env");
+    assert_eq!(environment.auth.token_env_present, Some(true));
+    assert_eq!(environment.path_mapping_count, 2);
+    assert!(!json.contains("secret-token"));
+    assert!(!json.contains("SWIMMERS_REMOTE_TEST_TOKEN"));
+    assert_eq!(
+        environment.base_url.as_deref(),
+        Some("http://127.0.0.1:3210/")
+    );
+
+    std::env::remove_var("SWIMMERS_REMOTE_TEST_TOKEN");
 }
 
 #[test]
@@ -765,6 +832,15 @@ async fn remote_poll_failure_returns_cached_stale_sessions_with_degraded_metadat
         SUMMARY_CAUSE_REMOTE_POLL_DEGRADED
     );
     assert!(stale[0].state_evidence.observed_at.is_some());
+    assert_eq!(stale[0].environment.target_id, "jeremy-skillbox");
+    assert_eq!(
+        stale[0].environment.remote_session_id.as_deref(),
+        Some("sess_1")
+    );
+    assert_eq!(
+        stale[0].environment.scope,
+        crate::types::SessionEnvironmentScope::Remote
+    );
 
     bad_handle.abort();
     reset_remote_target_session_cache_for_tests();
