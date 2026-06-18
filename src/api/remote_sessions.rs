@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::net::IpAddr;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
@@ -258,7 +259,14 @@ fn remote_target_environment_health(target: &LaunchTargetSummary) -> RemoteTarge
                 freshness_ms: None,
             };
         };
-        let mut status = if now_ms() < entry.backoff_until_ms {
+        let current_error = cached_poll_error_is_current(entry);
+        let mut status = if current_error {
+            if entry.last_seen_at.is_some() {
+                DependencyHealthStatus::Degraded
+            } else {
+                DependencyHealthStatus::Unavailable
+            }
+        } else if now_ms() < entry.backoff_until_ms {
             if entry.last_seen_at.is_some() {
                 DependencyHealthStatus::Degraded
             } else {
@@ -292,6 +300,14 @@ fn remote_target_environment_health(target: &LaunchTargetSummary) -> RemoteTarge
     })
 }
 
+fn cached_poll_error_is_current(entry: &RemoteTargetSessionCache) -> bool {
+    match (entry.last_error_at, entry.last_seen_at) {
+        (Some(error_at), Some(seen_at)) => error_at >= seen_at,
+        (Some(_), None) => true,
+        _ => false,
+    }
+}
+
 fn remote_target_config_error(target: &LaunchTargetSummary) -> Option<String> {
     target
         .base_url
@@ -320,20 +336,33 @@ pub fn remote_targets_health_snapshot() -> crate::types::DependencyHealthSnapsho
             .with_detail("configured_targets", "unknown")
             .with_detail("probe", "overlay_unavailable");
     };
-    remote_targets_health_snapshot_for_targets(overlay.all_launch_targets())
+    remote_targets_health_snapshot_for_targets(overlay.all_launch_targets(), &Config::from_env())
 }
 
 fn remote_targets_health_snapshot_for_targets(
     targets: Vec<LaunchTargetSummary>,
+    config: &Config,
 ) -> crate::types::DependencyHealthSnapshot {
     let now = Utc::now();
+    let mut skipped_current_server_targets = 0usize;
     let targets = targets
         .into_iter()
         .filter(is_swimmers_api_target)
+        .filter(|target| {
+            let is_current = target_points_at_current_server(target, config);
+            if is_current {
+                skipped_current_server_targets += 1;
+            }
+            !is_current
+        })
         .collect::<Vec<_>>();
     if targets.is_empty() {
         return crate::types::DependencyHealthSnapshot::not_configured(now)
-            .with_detail("configured_targets", "0");
+            .with_detail("configured_targets", "0")
+            .with_detail(
+                "skipped_current_server_targets",
+                skipped_current_server_targets.to_string(),
+            );
     }
 
     let mut healthy = 0usize;
@@ -433,6 +462,10 @@ fn remote_targets_health_snapshot_for_targets(
         missing_mappings.to_string(),
     )
     .with_detail("targets_without_base_url", missing_base_url.to_string())
+    .with_detail(
+        "skipped_current_server_targets",
+        skipped_current_server_targets.to_string(),
+    )
     .with_detail("probe", "session_list_cache");
     snapshot.last_seen_at = last_seen_at;
     snapshot.last_error_at = last_error_at.or(snapshot.last_error_at);
@@ -1413,8 +1446,30 @@ fn target_points_at_current_server(target: &LaunchTargetSummary, config: &Config
     }
     let bind_host = crate::cli::bind_host(&config.bind);
     host.eq_ignore_ascii_case(bind_host)
-        || (crate::cli::is_loopback_bind(&config.bind)
-            && matches!(host, "127.0.0.1" | "localhost" | "::1"))
+        || (crate::cli::is_loopback_bind(&config.bind) && is_loopback_url_host(host))
+        || (is_unspecified_bind_host(bind_host) && is_loopback_url_host(host))
+}
+
+fn is_loopback_url_host(host: &str) -> bool {
+    let host = unbracketed_url_host(host);
+    if host.eq_ignore_ascii_case("localhost") {
+        return true;
+    }
+    host.parse::<IpAddr>()
+        .map(|ip| ip.is_loopback())
+        .unwrap_or(false)
+}
+
+fn unbracketed_url_host(host: &str) -> &str {
+    host.strip_prefix('[')
+        .and_then(|rest| rest.strip_suffix(']'))
+        .unwrap_or(host)
+}
+
+fn is_unspecified_bind_host(host: &str) -> bool {
+    host.parse::<IpAddr>()
+        .map(|ip| ip.is_unspecified())
+        .unwrap_or(false)
 }
 
 pub fn map_cwd_for_target(

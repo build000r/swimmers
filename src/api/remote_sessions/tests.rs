@@ -460,6 +460,12 @@ fn has_request(requests: &[RemoteSmokeRequest], method: &str, path: &str) -> boo
         .any(|request| request.method == method && request.path == path)
 }
 
+fn remote_health_test_config() -> Config {
+    let mut config = Config::default();
+    config.port = 43210;
+    config
+}
+
 #[test]
 fn map_path_uses_longest_matching_prefix() {
     let mapped = map_path_with_mappings(
@@ -706,10 +712,10 @@ fn remote_targets_health_reports_cached_degraded_target_without_secret_values() 
     let stale = record_remote_poll_failure(&remote.id, "REMOTE_SESSION_LIST_FAILED");
     assert_eq!(stale.len(), 1);
 
-    let health = remote_targets_health_snapshot_for_targets(vec![
-        LaunchTargetSummary::local(),
-        remote.clone(),
-    ]);
+    let health = remote_targets_health_snapshot_for_targets(
+        vec![LaunchTargetSummary::local(), remote.clone()],
+        &remote_health_test_config(),
+    );
     assert_eq!(health.status, DependencyHealthStatus::Degraded);
     assert_eq!(health.details["configured_targets"], "1");
     assert_eq!(health.details["degraded_targets"], "1");
@@ -729,6 +735,28 @@ fn remote_targets_health_reports_cached_degraded_target_without_secret_values() 
 }
 
 #[test]
+fn remote_targets_health_keeps_cached_failure_degraded_after_backoff_expires() {
+    reset_remote_target_session_cache_for_tests();
+    let remote = target();
+    record_remote_poll_success(&remote.id, &[summary("sess_0")]);
+    record_remote_poll_failure(&remote.id, "REMOTE_SESSION_LIST_FAILED");
+    with_remote_target_session_cache(|cache| {
+        cache
+            .get_mut(&remote.id)
+            .expect("cached target")
+            .backoff_until_ms = 0;
+    });
+
+    let health = remote_target_environment_health(&remote);
+
+    assert_eq!(health.status, DependencyHealthStatus::Degraded);
+    assert_eq!(
+        health.last_error.as_deref(),
+        Some("REMOTE_SESSION_LIST_FAILED")
+    );
+}
+
+#[test]
 fn remote_targets_health_reports_auth_and_mapping_doctor_without_env_names() {
     let _guard = crate::test_support::ENV_LOCK
         .lock()
@@ -739,7 +767,8 @@ fn remote_targets_health_reports_auth_and_mapping_doctor_without_env_names() {
     remote.auth_token_env = Some("SWIMMERS_REMOTE_TEST_TOKEN".to_string());
     remote.path_mappings = Vec::new();
 
-    let health = remote_targets_health_snapshot_for_targets(vec![remote]);
+    let health =
+        remote_targets_health_snapshot_for_targets(vec![remote], &remote_health_test_config());
     assert_eq!(health.status, DependencyHealthStatus::Unavailable);
     assert_eq!(health.details["auth_env_missing"], "1");
     assert_eq!(health.details["targets_without_path_mappings"], "1");
@@ -747,6 +776,23 @@ fn remote_targets_health_reports_auth_and_mapping_doctor_without_env_names() {
 
     let json = serde_json::to_string(&health).expect("health json");
     assert!(!json.contains("SWIMMERS_REMOTE_TEST_TOKEN"));
+}
+
+#[test]
+fn remote_targets_health_skips_current_server_targets() {
+    reset_remote_target_session_cache_for_tests();
+    let mut config = Config::default();
+    config.bind = "127.0.0.1".to_string();
+    config.port = 3210;
+    let mut self_target = target();
+    self_target.id = "self".to_string();
+    self_target.base_url = Some("http://localhost:3210".to_string());
+
+    let health = remote_targets_health_snapshot_for_targets(vec![self_target], &config);
+
+    assert_eq!(health.status, DependencyHealthStatus::NotConfigured);
+    assert_eq!(health.details["configured_targets"], "0");
+    assert_eq!(health.details["skipped_current_server_targets"], "1");
 }
 
 #[test]
@@ -840,6 +886,24 @@ fn target_points_at_current_server_matches_loopback_aliases() {
 }
 
 #[test]
+fn target_points_at_current_server_matches_wildcard_loopback_aliases() {
+    let mut config = Config::default();
+    config.bind = "0.0.0.0".to_string();
+    config.port = 3210;
+    let mut target = target();
+    target.base_url = Some("http://127.0.0.1:3210".to_string());
+
+    assert!(target_points_at_current_server(&target, &config));
+
+    target.base_url = Some("http://localhost:3210".to_string());
+    assert!(target_points_at_current_server(&target, &config));
+
+    config.bind = "::".to_string();
+    target.base_url = Some("http://[::1]:3210".to_string());
+    assert!(target_points_at_current_server(&target, &config));
+}
+
+#[test]
 fn remote_polling_test_gate_requires_explicit_enablement() {
     let _guard = crate::test_support::ENV_LOCK
         .lock()
@@ -879,6 +943,26 @@ fn remote_poll_targets_skips_current_server_target() {
     let mut self_target = target();
     self_target.id = "self".to_string();
     self_target.base_url = Some("http://localhost:3210".to_string());
+
+    let mut remote_target = target();
+    remote_target.id = "remote".to_string();
+    remote_target.base_url = Some("http://remote.example:3210".to_string());
+
+    let targets = remote_poll_targets(vec![self_target, remote_target], &config);
+
+    assert_eq!(targets.len(), 1);
+    assert_eq!(targets[0].id, "remote");
+}
+
+#[test]
+fn remote_poll_targets_skips_wildcard_bind_self_target() {
+    let mut config = Config::default();
+    config.bind = "0.0.0.0".to_string();
+    config.port = 3210;
+
+    let mut self_target = target();
+    self_target.id = "self".to_string();
+    self_target.base_url = Some("http://127.0.0.1:3210".to_string());
 
     let mut remote_target = target();
     remote_target.id = "remote".to_string();
