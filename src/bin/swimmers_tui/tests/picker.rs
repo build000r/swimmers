@@ -1581,8 +1581,6 @@ fn picker_add_selected_entry_to_group_target_updates_api_and_reloads() {
         None,
     );
     picker.selection = PickerSelection::Entry(0);
-    picker.launch_targets = vec![LaunchTargetSummary::local(), remote_target_mapping_alpha()];
-    picker.launch_target = Some("devbox".to_string());
     app.picker = Some(picker);
 
     app.picker_add_selected_to_group_target();
@@ -1600,7 +1598,39 @@ fn picker_add_selected_entry_to_group_target_updates_api_and_reloads() {
         api.list_calls(),
         vec![(Some(TEST_REPOS_ROOT.to_string()), true)]
     );
-    assert_eq!(api.list_targets(), vec![Some("devbox".to_string())]);
+    assert_eq!(api.list_targets(), vec![None]);
+}
+
+#[test]
+fn picker_group_update_blocks_remote_target_before_local_write() {
+    let api = MockApi::new();
+    let mut app = make_app(api.clone());
+    let mut picker = PickerState::new(
+        10,
+        10,
+        dir_response_with_groups(
+            TEST_REPOS_ROOT,
+            &[("swimmers", false)],
+            &["frontend", "backend"],
+        ),
+        true,
+        SpawnTool::Codex,
+        None,
+    );
+    picker.selection = PickerSelection::Entry(0);
+    picker.launch_targets = vec![LaunchTargetSummary::local(), remote_target_mapping_alpha()];
+    picker.launch_target = Some("devbox".to_string());
+    app.picker = Some(picker);
+
+    app.picker_add_selected_to_group_target();
+
+    assert!(app.pending_interaction.is_none());
+    assert!(api.update_dir_group_memberships_calls().is_empty());
+    assert!(api.list_calls().is_empty());
+    assert_eq!(
+        app.message.as_ref().map(|(message, _)| message.as_str()),
+        Some("remote directory actions are read-only for devbox")
+    );
 }
 
 fn picker_with_grouped_swimmers(groups: &[&str], current_group: Option<&str>) -> PickerState {

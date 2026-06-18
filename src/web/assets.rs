@@ -373,16 +373,31 @@ pub(super) fn normalize_vite_dev_origin(raw: &str) -> Option<String> {
     if trimmed.is_empty() {
         return None;
     }
-    let origin = trimmed.trim_end_matches('/');
-    if !(origin.starts_with("http://") || origin.starts_with("https://")) {
-        return None;
-    }
-    if origin
+    if trimmed
         .bytes()
         .any(|byte| byte.is_ascii_whitespace() || matches!(byte, b'"' | b'\'' | b'<' | b'>'))
     {
         return None;
     }
+    let parsed = reqwest::Url::parse(trimmed).ok()?;
+    if !matches!(parsed.scheme(), "http" | "https") {
+        return None;
+    }
+    if parsed.host_str().is_none()
+        || !parsed.username().is_empty()
+        || parsed.password().is_some()
+        || !matches!(parsed.path(), "" | "/")
+        || parsed.query().is_some()
+        || parsed.fragment().is_some()
+    {
+        return None;
+    }
+    let mut origin = parsed;
+    origin.set_path("");
+    origin.set_query(None);
+    origin.set_fragment(None);
+    let origin = origin.to_string();
+    let origin = origin.trim_end_matches('/');
     Some(origin.to_string())
 }
 

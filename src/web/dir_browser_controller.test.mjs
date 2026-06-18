@@ -186,6 +186,36 @@ test("directory browser controller scopes listings to the selected remote target
   );
 });
 
+test("directory browser controller resets stale remote target for cockpit cwd launch", () => {
+  const opened = [];
+  const { runtime, state, el, syncCount } = createRuntime({
+    openSheet(sheet) {
+      opened.push(sheet);
+    },
+  });
+  state.dirBrowser.launchTargets = [{ id: "local", label: "Local machine", kind: "local" }, devboxTarget()];
+  state.dirBrowser.launchTarget = "devbox";
+  state.dirBrowser.singleLaunchBlocker = { blocked: true };
+  state.dirBrowser.batchLaunchBlockers = [{ localCwd: "/tmp/outside" }];
+  state.dirBrowser.batchSelected = new Set(["/workspace/swimmers"]);
+  el.createLaunchTarget = selectElement("devbox");
+
+  const controller = createDirBrowserController(runtime);
+  controller.openCreateSheetForCwd("/tmp/local-repo");
+
+  assert.deepEqual(opened, ["create"]);
+  assert.equal(el.createCwd.value, "/tmp/local-repo");
+  assert.equal(el.dirsPath.value, "/tmp/local-repo");
+  assert.equal(state.dirBrowser.path, "/tmp/local-repo");
+  assert.equal(state.dirBrowser.launchTarget, "local");
+  assert.equal(el.createLaunchTarget.value, "local");
+  assert.equal(controller.launchTargetPayload(), null);
+  assert.deepEqual(Array.from(state.dirBrowser.batchSelected), []);
+  assert.deepEqual(state.dirBrowser.batchLaunchBlockers, []);
+  assert.equal(state.dirBrowser.singleLaunchBlocker, null);
+  assert.equal(syncCount(), 2);
+});
+
 test("directory browser controller reloads inventory when launch target changes", async () => {
   const previousDocument = globalThis.document;
   globalThis.document = {

@@ -289,8 +289,15 @@ export function createDirBrowserController(runtime) {
       el.dirsPath.value = path;
       state.dirBrowser.path = path;
     }
+    state.dirBrowser.launchTarget = "local";
+    if (el.createLaunchTarget) {
+      el.createLaunchTarget.value = "local";
+    }
+    state.dirBrowser.singleLaunchBlocker = null;
+    state.dirBrowser.batchLaunchBlockers = [];
     state.dirBrowser.group = "";
     clearCreateBatchSelection();
+    syncSheetActionAvailability();
     openSheet("create");
   }
 

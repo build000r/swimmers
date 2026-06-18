@@ -117,6 +117,10 @@ fn remote_inventory_target(target: Option<&str>) -> Option<String> {
         .map(str::to_string)
 }
 
+fn remote_inventory_read_only_message(target: &str) -> String {
+    format!("remote directory actions are read-only for {target}")
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct GroupInputTargets {
     pub(crate) session_ids: Vec<String>,
@@ -127,6 +131,7 @@ pub(crate) enum PendingInteractionResult {
     OpenPicker {
         x: u16,
         y: u16,
+        requested_target: Option<String>,
         response: Result<DirListResponse, String>,
     },
     ReloadPicker {
@@ -973,8 +978,13 @@ impl<C: TuiApi> App<C> {
 
     fn apply_pending_interaction_result(&mut self, result: PendingInteractionResult) {
         match result {
-            PendingInteractionResult::OpenPicker { x, y, response } => {
-                self.apply_open_picker_result(x, y, response);
+            PendingInteractionResult::OpenPicker {
+                x,
+                y,
+                requested_target,
+                response,
+            } => {
+                self.apply_open_picker_result(x, y, requested_target, response);
             }
             PendingInteractionResult::ReloadPicker {
                 managed_only,
@@ -1038,6 +1048,7 @@ impl<C: TuiApi> App<C> {
         &mut self,
         x: u16,
         y: u16,
+        requested_target: Option<String>,
         response: Result<DirListResponse, String>,
     ) {
         match response {
@@ -1057,7 +1068,14 @@ impl<C: TuiApi> App<C> {
                 self.start_picker_repo_search();
             }
             Err(err) => {
-                self.set_message(err);
+                if let Some(target) = requested_target {
+                    self.launch_target = Some("local".to_string());
+                    self.set_message(format!(
+                        "{target} unavailable: {err}; switched picker to local"
+                    ));
+                } else {
+                    self.set_message(err);
+                }
                 self.picker = None;
                 self.last_picker_refresh = None;
             }
@@ -1482,11 +1500,17 @@ impl<C: TuiApi> App<C> {
                 .and_then(|picker| picker.launch_target.as_deref())
                 .or(self.launch_target.as_deref()),
         );
+        let requested_target = target.clone();
         let client = Arc::clone(&self.client);
         self.set_message("loading directories...");
         self.runtime.spawn(async move {
             let response = client.list_dirs(None, true, None, target.as_deref()).await;
-            let _ = tx.send(PendingInteractionResult::OpenPicker { x, y, response });
+            let _ = tx.send(PendingInteractionResult::OpenPicker {
+                x,
+                y,
+                requested_target,
+                response,
+            });
         });
     }
 
@@ -1576,6 +1600,17 @@ impl<C: TuiApi> App<C> {
             return;
         }
 
+        let target = remote_inventory_target(
+            self.picker
+                .as_ref()
+                .and_then(|picker| picker.launch_target.as_deref())
+                .or(self.launch_target.as_deref()),
+        );
+        if let Some(target) = target.as_deref() {
+            self.set_message(remote_inventory_read_only_message(target));
+            return;
+        }
+
         let Some(tx) = self.begin_pending_interaction() else {
             return;
         };
@@ -1590,12 +1625,6 @@ impl<C: TuiApi> App<C> {
             group,
         } = plan;
         self.set_message(format!("updating groups for {entry_label}..."));
-        let target = remote_inventory_target(
-            self.picker
-                .as_ref()
-                .and_then(|picker| picker.launch_target.as_deref())
-                .or(self.launch_target.as_deref()),
-        );
         self.runtime.spawn(async move {
             let response = match client
                 .update_dir_group_memberships(&path, delta.add, delta.remove)
@@ -1648,6 +1677,16 @@ impl<C: TuiApi> App<C> {
             self.set_message(format!("no {} action for this entry", kind_label(kind)));
             return;
         };
+
+        if let Some(target) = remote_inventory_target(
+            self.picker
+                .as_ref()
+                .and_then(|picker| picker.launch_target.as_deref())
+                .or(self.launch_target.as_deref()),
+        ) {
+            self.set_message(remote_inventory_read_only_message(&target));
+            return;
+        }
 
         let Some(tx) = self.begin_pending_interaction() else {
             return;

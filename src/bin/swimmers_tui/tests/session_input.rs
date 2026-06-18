@@ -1093,6 +1093,28 @@ fn toggle_launch_target_persists_across_picker_reopen() {
 }
 
 #[test]
+fn failed_remote_picker_open_resets_launch_target_to_local() {
+    let api = MockApi::new();
+    api.push_list_dirs(Err("remote down".to_string()));
+    let mut app = make_app(api.clone());
+    app.launch_target = Some("jeremy-skillbox".to_string());
+
+    app.open_picker(10, 10);
+    poll_until_interaction(&mut app);
+
+    assert!(app.picker.is_none());
+    assert_eq!(app.launch_target.as_deref(), Some("local"));
+    assert_eq!(
+        api.list_targets(),
+        vec![Some("jeremy-skillbox".to_string())]
+    );
+    assert_eq!(
+        app.message.as_ref().map(|(message, _)| message.as_str()),
+        Some("jeremy-skillbox unavailable: remote down; switched picker to local")
+    );
+}
+
+#[test]
 fn picker_reload_without_preserve_uses_response_launch_default() {
     let mut picker = PickerState::new(
         4,
@@ -1246,6 +1268,48 @@ fn picker_commit_action_calls_api_and_preserves_selection() {
     assert_eq!(
         app.message.as_ref().map(|(message, _)| message.as_str()),
         Some("commit started for swimmers")
+    );
+}
+
+#[test]
+fn picker_commit_action_blocks_remote_target_before_local_write() {
+    let api = MockApi::new();
+    let mut app = make_app(api.clone());
+    let mut picker = PickerState::new(
+        2,
+        2,
+        DirListResponse {
+            path: TEST_REPOS_ROOT.to_string(),
+            entries: vec![repo_dir_entry("swimmers", true, Some(true), None)],
+            overlay_label: None,
+            groups: Vec::new(),
+            launch_targets: vec![
+                LaunchTargetSummary::local(),
+                LaunchTargetSummary {
+                    id: "devbox".to_string(),
+                    label: "Devbox".to_string(),
+                    kind: "swimmers_api".to_string(),
+                    base_url: None,
+                    auth_token_env: None,
+                    path_mappings: Vec::new(),
+                },
+            ],
+            default_launch_target: Some("devbox".to_string()),
+        },
+        true,
+        SpawnTool::Codex,
+        Some("devbox".to_string()),
+    );
+    picker.selection = PickerSelection::Entry(0);
+    app.picker = Some(picker);
+
+    app.picker_start_action_for_selection(RepoActionKind::Commit);
+
+    assert!(app.pending_interaction.is_none());
+    assert!(api.start_repo_action_calls().is_empty());
+    assert_eq!(
+        app.message.as_ref().map(|(message, _)| message.as_str()),
+        Some("remote directory actions are read-only for devbox")
     );
 }
 

@@ -597,6 +597,10 @@ fn vite_dev_origin_tags_use_vite_modules_without_replacing_backend_css() {
     );
     assert!(normalize_vite_dev_origin("ftp://127.0.0.1:5173").is_none());
     assert!(normalize_vite_dev_origin("http://127.0.0.1:5173\"").is_none());
+    assert!(normalize_vite_dev_origin("http://127.0.0.1:5173/selected").is_none());
+    assert!(normalize_vite_dev_origin("http://127.0.0.1:5173?x=1").is_none());
+    assert!(normalize_vite_dev_origin("http://127.0.0.1:5173#hash").is_none());
+    assert!(normalize_vite_dev_origin("http://user@127.0.0.1:5173").is_none());
 
     let tags = frontend_asset_tags_for_vite_dev_origin("http://127.0.0.1:5173/");
     assert_eq!(tags.stylesheets, [APP_CSS_ROUTE]);
