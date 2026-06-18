@@ -38,6 +38,14 @@ fn remote_dir_write_response(target: Option<&str>) -> Option<Response> {
     })
 }
 
+fn require_local_dir_write(auth: &AuthInfo, target: Option<&str>) -> Result<(), Response> {
+    auth.require_scope(AuthScope::SessionsWrite)?;
+    if let Some(response) = remote_dir_write_response(target) {
+        return Err(response);
+    }
+    Ok(())
+}
+
 // GET /v1/dirs?path=...
 async fn list_dirs(
     Extension(auth): Extension<AuthInfo>,
@@ -102,10 +110,7 @@ async fn restart_dir_services(
     State(_state): State<Arc<AppState>>,
     Json(body): Json<DirRestartRequest>,
 ) -> impl IntoResponse {
-    if let Err(resp) = auth.require_scope(AuthScope::SessionsWrite) {
-        return resp;
-    }
-    if let Some(resp) = remote_dir_write_response(body.target.as_deref()) {
+    if let Err(resp) = require_local_dir_write(&auth, body.target.as_deref()) {
         return resp;
     }
 
@@ -129,10 +134,7 @@ async fn start_dir_repo_action_response(
     state: Arc<AppState>,
     body: DirRepoActionRequest,
 ) -> Response {
-    if let Err(resp) = auth.require_scope(AuthScope::SessionsWrite) {
-        return resp;
-    }
-    if let Some(resp) = remote_dir_write_response(body.target.as_deref()) {
+    if let Err(resp) = require_local_dir_write(&auth, body.target.as_deref()) {
         return resp;
     }
 
@@ -148,10 +150,7 @@ async fn update_dir_group_memberships(
     State(state): State<Arc<AppState>>,
     Json(body): Json<DirGroupMembershipUpdateRequest>,
 ) -> Response {
-    if let Err(resp) = auth.require_scope(AuthScope::SessionsWrite) {
-        return resp;
-    }
-    if let Some(resp) = remote_dir_write_response(body.target.as_deref()) {
+    if let Err(resp) = require_local_dir_write(&auth, body.target.as_deref()) {
         return resp;
     }
 
