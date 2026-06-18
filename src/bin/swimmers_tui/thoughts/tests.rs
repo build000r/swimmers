@@ -68,6 +68,7 @@ fn thought_entry(session_id: &str, label: &str, thought: &str) -> ThoughtPanelEn
         thought: thought.to_string(),
         mermaid_label: None,
         has_commit_candidate: false,
+        advisory_label: None,
     }
 }
 

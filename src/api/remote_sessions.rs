@@ -153,7 +153,9 @@ fn remote_session_id_for_target(session_id: &str, target_id: &str) -> Option<Str
 }
 
 pub fn environment_summaries(include_remote: bool) -> Vec<EnvironmentSummary> {
-    let mut environments = vec![EnvironmentSummary::local()];
+    let mut local = EnvironmentSummary::local();
+    local.advisory = crate::advisory::advisory_for_target("local", None);
+    let mut environments = vec![local];
     if !include_remote {
         return environments;
     }
@@ -186,6 +188,7 @@ fn environment_summary_for_target(target: &LaunchTargetSummary) -> EnvironmentSu
         last_error_at: health.last_error_at,
         last_error: health.last_error,
         freshness_ms: health.freshness_ms,
+        advisory: crate::advisory::advisory_for_target(&target.id, None),
     }
 }
 

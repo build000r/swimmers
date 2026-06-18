@@ -310,6 +310,9 @@ function drawDetailRail(frame, rail, model) {
   if (session.commitCandidate) {
     lines.push(["commit", "candidate"]);
   }
+  if (session.advisoryLabel) {
+    lines.push(["advisory", session.advisoryLabel]);
+  }
 
   let y = rail.y + 1;
   drawText(frame, rail.x + 2, y, truncate(session.name, rail.w - 4), {

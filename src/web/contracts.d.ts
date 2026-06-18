@@ -130,6 +130,14 @@ export interface SessionBatchMembership {
 
 export type SessionEnvironmentScope = "local" | "remote" | string;
 
+export interface AdvisoryMetadataSummary {
+  source: string;
+  label: string;
+  value: string;
+  status: string;
+  stale: boolean;
+}
+
 export interface SessionEnvironmentSummary {
   scope: SessionEnvironmentScope;
   target_id: string;
@@ -141,6 +149,7 @@ export interface SessionEnvironmentSummary {
   local_cwd: Nullable<string>;
   remote_cwd: Nullable<string>;
   canonical_cwd: Nullable<string>;
+  advisory: AdvisoryMetadataSummary[];
 }
 
 export interface SessionSummary {
@@ -198,6 +207,7 @@ export interface EnvironmentSummary {
   last_error_at: Nullable<IsoDateTime>;
   last_error: Nullable<string>;
   freshness_ms: Nullable<number>;
+  advisory: AdvisoryMetadataSummary[];
 }
 
 export type FleetLensBucketKind = "target" | "repo" | "state" | "readiness" | "transport";

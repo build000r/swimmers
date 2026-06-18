@@ -178,6 +178,32 @@ test("surfaceSession falls back honestly for unmapped remote cwd", () => {
   assert.equal(session.repoKey, "/srv/skillbox/repos/swimmers");
 });
 
+test("surfaceSession exposes advisory metadata as passive external badges", () => {
+  const session = surfaceSession(rawSession({
+    environment: {
+      scope: "local",
+      target_id: "local",
+      target_label: "Local machine",
+      target_kind: "local",
+      display_host: "local",
+      canonical_cwd: "/Users/b/repos/opensource/swimmers",
+      advisory: [
+        { source: "c0", label: "c0 group", value: "wave-a", status: "external", stale: true },
+        { source: "ntm", label: "", value: "ignored", status: "external", stale: true },
+      ],
+    },
+  }));
+
+  assert.deepEqual(session.advisoryBadges, [{
+    source: "c0",
+    label: "c0 group",
+    value: "wave-a",
+    status: "external",
+    stale: true,
+  }]);
+  assert.equal(session.advisoryLabel, "c0 group: wave-a (external stale)");
+});
+
 test("buildAttentionInbox keeps healthy actionable sessions ahead of degraded remote sessions", () => {
   const healthy = surfaceSession(rawSession({
     session_id: "healthy",
@@ -310,6 +336,7 @@ test("buildSurfaceModel applies fleet lens filters without losing bucket counts"
       target_kind: "swimmers_api",
       display_host: "Skillbox devbox",
       canonical_cwd: "/Users/b/repos/opensource/swimmers",
+      advisory: [{ source: "load_guard", label: "capacity", value: "tight", status: "external", stale: true }],
     },
   });
   const state = baseState({
@@ -330,12 +357,16 @@ test("buildSurfaceModel applies fleet lens filters without losing bucket counts"
   assert.equal(model.attentionInbox[0].sessionId, "remote");
   assert.equal(model.fleetLens.total_sessions, 2);
   assert.equal(
+    model.fleetLens.buckets.find((bucket) => bucket.kind === "target" && bucket.key === "skillbox")?.advisory_count,
+    1,
+  );
+  assert.equal(
     model.fleetLens.buckets.find((bucket) => bucket.kind === "repo")?.count,
     2,
   );
   assert.deepEqual(model.fleetFilter, { kind: "target", key: "skillbox" });
   assert.equal(model.fleetChips[0].label, "all 2");
-  assert.equal(model.fleetChips[1].label, "target Skillbox devbox 1");
+  assert.equal(model.fleetChips[1].label, "target Skillbox devbox 1 · ext 1");
   assert.equal(model.fleetChips[1].active, true);
 });
 

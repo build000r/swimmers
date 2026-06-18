@@ -245,6 +245,18 @@ test("surface annotates untrusted session state", () => {
   assert.match(text, /low unobserved/);
 });
 
+test("surface renders passive advisory metadata in selected session details", () => {
+  const advisorySession = session({
+    advisoryLabel: "c0 (external stale)",
+  });
+  const frame = buildSurfaceFrame(baseModel({ currentSession: advisorySession }));
+  const text = frameText(frame);
+
+  assert.match(text, /advisory/);
+  assert.match(text, /c0 \(external stale\)/);
+  assert.match(text, /external stale/);
+});
+
 test("surface annotates locally inferred medium-confidence state", () => {
   const mediumEvidenceSession = session({
     displayState: undefined,

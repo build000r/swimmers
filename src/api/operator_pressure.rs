@@ -3,7 +3,8 @@ use axum::routing::get;
 use axum::{Extension, Json, Router};
 use std::sync::Arc;
 
-use crate::api::{remote_sessions, AppState};
+use crate::api::service::list_sessions_for_client;
+use crate::api::AppState;
 use crate::auth::{AuthInfo, AuthScope};
 use crate::operator_pressure::{build_operator_pressure_response, OperatorPressureResponse};
 
@@ -12,8 +13,7 @@ async fn get_operator_pressure(
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<OperatorPressureResponse>, axum::response::Response> {
     auth.require_scope(AuthScope::SessionsRead)?;
-    let mut sessions = state.supervisor.list_sessions().await;
-    sessions.extend(remote_sessions::list_remote_sessions().await);
+    let sessions = list_sessions_for_client(&state, true).await;
     Ok(Json(build_operator_pressure_response(&sessions)))
 }
 

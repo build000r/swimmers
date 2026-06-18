@@ -471,6 +471,15 @@ pub enum SessionEnvironmentScope {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AdvisoryMetadataSummary {
+    pub source: String,
+    pub label: String,
+    pub value: String,
+    pub status: String,
+    pub stale: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SessionEnvironmentSummary {
     pub scope: SessionEnvironmentScope,
     pub target_id: String,
@@ -487,6 +496,8 @@ pub struct SessionEnvironmentSummary {
     pub remote_cwd: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub canonical_cwd: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub advisory: Vec<AdvisoryMetadataSummary>,
 }
 
 impl SessionEnvironmentSummary {
@@ -521,6 +532,7 @@ impl SessionEnvironmentSummary {
             local_cwd,
             remote_cwd: (!remote_cwd.is_empty()).then_some(remote_cwd),
             canonical_cwd,
+            advisory: Vec::new(),
         }
     }
 }
@@ -538,6 +550,7 @@ impl Default for SessionEnvironmentSummary {
             local_cwd: None,
             remote_cwd: None,
             canonical_cwd: None,
+            advisory: Vec::new(),
         }
     }
 }
@@ -568,6 +581,8 @@ pub struct EnvironmentSummary {
     pub last_error: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub freshness_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub advisory: Vec<AdvisoryMetadataSummary>,
 }
 
 impl EnvironmentSummary {
@@ -588,6 +603,7 @@ impl EnvironmentSummary {
             last_error_at: None,
             last_error: None,
             freshness_ms: Some(0),
+            advisory: Vec::new(),
         }
     }
 }

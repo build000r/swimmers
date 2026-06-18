@@ -206,6 +206,7 @@ pub async fn list_sessions_for_client(
     if include_remote {
         sessions.extend(remote_sessions::list_remote_sessions().await);
     }
+    crate::advisory::attach_advisories_to_sessions(&mut sessions);
     sessions
 }
 

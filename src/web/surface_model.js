@@ -77,12 +77,14 @@ function addFleetBucket(buckets, kind, key, label, session) {
     stale_count: 0,
     attention_count: 0,
     commit_ready_count: 0,
+    advisory_count: 0,
   };
   bucket.count += 1;
   if (session.isStale || session.transportLabel !== "healthy") bucket.degraded_count += 1;
   if (session.isStale) bucket.stale_count += 1;
   if (session.readinessKey === "needs_attention") bucket.attention_count += 1;
   if (session.commitCandidate) bucket.commit_ready_count += 1;
+  bucket.advisory_count += session.advisoryBadges?.length || 0;
   buckets.set(bucketKey, bucket);
 }
 
@@ -140,9 +142,17 @@ function bucketFor(lens, kind, key = "") {
 
 function inboxChipLabel(bucket) {
   if (bucket?.kind === "readiness" && bucket?.key === "needs_attention") {
-    return `inbox ${bucket.count}`;
+    return appendAdvisoryCount(`inbox ${bucket.count}`, bucket);
   }
-  return `${bucket?.kind || ""} ${bucket?.label || bucket?.key || ""} ${bucket?.count ?? 0}`.trim();
+  return appendAdvisoryCount(
+    `${bucket?.kind || ""} ${bucket?.label || bucket?.key || ""} ${bucket?.count ?? 0}`.trim(),
+    bucket,
+  );
+}
+
+function appendAdvisoryCount(label, bucket) {
+  const count = Number(bucket?.advisory_count || 0);
+  return count > 0 ? `${label} · ext ${count}` : label;
 }
 
 function availableFleetFilter(lens, filter) {
@@ -355,6 +365,37 @@ export function sessionStateTrustLabel(session) {
   return `${confidence} ${freshness} ${cause}`;
 }
 
+export function advisoryBadgeText(badge) {
+  const label = String(badge?.label || badge?.source || "advisory").trim() || "advisory";
+  const value = String(badge?.value || "").trim();
+  const status = String(badge?.status || "external").trim() || "external";
+  const stale = badge?.stale ? " stale" : "";
+  return value ? `${label}: ${value} (${status}${stale})` : `${label} (${status}${stale})`;
+}
+
+export function advisorySummaryLabel(badges) {
+  const items = Array.isArray(badges) ? badges : [];
+  if (!items.length) {
+    return "";
+  }
+  return items.map(advisoryBadgeText).join(" · ");
+}
+
+export function sessionAdvisoryBadges(session) {
+  const advisories = Array.isArray(session?.environment?.advisory)
+    ? session.environment.advisory
+    : [];
+  return advisories
+    .map((advisory) => ({
+      source: String(advisory?.source || "").trim(),
+      label: String(advisory?.label || "").trim(),
+      value: String(advisory?.value || "").trim(),
+      status: String(advisory?.status || "external").trim() || "external",
+      stale: advisory?.stale !== false,
+    }))
+    .filter((advisory) => advisory.source && advisory.label && advisory.value);
+}
+
 export function surfaceSession(session, {
   detail = false,
   operatorPressure = null,
@@ -366,6 +407,7 @@ export function surfaceSession(session, {
   const readiness = sessionReadiness(session);
   const stateKey = String(session.state || "unknown").toLowerCase();
   const transportKey = String(session.transport_health || "unknown").toLowerCase();
+  const advisoryBadges = sessionAdvisoryBadges(session);
   const surface = {
     sessionId: session.session_id,
     name: session.tmux_name || session.session_id,
@@ -401,6 +443,8 @@ export function surfaceSession(session, {
     repoLabel: operatorPressure?.repo_label || relativeCwd(canonicalCwd(session)),
     targetKey: target.key,
     targetLabel: target.label,
+    advisoryBadges,
+    advisoryLabel: advisorySummaryLabel(advisoryBadges),
     stateKey,
     readinessKey: readiness.key,
     readinessLabel: readiness.label,

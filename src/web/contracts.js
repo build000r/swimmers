@@ -117,6 +117,17 @@ export function normalizeActionCue(value) {
   };
 }
 
+export function normalizeAdvisoryMetadataSummary(value) {
+  const advisory = objectRecord(value) || {};
+  return {
+    source: stringValue(advisory.source),
+    label: stringValue(advisory.label),
+    value: stringValue(advisory.value),
+    status: stringValue(advisory.status, "external"),
+    stale: booleanValue(advisory.stale, true),
+  };
+}
+
 export function normalizeSessionSummary(value) {
   const session = objectRecord(value);
   if (!session) {
@@ -166,6 +177,7 @@ export function normalizeSessionEnvironmentSummary(value) {
     local_cwd: optionalString(environment.local_cwd),
     remote_cwd: optionalString(environment.remote_cwd),
     canonical_cwd: optionalString(environment.canonical_cwd),
+    advisory: objectArray(environment.advisory).map(normalizeAdvisoryMetadataSummary),
   };
 }
 
@@ -196,6 +208,7 @@ export function normalizeEnvironmentSummary(value) {
     freshness_ms: environment.freshness_ms === null || environment.freshness_ms === undefined
       ? null
       : finiteNumber(environment.freshness_ms),
+    advisory: objectArray(environment.advisory).map(normalizeAdvisoryMetadataSummary),
   };
 }
 

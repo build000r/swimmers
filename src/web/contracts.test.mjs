@@ -85,6 +85,7 @@ test("normalizeSessionListResponse preserves SessionSummary-derived web fields w
         last_error_at: null,
         last_error: 404,
         freshness_ms: "5",
+        advisory: [{ source: "c0", label: "c0 group", value: 42, stale: false }],
       },
       null,
     ],
@@ -155,6 +156,7 @@ test("normalizeSessionListResponse preserves SessionSummary-derived web fields w
       local_cwd: null,
       remote_cwd: null,
       canonical_cwd: null,
+      advisory: [],
     },
   });
   assert.deepEqual(payload.environments, [{
@@ -170,6 +172,13 @@ test("normalizeSessionListResponse preserves SessionSummary-derived web fields w
     last_error_at: null,
     last_error: "404",
     freshness_ms: 5,
+    advisory: [{
+      source: "c0",
+      label: "c0 group",
+      value: "42",
+      status: "external",
+      stale: false,
+    }],
   }]);
   assert.deepEqual(payload.fleet_lens, {
     total_sessions: 2,

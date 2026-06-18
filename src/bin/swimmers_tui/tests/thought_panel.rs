@@ -677,7 +677,7 @@ fn thought_panel_defaults_to_stopped_only_and_counts_sleeping_agents() {
     let thought_content = layout
         .thought_content
         .expect("wide layout enables thought rail");
-    let mut app = App::new(test_runtime(), api);
+    let mut app = make_app(api);
 
     let working = session_summary_with_thought(
         "sess-working",
@@ -731,7 +731,7 @@ fn thought_panel_show_all_toggle_restores_working_agents() {
     let thought_content = layout
         .thought_content
         .expect("wide layout enables thought rail");
-    let mut app = App::new(test_runtime(), api);
+    let mut app = make_app(api);
 
     let working = session_summary_with_thought(
         "sess-working",
@@ -825,6 +825,48 @@ fn thought_panel_header_summarizes_cross_host_inbox() {
     assert_eq!(
         thought_panel_header(&app),
         "clawgs / pwd / asleep · 0/2 asleep · > all · fleet 2 hosts / 1 project · inbox 1"
+    );
+}
+
+#[test]
+fn thought_panel_marks_advisory_metadata_as_external_and_stale() {
+    let api = MockApi::new();
+    let layout = test_layout(120, 32);
+    let thought_content = layout
+        .thought_content
+        .expect("wide layout enables thought rail");
+    let mut app = make_app(api);
+
+    let mut session = session_summary_with_thought(
+        "sess-local",
+        "7",
+        TEST_REPO_SWIMMERS,
+        "x",
+        "2026-03-08T14:00:05Z",
+    );
+    session.environment.advisory = vec![swimmers::types::AdvisoryMetadataSummary {
+        source: "c0".to_string(),
+        label: "c0".to_string(),
+        value: "w".to_string(),
+        status: "external".to_string(),
+        stale: true,
+    }];
+
+    app.capture_thought_updates(&[session.clone()], layout.thought_entry_capacity());
+    app.entities = vec![SessionEntity::new(session, layout.overview_field)];
+
+    let panel = build_thought_panel(&app, thought_content, layout.thought_entry_capacity());
+    assert_eq!(
+        panel
+            .rows
+            .iter()
+            .map(|row| row.line.as_str())
+            .collect::<Vec<_>>(),
+        vec!["[work] [swimmers/7] codex", "  x · external c0: w stale"]
+    );
+    assert_eq!(
+        thought_panel_header(&app),
+        "clawgs / pwd / all · 0/1 asleep · > asleep · fleet 1 host / 1 project · ext 1"
     );
 }
 

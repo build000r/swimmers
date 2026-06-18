@@ -3,7 +3,7 @@ use swimmers::api::remote_sessions;
 use swimmers::color::hsl_to_rgb;
 use swimmers::fleet_lens::build_fleet_lens_summary;
 use swimmers::session_labels::{session_canonical_cwd_key, session_cwd_label};
-use swimmers::types::{FleetLensBucketKind, SessionEnvironmentScope};
+use swimmers::types::{AdvisoryMetadataSummary, FleetLensBucketKind, SessionEnvironmentScope};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 const THOUGHT_COMMIT_LABEL: &str = "[commit]";
@@ -40,6 +40,7 @@ pub(crate) struct ThoughtLogEntry {
     pub(crate) is_stale: bool,
     pub(crate) transport_health: TransportHealth,
     pub(crate) commit_candidate: bool,
+    pub(crate) advisory_label: Option<String>,
 }
 
 impl ThoughtLogEntry {
@@ -65,6 +66,7 @@ impl ThoughtLogEntry {
             is_stale: session.is_stale,
             transport_health: session.transport_health,
             commit_candidate: session.commit_candidate,
+            advisory_label: advisory_metadata_label(&session.environment.advisory),
         }
     }
 }
@@ -708,6 +710,7 @@ pub(crate) struct ThoughtPanelEntryView {
     pub(crate) thought: String,
     pub(crate) mermaid_label: Option<String>,
     pub(crate) has_commit_candidate: bool,
+    pub(crate) advisory_label: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -959,6 +962,7 @@ pub(crate) fn build_thought_panel_entries<C: TuiApi>(app: &App<C>) -> Vec<Though
                 .filter(|artifact| artifact.available)
                 .map(|artifact| mermaid_badge_label(artifact.slice_name.as_deref())),
             has_commit_candidate: entry.commit_candidate,
+            advisory_label: entry.advisory_label.clone(),
         });
     }
 
@@ -997,6 +1001,7 @@ pub(crate) fn build_thought_panel_entries<C: TuiApi>(app: &App<C>) -> Vec<Though
                 .filter(|artifact| artifact.available)
                 .map(|artifact| mermaid_badge_label(artifact.slice_name.as_deref())),
             has_commit_candidate: entity.session.commit_candidate,
+            advisory_label: advisory_metadata_label(&entity.session.environment.advisory),
         });
     }
 
@@ -1286,9 +1291,36 @@ fn thought_agent_label(entry: &ThoughtPanelEntryView) -> Option<String> {
 }
 
 fn thought_detail_line(entry: &ThoughtPanelEntryView) -> String {
-    thought_text_detail(entry)
+    let detail = thought_text_detail(entry)
         .or_else(|| command_detail(entry))
-        .unwrap_or_else(|| thought_status_detail(entry).to_string())
+        .unwrap_or_else(|| thought_status_detail(entry).to_string());
+    entry
+        .advisory_label
+        .as_deref()
+        .map(|label| format!("{detail} · {label}"))
+        .unwrap_or(detail)
+}
+
+fn advisory_metadata_label(advisory: &[AdvisoryMetadataSummary]) -> Option<String> {
+    let labels = advisory
+        .iter()
+        .filter_map(|item| {
+            let label = item.label.trim();
+            let value = item.value.trim();
+            if label.is_empty() || value.is_empty() {
+                return None;
+            }
+            let status = item.status.trim();
+            let status = if status.is_empty() {
+                "external"
+            } else {
+                status
+            };
+            let stale = if item.stale { " stale" } else { "" };
+            Some(format!("{status} {label}: {value}{stale}"))
+        })
+        .collect::<Vec<_>>();
+    (!labels.is_empty()).then(|| labels.join(" · "))
 }
 
 fn thought_text_detail(entry: &ThoughtPanelEntryView) -> Option<String> {
@@ -1525,7 +1557,12 @@ fn thought_panel_fleet_lens_header<C: TuiApi>(app: &App<C>) -> Option<String> {
         .iter()
         .filter(|bucket| bucket.kind == FleetLensBucketKind::Target)
         .count();
-    if target_count <= 1 {
+    let advisory_count = app
+        .entities
+        .iter()
+        .map(|entity| entity.session.environment.advisory.len())
+        .sum::<usize>();
+    if target_count <= 1 && advisory_count == 0 {
         return None;
     }
     let repo_count = lens
@@ -1557,8 +1594,14 @@ fn thought_panel_fleet_lens_header<C: TuiApi>(app: &App<C>) -> Option<String> {
     } else {
         String::new()
     };
+    let advisory_suffix = if advisory_count > 0 {
+        format!(" · ext {advisory_count}")
+    } else {
+        String::new()
+    };
     Some(format!(
-        "fleet {target_count} hosts / {repo_count} project{}{inbox_suffix}{degraded_suffix}",
+        "fleet {target_count} host{} / {repo_count} project{}{inbox_suffix}{degraded_suffix}{advisory_suffix}",
+        pluralize(target_count),
         pluralize(repo_count)
     ))
 }
