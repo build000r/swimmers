@@ -591,7 +591,7 @@ mod tests {
     use swimmers::thought::protocol::SyncRequestSequence;
     use swimmers::types::{
         ErrorResponse, RestState, SessionGroupInputResult, SessionState, StateEvidence,
-        ThoughtSource, ThoughtState, TransportHealth,
+        ThoughtSource, ThoughtState, TransportHealth, MAX_SESSION_INPUT_BYTES,
     };
     use tokio::sync::mpsc;
     use tokio::sync::RwLock;
@@ -1130,6 +1130,24 @@ printf '{"effective":[],"recommendations":[]}\n'
             .expect_err("empty group should fail");
 
         assert_eq!(err, "VALIDATION_FAILED: session_ids must not be empty");
+    }
+
+    #[tokio::test]
+    async fn send_group_input_returns_oversized_input_as_tui_error_string() {
+        let api = InProcessApi::new(test_state());
+
+        let err = api
+            .send_group_input(
+                vec!["first".to_string(), "second".to_string()],
+                "x".repeat(MAX_SESSION_INPUT_BYTES + 1),
+            )
+            .await
+            .expect_err("oversized group input should fail");
+
+        assert_eq!(
+            err,
+            format!("INPUT_TOO_LARGE: terminal input exceeds {MAX_SESSION_INPUT_BYTES} byte limit")
+        );
     }
 
     #[tokio::test]

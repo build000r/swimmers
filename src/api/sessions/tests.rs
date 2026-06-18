@@ -9,6 +9,7 @@ use crate::thought::runtime_config::ThoughtConfig;
 use crate::types::{
     ErrorResponse, RestState, SessionGroupInputRequest, SessionPaneTailResponse,
     SessionTranscriptRecord, StateEvidence, ThoughtSource, ThoughtState, TransportHealth,
+    MAX_SESSION_INPUT_BYTES,
 };
 use axum::body::to_bytes;
 use axum::extract::{Json, Path, Query, State};

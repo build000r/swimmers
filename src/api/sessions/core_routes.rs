@@ -18,6 +18,7 @@ use crate::types::{
     AdoptSessionRequest, AdoptSessionResponse, CreateSessionRequest, CreateSessionResponse,
     CreateSessionsBatchRequest, CreateSessionsBatchResponse, SessionInputRequest,
     SessionInputResponse, SessionListResponse, SessionState, TerminalSnapshot,
+    MAX_SESSION_INPUT_BYTES,
 };
 
 const SNAPSHOT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
@@ -339,6 +340,16 @@ fn validation_error(message: impl Into<String>) -> Response {
     )
 }
 
+fn input_too_large_error() -> Response {
+    error_response(
+        StatusCode::PAYLOAD_TOO_LARGE,
+        "INPUT_TOO_LARGE",
+        Some(format!(
+            "terminal input exceeds {MAX_SESSION_INPUT_BYTES} byte limit"
+        )),
+    )
+}
+
 pub(super) fn error_response(
     status: StatusCode,
     code: impl Into<String>,
@@ -367,6 +378,9 @@ async fn send_input_response(
 ) -> Response {
     if body.text.is_empty() {
         return validation_error("text must not be empty");
+    }
+    if body.text.len() > MAX_SESSION_INPUT_BYTES {
+        return input_too_large_error();
     }
     if body.submit && body.text.trim().is_empty() {
         return validation_error("submitted text must not be blank");

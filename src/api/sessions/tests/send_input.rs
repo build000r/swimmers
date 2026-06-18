@@ -40,6 +40,29 @@ async fn send_input_rejects_blank_submit_text() {
 }
 
 #[tokio::test]
+async fn send_input_rejects_oversized_text_before_session_lookup() {
+    let response = send_input(
+        Extension(AuthInfo::new(OPERATOR_SCOPES.to_vec())),
+        State(test_state()),
+        Path("sess-1".to_string()),
+        Json(SessionInputRequest {
+            text: "x".repeat(MAX_SESSION_INPUT_BYTES + 1),
+            submit: false,
+        }),
+    )
+    .await
+    .into_response();
+
+    assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+    let json = response_json(response).await;
+    assert_eq!(json["code"], "INPUT_TOO_LARGE");
+    assert_eq!(
+        json["message"],
+        format!("terminal input exceeds {MAX_SESSION_INPUT_BYTES} byte limit")
+    );
+}
+
+#[tokio::test]
 async fn send_input_returns_not_found_for_missing_session() {
     let response = send_input(
         Extension(AuthInfo::new(OPERATOR_SCOPES.to_vec())),

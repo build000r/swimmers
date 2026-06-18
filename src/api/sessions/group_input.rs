@@ -8,6 +8,7 @@ use std::time::Duration;
 use tokio::sync::oneshot;
 
 use crate::api::envelope::error_body;
+use crate::api::service::BATCH_CREATE_MAX_DIRS;
 use crate::api::{remote_sessions, AppState};
 use crate::auth::{AuthInfo, AuthScope};
 use crate::operator_pressure::session_ready_for_operator_group_input;
@@ -15,10 +16,11 @@ use crate::session::actor::{ActorHandle, InputDeliveryResult, SessionCommand};
 use crate::session::overlay::default_overlay;
 use crate::types::{
     ErrorResponse, LaunchTargetSummary, SessionGroupInputRequest, SessionGroupInputResponse,
-    SessionGroupInputResult, SessionState, SessionSummary,
+    SessionGroupInputResult, SessionState, SessionSummary, MAX_SESSION_INPUT_BYTES,
 };
 
 const INPUT_DELIVERY_ACK_TIMEOUT: Duration = Duration::from_secs(2);
+const MAX_GROUP_INPUT_SESSIONS: usize = BATCH_CREATE_MAX_DIRS;
 
 fn group_input_error_result(
     session_id: String,
@@ -47,12 +49,28 @@ fn validate_group_input_request(
             Some("session_ids must not be empty".to_string()),
         ));
     }
+    if body.session_ids.len() > MAX_GROUP_INPUT_SESSIONS {
+        return Err(error_body(
+            "VALIDATION_FAILED",
+            Some(format!(
+                "session_ids must include at most {MAX_GROUP_INPUT_SESSIONS} entries"
+            )),
+        ));
+    }
 
-    let text = body.text.trim().to_string();
-    if text.is_empty() {
+    let text = body.text;
+    if text.trim().is_empty() {
         return Err(error_body(
             "VALIDATION_FAILED",
             Some("text must not be empty".to_string()),
+        ));
+    }
+    if group_input_payload_len(&text) > MAX_SESSION_INPUT_BYTES {
+        return Err(error_body(
+            "INPUT_TOO_LARGE",
+            Some(format!(
+                "terminal input exceeds {MAX_SESSION_INPUT_BYTES} byte limit"
+            )),
         ));
     }
 
@@ -66,8 +84,8 @@ fn validate_group_input_request(
 
     Ok(ValidatedGroupInputRequest {
         session_ids,
-        text: text.clone(),
         input: group_input_bytes(&text),
+        text,
     })
 }
 
@@ -233,6 +251,10 @@ fn group_input_bytes(text: &str) -> Vec<u8> {
     let mut bytes = text.as_bytes().to_vec();
     bytes.extend_from_slice(b"\r\r");
     bytes
+}
+
+fn group_input_payload_len(text: &str) -> usize {
+    text.len().saturating_add(2)
 }
 
 async fn send_group_input_to_ready_session(

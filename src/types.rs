@@ -13,6 +13,8 @@ pub const TERMINAL_RESIZE_MAX_COLS: u16 = 240;
 pub const TERMINAL_RESIZE_MIN_ROWS: u16 = 12;
 /// Browser-compatible maximum terminal rows accepted by resize messages.
 pub const TERMINAL_RESIZE_MAX_ROWS: u16 = 120;
+/// Maximum terminal input payload accepted by WebSocket and REST surfaces.
+pub const MAX_SESSION_INPUT_BYTES: usize = 786_432;
 
 pub fn clamp_terminal_resize(cols: u16, rows: u16) -> (u16, u16) {
     (

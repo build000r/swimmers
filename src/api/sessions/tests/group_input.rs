@@ -39,6 +39,52 @@ async fn send_group_input_rejects_whitespace_text() {
 }
 
 #[tokio::test]
+async fn send_group_input_rejects_oversized_text_before_session_lookup() {
+    let response = send_group_input(
+        Extension(AuthInfo::new(OPERATOR_SCOPES.to_vec())),
+        State(test_state()),
+        Json(SessionGroupInputRequest {
+            session_ids: vec!["one".to_string(), "two".to_string()],
+            text: "x".repeat(MAX_SESSION_INPUT_BYTES + 1),
+        }),
+    )
+    .await
+    .into_response();
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let json = response_json(response).await;
+    assert_eq!(json["code"], "INPUT_TOO_LARGE");
+    assert_eq!(
+        json["message"],
+        format!("terminal input exceeds {MAX_SESSION_INPUT_BYTES} byte limit")
+    );
+}
+
+#[tokio::test]
+async fn send_group_input_rejects_oversized_session_fanout() {
+    let response = send_group_input(
+        Extension(AuthInfo::new(OPERATOR_SCOPES.to_vec())),
+        State(test_state()),
+        Json(SessionGroupInputRequest {
+            session_ids: (0..=BATCH_CREATE_MAX_DIRS)
+                .map(|index| format!("sess-{index}"))
+                .collect(),
+            text: "continue".to_string(),
+        }),
+    )
+    .await
+    .into_response();
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let json = response_json(response).await;
+    assert_eq!(json["code"], "VALIDATION_FAILED");
+    assert_eq!(
+        json["message"],
+        format!("session_ids must include at most {BATCH_CREATE_MAX_DIRS} entries")
+    );
+}
+
+#[tokio::test]
 async fn send_group_input_rejects_fewer_than_two_unique_session_ids() {
     let response = send_group_input(
         Extension(AuthInfo::new(OPERATOR_SCOPES.to_vec())),
@@ -84,6 +130,54 @@ async fn send_group_input_returns_not_found_for_all_missing_sessions() {
     assert_eq!(results[1]["session_id"], "missing-b");
     assert_eq!(results[1]["ok"], false);
     assert_eq!(results[1]["error"]["code"], "SESSION_NOT_FOUND");
+}
+
+#[tokio::test]
+async fn send_group_input_preserves_surrounding_whitespace() {
+    let state = test_state();
+    let first = with_test_batch(summary("first", SessionState::Idle), "batch-group");
+    let second = with_test_batch(summary("second", SessionState::Idle), "batch-group");
+    let mut first_write_rx = insert_group_input_delivery_test_handle(
+        &state,
+        first,
+        Some(InputDeliveryResult {
+            delivered: true,
+            method: "test",
+            message: None,
+        }),
+    )
+    .await;
+    let mut second_write_rx = insert_group_input_delivery_test_handle(
+        &state,
+        second,
+        Some(InputDeliveryResult {
+            delivered: true,
+            method: "test",
+            message: None,
+        }),
+    )
+    .await;
+
+    let response = send_group_input(
+        Extension(AuthInfo::new(OPERATOR_SCOPES.to_vec())),
+        State(state),
+        Json(SessionGroupInputRequest {
+            session_ids: vec!["first".to_string(), "second".to_string()],
+            text: "  keep spacing  ".to_string(),
+        }),
+    )
+    .await
+    .into_response();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        first_write_rx.recv().await.expect("first write"),
+        b"  keep spacing  \r\r".to_vec()
+    );
+    assert_eq!(
+        second_write_rx.recv().await.expect("second write"),
+        b"  keep spacing  \r\r".to_vec()
+    );
 }
 
 #[tokio::test]

@@ -4,9 +4,9 @@ use tokio::sync::oneshot;
 
 use crate::auth::{AuthInfo, AuthScope};
 use crate::session::actor::SessionCommand;
-use crate::types::clamp_terminal_resize;
+use crate::types::{clamp_terminal_resize, MAX_SESSION_INPUT_BYTES};
 
-pub(super) const MAX_WS_INPUT_BYTES: usize = 786_432;
+pub(super) const MAX_WS_INPUT_BYTES: usize = MAX_SESSION_INPUT_BYTES;
 
 #[derive(Debug, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
