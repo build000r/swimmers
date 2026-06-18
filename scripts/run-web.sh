@@ -29,6 +29,7 @@ web_probe_url() {
 
 web_route_status() {
   curl -sS -o /dev/null -w '%{http_code}' \
+    --noproxy '*' \
     --connect-timeout 1 \
     --max-time 2 \
     "$(web_probe_url)" \
