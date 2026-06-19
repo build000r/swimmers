@@ -284,6 +284,41 @@ test("Trogdor atlas island applies the active fleet target filter", () => {
   assert.equal(state.trogdorSurfaceSignature.includes("local"), false);
 });
 
+test("Trogdor atlas island rerenders when remote target labels change", () => {
+  const { runtime, state, surface } = islandRuntime({
+    state: {
+      sessions: [
+        rawSession({
+          session_id: "remote",
+          tmux_name: "Remote",
+          targetKey: "skillbox",
+          targetLabel: "old target",
+          cwd: "/remote/repos/swimmers",
+        }),
+      ],
+      hoveredTrogdorSessionId: "remote",
+    },
+  });
+  const island = createTrogdorAtlasIsland(runtime);
+
+  island.renderTrogdorSurface();
+  assert.match(surface.innerHTML, /old target/);
+
+  state.sessions = [
+    rawSession({
+      session_id: "remote",
+      tmux_name: "Remote",
+      targetKey: "skillbox",
+      targetLabel: "Skillbox devbox",
+      cwd: "/remote/repos/swimmers",
+    }),
+  ];
+  island.renderTrogdorSurface();
+
+  assert.match(surface.innerHTML, /Skillbox devbox/);
+  assert.doesNotMatch(surface.innerHTML, /old target/);
+});
+
 test("Trogdor atlas island keeps pointer, focus, and action dispatch separate from terminal capture", async () => {
   const { calls, launcher, runtime, state, surface } = islandRuntime({
     state: {

@@ -82,6 +82,8 @@ export function trogdorSurfaceSignature(sessions, summary, readOnly = false) {
       session.name,
       session.repoKey,
       session.repoLabel,
+      session.targetKey,
+      session.targetLabel,
       session.state,
       session.restLabel,
       session.thoughtLabel,
