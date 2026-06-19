@@ -320,7 +320,8 @@ fn environment_bootstrap_hint(
     safe_ssh_alias: Option<&str>,
 ) -> Option<String> {
     match normalized_target_kind(target).as_str() {
-        "ssh_only" => ssh_bootstrap_hint_for_alias(safe_ssh_alias),
+        "ssh_only" => configured_bootstrap_hint_for_target(target)
+            .or_else(|| ssh_bootstrap_hint_for_alias(safe_ssh_alias)),
         "swimmers_api" => configured_bootstrap_hint_for_target(target),
         _ => None,
     }
@@ -1093,6 +1094,7 @@ pub async fn create_remote_session_on_target(
     mut body: CreateSessionRequest,
 ) -> Result<CreateSessionResponse, RemoteSessionError> {
     ensure_swimmers_api_target(target)?;
+    ensure_not_current_server_target(target)?;
     body.launch_target = None;
     let client = http_client(REMOTE_CREATE_TIMEOUT)?;
     let url = remote_url(target, "/v1/sessions")?;
@@ -1406,6 +1408,7 @@ pub async fn create_remote_sessions_batch_on_target(
     mut body: CreateSessionsBatchRequest,
 ) -> Result<CreateSessionsBatchResponse, RemoteSessionError> {
     ensure_swimmers_api_target(target)?;
+    ensure_not_current_server_target(target)?;
     body.launch_target = None;
     let client = http_client(REMOTE_CREATE_TIMEOUT)?;
     let url = remote_url(target, "/v1/sessions/batch")?;
@@ -1895,7 +1898,8 @@ fn ssh_handoff_create_response(
 fn ssh_handoff_receipt(target: &LaunchTargetSummary, local_cwd: String) -> LaunchReceipt {
     let alias = safe_ssh_alias_for_target(target);
     let attach_hint = ssh_attach_hint_for_alias(alias.as_deref());
-    let bootstrap_hint = ssh_bootstrap_hint_for_alias(alias.as_deref());
+    let bootstrap_hint = configured_bootstrap_hint_for_target(target)
+        .or_else(|| ssh_bootstrap_hint_for_alias(alias.as_deref()));
     LaunchReceipt {
         outcome: "handoff".to_string(),
         target_id: target.id.clone(),
@@ -2000,6 +2004,24 @@ fn ensure_swimmers_api_target(target: &LaunchTargetSummary) -> Result<(), Remote
         ));
     }
     Ok(())
+}
+
+fn ensure_not_current_server_target(
+    target: &LaunchTargetSummary,
+) -> Result<(), RemoteSessionError> {
+    let config = Config::from_env();
+    if !target_points_at_current_server(target, &config) {
+        return Ok(());
+    }
+
+    Err(RemoteSessionError::new(
+        StatusCode::BAD_REQUEST,
+        "LAUNCH_TARGET_INVALID",
+        format!(
+            "launch target '{}' points at this Swimmers server; use the local target or configure a different remote API",
+            target.id
+        ),
+    ))
 }
 
 fn is_swimmers_api_target(target: &LaunchTargetSummary) -> bool {

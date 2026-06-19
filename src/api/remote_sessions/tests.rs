@@ -9,6 +9,7 @@ use axum::http::HeaderMap;
 use axum::routing::{get, post};
 use axum::{Json as AxumJson, Router};
 use chrono::Utc;
+use std::ffi::OsString;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
@@ -58,6 +59,29 @@ struct CaptureState {
 }
 
 type CapturedRequests = Vec<(Option<String>, CreateSessionRequest)>;
+
+struct TestEnvGuard {
+    key: &'static str,
+    previous: Option<OsString>,
+}
+
+impl TestEnvGuard {
+    fn set(key: &'static str, value: impl Into<OsString>) -> Self {
+        let previous = std::env::var_os(key);
+        std::env::set_var(key, value.into());
+        Self { key, previous }
+    }
+}
+
+impl Drop for TestEnvGuard {
+    fn drop(&mut self) {
+        if let Some(value) = &self.previous {
+            std::env::set_var(self.key, value);
+        } else {
+            std::env::remove_var(self.key);
+        }
+    }
+}
 
 fn shared_remote_cache_test_guard() -> std::sync::MutexGuard<'static, ()> {
     crate::test_support::ENV_LOCK
@@ -1147,6 +1171,28 @@ fn environment_summary_refuses_command_hints_for_unsafe_ssh_alias() {
 }
 
 #[test]
+fn ssh_only_uses_configured_bootstrap_hint_for_environment_and_receipt() {
+    let mut target = target();
+    target.id = "skillbox-devbox".to_string();
+    target.label = "Skillbox devbox".to_string();
+    target.kind = "ssh_only".to_string();
+    target.bootstrap_hint = Some("ssh remote-devbox 'swimmers serve'".to_string());
+
+    let environment = environment_summary_for_target(&target);
+    let receipt = ssh_handoff_receipt(&target, "/workspace/swimmers".to_string());
+
+    assert_eq!(
+        environment.bootstrap_hint.as_deref(),
+        Some("ssh remote-devbox 'swimmers serve'")
+    );
+    assert!(environment.capabilities.bootstrap_hint);
+    assert_eq!(
+        receipt.bootstrap_hint.as_deref(),
+        Some("ssh remote-devbox 'swimmers serve'")
+    );
+}
+
+#[test]
 fn remote_targets_health_reports_cached_degraded_target_without_secret_values() {
     let _guard = shared_remote_cache_test_guard();
     reset_remote_target_session_cache_for_tests();
@@ -1794,6 +1840,53 @@ async fn create_remote_session_posts_without_recursive_launch_target_and_namespa
     drop(requests);
     handle.abort();
     std::env::remove_var("SWIMMERS_REMOTE_TEST_TOKEN");
+}
+
+#[tokio::test]
+async fn remote_launch_rejects_current_server_targets() {
+    let _guard = crate::test_support::ENV_LOCK
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
+    let _bind = TestEnvGuard::set("SWIMMERS_BIND", "127.0.0.1");
+    let _port = TestEnvGuard::set("PORT", "3210");
+    let target = target();
+
+    let create_err = create_remote_session_on_target(
+        &target,
+        CreateSessionRequest {
+            name: None,
+            cwd: Some("/monoserver/opensource/swimmers".to_string()),
+            spawn_tool: Some(SpawnTool::Codex),
+            launch_target: Some("jeremy-skillbox".to_string()),
+            initial_request: Some("should not recurse".to_string()),
+        },
+    )
+    .await
+    .expect_err("self-target single launch should be rejected");
+
+    assert_eq!(create_err.status, StatusCode::BAD_REQUEST);
+    assert_eq!(create_err.code(), "LAUNCH_TARGET_INVALID");
+    assert!(create_err
+        .message()
+        .contains("points at this Swimmers server"));
+
+    let batch_err = create_remote_sessions_batch_on_target(
+        &target,
+        CreateSessionsBatchRequest {
+            dirs: vec!["/monoserver/opensource/swimmers".to_string()],
+            spawn_tool: Some(SpawnTool::Codex),
+            launch_target: Some("jeremy-skillbox".to_string()),
+            initial_request: Some("should not recurse".to_string()),
+        },
+    )
+    .await
+    .expect_err("self-target batch launch should be rejected");
+
+    assert_eq!(batch_err.status, StatusCode::BAD_REQUEST);
+    assert_eq!(batch_err.code(), "LAUNCH_TARGET_INVALID");
+    assert!(batch_err
+        .message()
+        .contains("points at this Swimmers server"));
 }
 
 #[tokio::test]
