@@ -97,6 +97,24 @@ fn pwd_group_header_label_compacts_cross_host_targets() {
 }
 
 #[test]
+fn pwd_group_header_label_disambiguates_same_prefix_remote_targets() {
+    let mut devbox = thought_entry("devbox", "devbox-agent", "ready");
+    devbox.cwd = "/repo/swimmers".to_string();
+    devbox.target_label = "Skillbox devbox".to_string();
+    let mut prod = thought_entry("prod", "prod-agent", "waiting");
+    prod.cwd = "/repo/swimmers".to_string();
+    prod.target_label = "Skillbox prod".to_string();
+
+    let groups = build_thought_groups(&[devbox, prod], ThoughtGroupBy::Pwd);
+
+    assert_eq!(groups.len(), 1);
+    assert_eq!(
+        thought_group_header_label(ThoughtGroupBy::Pwd, &groups[0]),
+        "swimmers Skillbox devbox+Skillbox prod"
+    );
+}
+
+#[test]
 fn thought_name_based_color_matches_shared_hsl_and_dark_terminal_adjustment() {
     let name = "repo-session";
     let mut hasher = DefaultHasher::new();

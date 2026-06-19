@@ -1436,6 +1436,15 @@ fn compact_target_label(label: &str) -> String {
         .to_string()
 }
 
+fn normalized_target_label(label: &str) -> String {
+    let trimmed = label.trim();
+    if trimmed.is_empty() {
+        "remote".to_string()
+    } else {
+        trimmed.to_string()
+    }
+}
+
 fn thought_group_target_summary(group_by: ThoughtGroupBy, group: &ThoughtGroup) -> Option<String> {
     if group_by != ThoughtGroupBy::Pwd {
         return None;
@@ -1443,11 +1452,35 @@ fn thought_group_target_summary(group_by: ThoughtGroupBy, group: &ThoughtGroup) 
     let mut labels = group
         .entries
         .iter()
-        .map(|entry| compact_target_label(&entry.target_label))
+        .map(|entry| normalized_target_label(&entry.target_label))
         .collect::<Vec<_>>();
     labels.sort();
     labels.dedup();
-    (labels.len() > 1).then(|| labels.join("+"))
+    if labels.len() <= 1 {
+        return None;
+    }
+
+    let mut compact_counts = std::collections::BTreeMap::<String, usize>::new();
+    for label in &labels {
+        *compact_counts
+            .entry(compact_target_label(label))
+            .or_default() += 1;
+    }
+
+    let mut display_labels = labels
+        .into_iter()
+        .map(|label| {
+            let compact = compact_target_label(&label);
+            if compact_counts.get(&compact).copied().unwrap_or(0) > 1 {
+                label
+            } else {
+                compact
+            }
+        })
+        .collect::<Vec<_>>();
+    display_labels.sort();
+    display_labels.dedup();
+    Some(display_labels.join("+"))
 }
 
 fn thought_group_header_label(group_by: ThoughtGroupBy, group: &ThoughtGroup) -> String {
