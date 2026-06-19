@@ -2,6 +2,7 @@ type CreateBatchCall = (Vec<String>, SpawnTool, Option<String>, Option<String>);
 
 #[derive(Default)]
 struct MockApiState {
+    fetch_session_snapshot_results: VecDeque<Result<SessionListResponse, String>>,
     fetch_sessions_results: VecDeque<Result<Vec<SessionSummary>, String>>,
     backend_health_results: VecDeque<Result<BackendHealthResponse, String>>,
     fetch_thought_config_results: VecDeque<Result<ThoughtConfigResponse, String>>,
@@ -65,6 +66,14 @@ impl MockApi {
             .lock()
             .unwrap()
             .fetch_sessions_results
+            .push_back(result);
+    }
+
+    fn push_fetch_session_snapshot(&self, result: Result<SessionListResponse, String>) {
+        self.state
+            .lock()
+            .unwrap()
+            .fetch_session_snapshot_results
             .push_back(result);
     }
 
@@ -377,6 +386,39 @@ impl MockApi {
 }
 
 impl TuiApi for MockApi {
+    fn fetch_session_snapshot(&self) -> BoxFuture<'_, Result<SessionListResponse, String>> {
+        let state = self.state.clone();
+        Box::pin(async move {
+            let result = {
+                let mut state = state.lock().unwrap();
+                state
+                    .fetch_session_snapshot_results
+                    .pop_front()
+                    .map_or_else(
+                        || {
+                            state
+                                .fetch_sessions_results
+                                .pop_front()
+                                .unwrap_or_else(|| Ok(Vec::new()))
+                                .map(|sessions| SessionListResponse {
+                                    fleet_lens: swimmers::fleet_lens::build_fleet_lens_summary(
+                                        &sessions,
+                                    ),
+                                    fleet_presets:
+                                        swimmers::fleet_lens::build_fleet_lens_presets(Vec::new()),
+                                    sessions,
+                                    version: 0,
+                                    repo_themes: Default::default(),
+                                    environments: Vec::new(),
+                                })
+                        },
+                        |result| result,
+                    )
+            };
+            result
+        })
+    }
+
     fn fetch_sessions(&self) -> BoxFuture<'_, Result<Vec<SessionSummary>, String>> {
         let state = self.state.clone();
         Box::pin(async move {

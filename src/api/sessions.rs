@@ -50,7 +50,7 @@ use self::context_routes::{
 use self::context_routes::{get_agent_context, get_transcript, TranscriptQuery};
 use self::core_routes::{
     adopt_session, create_session, create_sessions_batch, delete_session, dismiss_attention,
-    error_response, get_snapshot, list_sessions, send_input,
+    error_response, get_snapshot, list_environments, list_sessions, send_input,
 };
 #[cfg(test)]
 use self::core_routes::{
@@ -89,6 +89,7 @@ use self::pane_tail::{
 
 pub fn routes() -> Router<Arc<AppState>> {
     Router::new()
+        .route("/v1/environments", get(list_environments))
         .route("/v1/sessions", get(list_sessions).post(create_session))
         .route("/v1/sessions/adopt", post(adopt_session))
         .route("/v1/sessions/reattach", post(adopt_session))

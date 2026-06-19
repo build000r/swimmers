@@ -1843,6 +1843,37 @@ async fn create_remote_session_posts_without_recursive_launch_target_and_namespa
 }
 
 #[tokio::test]
+async fn remote_auth_token_trims_env_value_before_bearer_header() {
+    let _guard = crate::test_support::ENV_LOCK
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
+    let _token_guard = TestEnvGuard::set("SWIMMERS_REMOTE_TEST_TOKEN", " secret-token \n");
+    let (base_url, handle, state) = spawn_create_server().await;
+    let mut target = target();
+    target.base_url = Some(base_url);
+    target.auth_token_env = Some("SWIMMERS_REMOTE_TEST_TOKEN".to_string());
+
+    create_remote_session_on_target(
+        &target,
+        CreateSessionRequest {
+            name: None,
+            cwd: Some("/monoserver/opensource/swimmers".to_string()),
+            spawn_tool: Some(SpawnTool::Codex),
+            launch_target: None,
+            initial_request: None,
+        },
+    )
+    .await
+    .expect("remote create");
+
+    let requests = state.requests.lock().await;
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].0.as_deref(), Some("Bearer secret-token"));
+    drop(requests);
+    handle.abort();
+}
+
+#[tokio::test]
 async fn remote_launch_rejects_current_server_targets() {
     let _guard = crate::test_support::ENV_LOCK
         .lock()

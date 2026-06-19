@@ -525,6 +525,77 @@ async fn api_client_fetch_sessions_overrides_default_client_timeout() {
 }
 
 #[tokio::test]
+async fn api_client_fetch_session_snapshot_uses_single_sessions_envelope() {
+    use axum::routing::get;
+    use axum::{Json, Router};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+
+    let session_hits = Arc::new(AtomicUsize::new(0));
+    let environment_hits = Arc::new(AtomicUsize::new(0));
+    let session_hits_route = Arc::clone(&session_hits);
+    let environment_hits_route = Arc::clone(&environment_hits);
+    let app = Router::new()
+        .route(
+            "/v1/sessions",
+            get(move || {
+                let session_hits = Arc::clone(&session_hits_route);
+                async move {
+                    session_hits.fetch_add(1, Ordering::SeqCst);
+                    let mut environment = EnvironmentSummary::local();
+                    environment.id = "remote-devbox".to_string();
+                    environment.kind = "ssh".to_string();
+                    Json(SessionListResponse {
+                        sessions: vec![session_summary("sess-1", "7", TEST_REPO_SWIMMERS)],
+                        version: 1,
+                        repo_themes: HashMap::new(),
+                        environments: vec![environment],
+                        fleet_lens: Default::default(),
+                        fleet_presets: vec![FleetLensPreset {
+                            id: "remote-devbox".to_string(),
+                            label: "Remote devbox".to_string(),
+                            source: "test".to_string(),
+                            matchers: vec![FleetLensPresetMatcher::TargetId {
+                                id: "remote-devbox".to_string(),
+                            }],
+                        }],
+                    })
+                }
+            }),
+        )
+        .route(
+            "/v1/environments",
+            get(move || {
+                let environment_hits = Arc::clone(&environment_hits_route);
+                async move {
+                    environment_hits.fetch_add(1, Ordering::SeqCst);
+                    Json(EnvironmentListResponse {
+                        environments: Vec::new(),
+                        fleet_presets: Vec::new(),
+                    })
+                }
+            }),
+        );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind test server");
+    let addr = listener.local_addr().expect("server addr");
+    let handle = tokio::spawn(async move {
+        axum::serve(listener, app).await.expect("serve test api");
+    });
+    let client = test_api_client(format!("http://{addr}"), None);
+
+    let snapshot = client.fetch_session_snapshot().await.expect("snapshot");
+
+    handle.abort();
+    assert_eq!(session_hits.load(Ordering::SeqCst), 1);
+    assert_eq!(environment_hits.load(Ordering::SeqCst), 0);
+    assert_eq!(snapshot.sessions.len(), 1);
+    assert_eq!(snapshot.environments[0].id, "remote-devbox");
+    assert_eq!(snapshot.fleet_presets[0].id, "remote-devbox");
+}
+
+#[tokio::test]
 async fn startup_preflight_waits_for_slow_local_sessions() {
     let (base_url, handle) = spawn_delayed_api_server(Some(Duration::from_millis(150)), None).await;
     let client = test_api_client(base_url, None);

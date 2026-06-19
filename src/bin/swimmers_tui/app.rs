@@ -55,7 +55,7 @@ fn sprite_theme_option_width(theme: Option<SpriteTheme>) -> u16 {
 }
 
 pub(crate) struct RefreshResult {
-    pub(crate) sessions: Result<Vec<SessionSummary>, String>,
+    pub(crate) sessions: Result<SessionListResponse, String>,
     pub(crate) mermaid_artifacts: Vec<(String, Result<MermaidArtifactResponse, String>)>,
     pub(crate) session_skills: Vec<(String, Result<SessionSkillListResponse, String>)>,
     pub(crate) backend_health: Result<BackendHealthResponse, String>,

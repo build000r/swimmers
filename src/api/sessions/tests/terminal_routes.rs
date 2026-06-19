@@ -189,6 +189,28 @@ esac
 }
 
 #[tokio::test]
+async fn list_environments_returns_observer_readable_metadata() {
+    let Json(payload) = list_environments(Extension(AuthInfo::new(OBSERVER_SCOPES.to_vec())))
+        .await
+        .expect("environment list should be observer-readable");
+
+    assert!(
+        payload
+            .environments
+            .iter()
+            .any(|environment| environment.id == "local"),
+        "local environment should always be present"
+    );
+    assert!(
+        payload
+            .fleet_presets
+            .iter()
+            .any(|preset| preset.id == "all"),
+        "built-in fleet presets should be present"
+    );
+}
+
+#[tokio::test]
 async fn list_sessions_perf_gate_skips_hung_tmux_active_pane_lookup() {
     let _env_guard = crate::test_support::ENV_LOCK
         .lock()

@@ -304,6 +304,30 @@ impl ApiClient {
             .map(|cache| cache.models)
     }
 
+    async fn fetch_environment_metadata_from_sessions(
+        &self,
+    ) -> Result<EnvironmentListResponse, String> {
+        let url = format!("{}/v1/sessions", self.base_url);
+        let response = self
+            .with_auth(self.http.get(url).timeout(API_SESSION_LIST_TIMEOUT))
+            .send()
+            .await
+            .map_err(|err| self.transport_error("refresh environments", err))?;
+
+        if response.status().is_success() {
+            let payload = response
+                .json::<SessionListResponse>()
+                .await
+                .map_err(|err| format!("failed to parse environments response: {err}"))?;
+            return Ok(EnvironmentListResponse {
+                environments: payload.environments,
+                fleet_presets: payload.fleet_presets,
+            });
+        }
+
+        Err(read_error(response).await)
+    }
+
     async fn send_thought_config_test(
         &self,
         config: &ThoughtConfig,
@@ -471,12 +495,26 @@ fn friendly_transport_error_with_detail(
 }
 
 pub(crate) trait TuiApi: Send + Sync + 'static {
-    fn fetch_sessions(&self) -> BoxFuture<'_, Result<Vec<SessionSummary>, String>>;
-    fn fetch_sessions_for_initial_frame(
-        &self,
-    ) -> BoxFuture<'_, Result<Vec<SessionSummary>, String>> {
-        self.fetch_sessions()
+    fn fetch_session_snapshot(&self) -> BoxFuture<'_, Result<SessionListResponse, String>> {
+        Box::pin(async move {
+            let sessions = self.fetch_sessions().await?;
+            let metadata = self.fetch_environment_metadata().await?;
+            Ok(SessionListResponse {
+                fleet_lens: swimmers::fleet_lens::build_fleet_lens_summary(&sessions),
+                fleet_presets: metadata.fleet_presets,
+                sessions,
+                version: 0,
+                repo_themes: Default::default(),
+                environments: metadata.environments,
+            })
+        })
     }
+    fn fetch_session_snapshot_for_initial_frame(
+        &self,
+    ) -> BoxFuture<'_, Result<SessionListResponse, String>> {
+        self.fetch_session_snapshot()
+    }
+    fn fetch_sessions(&self) -> BoxFuture<'_, Result<Vec<SessionSummary>, String>>;
     fn fetch_environments(&self) -> BoxFuture<'_, Result<Vec<EnvironmentSummary>, String>> {
         Box::pin(async { Ok(Vec::new()) })
     }
@@ -487,6 +525,14 @@ pub(crate) trait TuiApi: Send + Sync + 'static {
                     .map(|overlay| overlay.all_fleet_presets())
                     .unwrap_or_default(),
             ))
+        })
+    }
+    fn fetch_environment_metadata(&self) -> BoxFuture<'_, Result<EnvironmentListResponse, String>> {
+        Box::pin(async move {
+            Ok(EnvironmentListResponse {
+                environments: self.fetch_environments().await?,
+                fleet_presets: self.fetch_fleet_presets().await?,
+            })
         })
     }
     fn fetch_backend_health(&self) -> BoxFuture<'_, Result<BackendHealthResponse, String>>;
@@ -582,7 +628,7 @@ pub(crate) trait TuiApi: Send + Sync + 'static {
 }
 
 impl TuiApi for ApiClient {
-    fn fetch_sessions(&self) -> BoxFuture<'_, Result<Vec<SessionSummary>, String>> {
+    fn fetch_session_snapshot(&self) -> BoxFuture<'_, Result<SessionListResponse, String>> {
         Box::pin(async move {
             let url = format!("{}/v1/sessions", self.base_url);
             let started = Instant::now();
@@ -596,20 +642,27 @@ impl TuiApi for ApiClient {
             tracing::debug!(
                 elapsed_ms = started.elapsed().as_millis() as u64,
                 status = %status,
-                "fetch_sessions response"
+                "fetch_session_snapshot response"
             );
             if status.is_success() {
-                let payload = response
+                return response
                     .json::<SessionListResponse>()
                     .await
-                    .map_err(|err| format!("failed to parse sessions response: {err}"))?;
-                return Ok(payload.sessions);
+                    .map_err(|err| format!("failed to parse sessions response: {err}"));
             }
 
             let body = read_error(response).await;
-            tracing::warn!(status = %status, body = %body, "fetch_sessions non-success status");
+            tracing::warn!(
+                status = %status,
+                body = %body,
+                "fetch_session_snapshot non-success status"
+            );
             Err(body)
         })
+    }
+
+    fn fetch_sessions(&self) -> BoxFuture<'_, Result<Vec<SessionSummary>, String>> {
+        Box::pin(async move { Ok(self.fetch_session_snapshot().await?.sessions) })
     }
 
     fn fetch_thought_config(&self) -> BoxFuture<'_, Result<ThoughtConfigResponse, String>> {
@@ -633,8 +686,16 @@ impl TuiApi for ApiClient {
     }
 
     fn fetch_environments(&self) -> BoxFuture<'_, Result<Vec<EnvironmentSummary>, String>> {
+        Box::pin(async move { Ok(self.fetch_environment_metadata().await?.environments) })
+    }
+
+    fn fetch_fleet_presets(&self) -> BoxFuture<'_, Result<Vec<FleetLensPreset>, String>> {
+        Box::pin(async move { Ok(self.fetch_environment_metadata().await?.fleet_presets) })
+    }
+
+    fn fetch_environment_metadata(&self) -> BoxFuture<'_, Result<EnvironmentListResponse, String>> {
         Box::pin(async move {
-            let url = format!("{}/v1/sessions", self.base_url);
+            let url = format!("{}/v1/environments", self.base_url);
             let response = self
                 .with_auth(self.http.get(url).timeout(API_SESSION_LIST_TIMEOUT))
                 .send()
@@ -642,32 +703,14 @@ impl TuiApi for ApiClient {
                 .map_err(|err| self.transport_error("refresh environments", err))?;
 
             if response.status().is_success() {
-                let payload = response
-                    .json::<SessionListResponse>()
+                return response
+                    .json::<EnvironmentListResponse>()
                     .await
-                    .map_err(|err| format!("failed to parse environments response: {err}"))?;
-                return Ok(payload.environments);
+                    .map_err(|err| format!("failed to parse environments response: {err}"));
             }
 
-            Err(read_error(response).await)
-        })
-    }
-
-    fn fetch_fleet_presets(&self) -> BoxFuture<'_, Result<Vec<FleetLensPreset>, String>> {
-        Box::pin(async move {
-            let url = format!("{}/v1/sessions", self.base_url);
-            let response = self
-                .with_auth(self.http.get(url).timeout(API_SESSION_LIST_TIMEOUT))
-                .send()
-                .await
-                .map_err(|err| self.transport_error("refresh fleet presets", err))?;
-
-            if response.status().is_success() {
-                let payload = response
-                    .json::<SessionListResponse>()
-                    .await
-                    .map_err(|err| format!("failed to parse fleet presets response: {err}"))?;
-                return Ok(payload.fleet_presets);
+            if response.status() == reqwest::StatusCode::NOT_FOUND {
+                return self.fetch_environment_metadata_from_sessions().await;
             }
 
             Err(read_error(response).await)

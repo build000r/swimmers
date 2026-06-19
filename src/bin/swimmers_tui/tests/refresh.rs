@@ -50,6 +50,54 @@ fn manual_refresh_reports_session_count() {
 }
 
 #[test]
+fn background_refresh_updates_zero_session_environments_and_presets() {
+    let api = MockApi::new();
+    let layout = test_layout(120, 32);
+    let mut environment = EnvironmentSummary::local();
+    environment.id = "remote-devbox".to_string();
+    environment.label = "Remote devbox".to_string();
+    environment.kind = "ssh".to_string();
+    environment.backend_mode = "ssh_handoff".to_string();
+    environment.display_host = "devbox.example".to_string();
+    environment.ssh_alias = Some("remote-devbox".to_string());
+    let preset = FleetLensPreset {
+        id: "remote-devbox".to_string(),
+        label: "Remote devbox".to_string(),
+        source: "test".to_string(),
+        matchers: vec![FleetLensPresetMatcher::TargetId {
+            id: "remote-devbox".to_string(),
+        }],
+    };
+    api.push_fetch_session_snapshot(Ok(SessionListResponse {
+        fleet_lens: Default::default(),
+        fleet_presets: vec![preset.clone()],
+        sessions: Vec::new(),
+        version: 1,
+        repo_themes: Default::default(),
+        environments: vec![environment.clone()],
+    }));
+    let mut app = make_app(api);
+
+    app.manual_refresh(layout);
+    poll_until_refresh(&mut app, layout);
+
+    assert_eq!(
+        app.environments
+            .iter()
+            .map(|environment| environment.id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["remote-devbox"]
+    );
+    assert_eq!(
+        app.fleet_presets
+            .iter()
+            .map(|preset| preset.id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["remote-devbox"]
+    );
+}
+
+#[test]
 fn refresh_skips_native_status_when_sessions_fail() {
     let api = MockApi::new();
     let layout = test_layout(120, 32);
@@ -265,7 +313,7 @@ fn thought_config_test(ok: bool, message: &str) -> ThoughtConfigTestResponse {
 
 fn empty_refresh_result() -> RefreshResult {
     RefreshResult {
-        sessions: Ok(Vec::new()),
+        sessions: Ok(session_snapshot(Vec::new())),
         mermaid_artifacts: Vec::new(),
         session_skills: Vec::new(),
         backend_health: Ok(healthy_backend_health()),
@@ -273,6 +321,17 @@ fn empty_refresh_result() -> RefreshResult {
         daemon_defaults_status: None,
         show_success_message: false,
         force_asset_refresh: false,
+    }
+}
+
+fn session_snapshot(sessions: Vec<SessionSummary>) -> SessionListResponse {
+    SessionListResponse {
+        fleet_lens: swimmers::fleet_lens::build_fleet_lens_summary(&sessions),
+        fleet_presets: swimmers::fleet_lens::build_fleet_lens_presets(Vec::new()),
+        sessions,
+        version: 0,
+        repo_themes: Default::default(),
+        environments: Vec::new(),
     }
 }
 
@@ -502,7 +561,7 @@ fn apply_refresh_result_sequences_success_side_effects_and_metadata() {
     session.cwd = tmp.path().to_string_lossy().into_owned();
     let layout = WorkspaceLayout::for_terminal_without_thought_panel(100, 32);
     let result = RefreshResult {
-        sessions: Ok(vec![session]),
+        sessions: Ok(session_snapshot(vec![session])),
         mermaid_artifacts: Vec::new(),
         session_skills: Vec::new(),
         backend_health: Ok(healthy_backend_health()),

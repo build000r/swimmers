@@ -1849,6 +1849,14 @@ pub struct SessionListResponse {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EnvironmentListResponse {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub environments: Vec<EnvironmentSummary>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub fleet_presets: Vec<FleetLensPreset>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ErrorResponse {
     pub code: String,
     #[serde(skip_serializing_if = "Option::is_none")]

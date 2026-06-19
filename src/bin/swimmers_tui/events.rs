@@ -17,19 +17,26 @@ pub(crate) enum TuiClient {
 }
 
 impl TuiApi for TuiClient {
+    fn fetch_session_snapshot(&self) -> BoxFuture<'_, Result<SessionListResponse, String>> {
+        match self {
+            Self::Embedded(client) => client.fetch_session_snapshot(),
+            Self::External(client) => client.fetch_session_snapshot(),
+        }
+    }
+
+    fn fetch_session_snapshot_for_initial_frame(
+        &self,
+    ) -> BoxFuture<'_, Result<SessionListResponse, String>> {
+        match self {
+            Self::Embedded(client) => client.fetch_session_snapshot_for_initial_frame(),
+            Self::External(client) => client.fetch_session_snapshot_for_initial_frame(),
+        }
+    }
+
     fn fetch_sessions(&self) -> BoxFuture<'_, Result<Vec<SessionSummary>, String>> {
         match self {
             Self::Embedded(client) => client.fetch_sessions(),
             Self::External(client) => client.fetch_sessions(),
-        }
-    }
-
-    fn fetch_sessions_for_initial_frame(
-        &self,
-    ) -> BoxFuture<'_, Result<Vec<SessionSummary>, String>> {
-        match self {
-            Self::Embedded(client) => client.fetch_sessions_for_initial_frame(),
-            Self::External(client) => client.fetch_sessions_for_initial_frame(),
         }
     }
 

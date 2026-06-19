@@ -18,8 +18,9 @@ use crate::session::actor::{ActorHandle, InputDeliveryResult, SessionCommand};
 use crate::session::supervisor::TmuxAdoptError;
 use crate::types::{
     AdoptSessionRequest, AdoptSessionResponse, CreateSessionRequest, CreateSessionsBatchRequest,
-    CreateSessionsBatchResponse, SessionInputRequest, SessionInputResponse, SessionListResponse,
-    SessionState, TerminalSnapshot, MAX_SESSION_INPUT_BYTES,
+    CreateSessionsBatchResponse, EnvironmentListResponse, SessionInputRequest,
+    SessionInputResponse, SessionListResponse, SessionState, TerminalSnapshot,
+    MAX_SESSION_INPUT_BYTES,
 };
 
 const SNAPSHOT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
@@ -38,20 +39,33 @@ pub(super) async fn list_sessions(
     // The version counter is not tracked by the supervisor itself; we use 0
     // as a placeholder. A proper monotonic version can be added to the
     // supervisor later if clients need ETag-style cache validation.
-    let environments = remote_sessions::environment_summaries(true);
-    let fleet_presets = build_fleet_lens_presets(
-        crate::session::overlay::default_overlay()
-            .map(|overlay| overlay.all_fleet_presets())
-            .unwrap_or_default(),
-    );
+    let environment_metadata = environment_list_response();
     Ok(Json(SessionListResponse {
         fleet_lens: build_fleet_lens_summary(&sessions),
-        fleet_presets,
+        fleet_presets: environment_metadata.fleet_presets,
         sessions,
         version: 0,
         repo_themes: Default::default(),
-        environments,
+        environments: environment_metadata.environments,
     }))
+}
+
+pub(super) async fn list_environments(
+    Extension(auth): Extension<AuthInfo>,
+) -> Result<Json<EnvironmentListResponse>, axum::response::Response> {
+    auth.require_scope(AuthScope::SessionsRead)?;
+    Ok(Json(environment_list_response()))
+}
+
+fn environment_list_response() -> EnvironmentListResponse {
+    EnvironmentListResponse {
+        environments: remote_sessions::environment_summaries(true),
+        fleet_presets: build_fleet_lens_presets(
+            crate::session::overlay::default_overlay()
+                .map(|overlay| overlay.all_fleet_presets())
+                .unwrap_or_default(),
+        ),
+    }
 }
 
 // ---------------------------------------------------------------------------

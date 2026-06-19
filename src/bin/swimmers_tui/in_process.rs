@@ -31,8 +31,8 @@ use swimmers::types::{
     DirRepoSearchResponse, EnvironmentSummary, ErrorResponse, GhosttyOpenMode,
     MermaidArtifactResponse, NativeAttentionGroupOpenRequest, NativeAttentionGroupOpenResponse,
     NativeDesktopApp, NativeDesktopOpenResponse, NativeDesktopStatusResponse, PlanFileResponse,
-    RepoActionKind, SessionGroupInputRequest, SessionGroupInputResponse, SessionSkillListResponse,
-    SessionSummary, SpawnTool,
+    RepoActionKind, SessionGroupInputRequest, SessionGroupInputResponse, SessionListResponse,
+    SessionSkillListResponse, SessionSummary, SpawnTool,
 };
 
 use super::api::{ThoughtConfigTestResponse, TuiApi};
@@ -172,6 +172,24 @@ fn native_attention_group_request(
 // ---------------------------------------------------------------------------
 
 impl TuiApi for InProcessApi {
+    fn fetch_session_snapshot(&self) -> BoxFuture<'_, Result<SessionListResponse, String>> {
+        Box::pin(async move {
+            let sessions = list_sessions_for_client(&self.state, true).await;
+            Ok(SessionListResponse {
+                fleet_lens: swimmers::fleet_lens::build_fleet_lens_summary(&sessions),
+                fleet_presets: swimmers::fleet_lens::build_fleet_lens_presets(
+                    swimmers::session::overlay::default_overlay()
+                        .map(|overlay| overlay.all_fleet_presets())
+                        .unwrap_or_default(),
+                ),
+                sessions,
+                version: 0,
+                repo_themes: Default::default(),
+                environments: remote_sessions::environment_summaries(true),
+            })
+        })
+    }
+
     fn fetch_sessions(&self) -> BoxFuture<'_, Result<Vec<SessionSummary>, String>> {
         Box::pin(async move { Ok(list_sessions_for_client(&self.state, true).await) })
     }
@@ -774,20 +792,21 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn fetch_sessions_for_initial_frame_uses_full_session_contract() {
+    async fn fetch_session_snapshot_for_initial_frame_uses_full_cockpit_contract() {
         let state = test_state();
         let _write_rx =
             insert_summary_test_handle(&state, summary("sess-1", SessionState::Idle)).await;
         let api = InProcessApi::new(state);
 
-        let initial = api
-            .fetch_sessions_for_initial_frame()
+        let snapshot = api
+            .fetch_session_snapshot_for_initial_frame()
             .await
-            .expect("initial sessions");
+            .expect("initial snapshot");
         let regular = api.fetch_sessions().await.expect("regular sessions");
 
         assert_eq!(
-            initial
+            snapshot
+                .sessions
                 .iter()
                 .map(|session| session.session_id.as_str())
                 .collect::<Vec<_>>(),
@@ -796,6 +815,14 @@ mod tests {
                 .map(|session| session.session_id.as_str())
                 .collect::<Vec<_>>()
         );
+        assert!(snapshot
+            .environments
+            .iter()
+            .any(|environment| environment.id == "local"));
+        assert!(snapshot
+            .fleet_presets
+            .iter()
+            .any(|preset| preset.id == "all"));
     }
 
     #[tokio::test]

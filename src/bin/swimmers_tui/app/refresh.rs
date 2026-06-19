@@ -30,34 +30,34 @@ impl<C: TuiApi> App<C> {
         show_success_message: bool,
         initial_frame: bool,
     ) {
-        let sessions_result = self.fetch_sessions_for_refresh_mode(initial_frame);
-        if self.apply_foreground_sessions_result(sessions_result, layout, show_success_message) {
+        let snapshot_result = self.fetch_snapshot_for_refresh_mode(initial_frame);
+        if self.apply_foreground_snapshot_result(snapshot_result, layout, show_success_message) {
             self.refresh_foreground_metadata();
         }
         self.last_refresh = Some(Instant::now());
     }
 
-    fn fetch_sessions_for_refresh_mode(
+    fn fetch_snapshot_for_refresh_mode(
         &self,
         initial_frame: bool,
-    ) -> Result<Vec<SessionSummary>, String> {
+    ) -> Result<SessionListResponse, String> {
         if initial_frame {
             self.runtime
-                .block_on(self.client.fetch_sessions_for_initial_frame())
+                .block_on(self.client.fetch_session_snapshot_for_initial_frame())
         } else {
-            self.runtime.block_on(self.client.fetch_sessions())
+            self.runtime.block_on(self.client.fetch_session_snapshot())
         }
     }
 
-    fn apply_foreground_sessions_result(
+    fn apply_foreground_snapshot_result(
         &mut self,
-        sessions_result: Result<Vec<SessionSummary>, String>,
+        snapshot_result: Result<SessionListResponse, String>,
         layout: WorkspaceLayout,
         show_success_message: bool,
     ) -> bool {
-        match sessions_result {
-            Ok(sessions) => {
-                self.apply_successful_foreground_refresh(sessions, layout, show_success_message);
+        match snapshot_result {
+            Ok(snapshot) => {
+                self.apply_successful_foreground_refresh(snapshot, layout, show_success_message);
                 true
             }
             Err(err) => {
@@ -70,10 +70,17 @@ impl<C: TuiApi> App<C> {
 
     fn apply_successful_foreground_refresh(
         &mut self,
-        sessions: Vec<SessionSummary>,
+        snapshot: SessionListResponse,
         layout: WorkspaceLayout,
         show_success_message: bool,
     ) {
+        let SessionListResponse {
+            sessions,
+            environments,
+            fleet_presets,
+            ..
+        } = snapshot;
+        self.apply_environment_metadata(environments, fleet_presets);
         self.sync_repo_themes(&sessions, false);
         self.refresh_mermaid_artifacts(&sessions);
         self.reconcile_thought_log_sessions(&sessions);
@@ -86,16 +93,6 @@ impl<C: TuiApi> App<C> {
     }
 
     fn refresh_foreground_metadata(&mut self) {
-        if let Ok(environments) = self.runtime.block_on(self.client.fetch_environments()) {
-            self.environments = environments;
-        }
-        if let Ok(fleet_presets) = self.runtime.block_on(self.client.fetch_fleet_presets()) {
-            self.fleet_presets = if fleet_presets.is_empty() {
-                swimmers::fleet_lens::build_fleet_lens_presets(Vec::new())
-            } else {
-                fleet_presets
-            };
-        }
         if let Ok(health) = self.runtime.block_on(self.client.fetch_backend_health()) {
             self.backend_health = Some(health);
         }
@@ -107,6 +104,19 @@ impl<C: TuiApi> App<C> {
                 self.set_message(self.refresh_error_message(err));
             }
         }
+    }
+
+    fn apply_environment_metadata(
+        &mut self,
+        environments: Vec<EnvironmentSummary>,
+        fleet_presets: Vec<FleetLensPreset>,
+    ) {
+        self.environments = environments;
+        self.fleet_presets = if fleet_presets.is_empty() {
+            swimmers::fleet_lens::build_fleet_lens_presets(Vec::new())
+        } else {
+            fleet_presets
+        };
     }
 
     fn refresh_daemon_defaults_status_once(&mut self) {
@@ -143,11 +153,12 @@ impl<C: TuiApi> App<C> {
         let (tx, rx) = oneshot::channel();
         self.pending_refresh = Some(rx);
         self.runtime.spawn(async move {
-            let sessions_result = client.fetch_sessions().await;
+            let sessions_result = client.fetch_session_snapshot().await;
             let backend_health = client.fetch_backend_health().await;
 
             let (mermaid_artifacts, session_skills, native_status) = match &sessions_result {
-                Ok(sessions) => {
+                Ok(snapshot) => {
+                    let sessions = &snapshot.sessions;
                     let mermaid_futs: Vec<_> = sessions
                         .iter()
                         .filter(|session| {
@@ -280,13 +291,20 @@ impl<C: TuiApi> App<C> {
 
     fn apply_successful_refresh(
         &mut self,
-        sessions: Vec<SessionSummary>,
+        snapshot: SessionListResponse,
         mermaid_artifacts: Vec<(String, Result<MermaidArtifactResponse, String>)>,
         session_skills: Vec<(String, Result<SessionSkillListResponse, String>)>,
         force_asset_refresh: bool,
         show_success_message: bool,
         layout: WorkspaceLayout,
     ) {
+        let SessionListResponse {
+            sessions,
+            environments,
+            fleet_presets,
+            ..
+        } = snapshot;
+        self.apply_environment_metadata(environments, fleet_presets);
         self.sync_repo_themes(&sessions, force_asset_refresh);
         self.apply_refresh_assets(&sessions, mermaid_artifacts, session_skills);
         self.reconcile_thought_log_sessions(&sessions);

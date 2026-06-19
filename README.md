@@ -498,6 +498,7 @@ Set `SWIMMERS_TUI_URL` to split the API into its own process. Multiple TUIs, hea
 
 | Method | Path | Purpose |
 |--------|------|---------|
+| `GET` | `/v1/environments` | List local, remote API, and SSH-only environment metadata plus fleet presets |
 | `GET` | `/v1/sessions` | List tmux sessions with state |
 | `POST` | `/v1/sessions` | Create a new tmux session |
 | `POST` | `/v1/sessions/adopt` | Adopt an externally-created tmux session; optional `session_id` reattaches a stale swimmers identity |

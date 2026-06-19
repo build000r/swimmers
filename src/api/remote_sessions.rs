@@ -2342,7 +2342,7 @@ fn remote_auth_token(target: &LaunchTargetSummary) -> Result<Option<String>, Rem
             ),
         ));
     }
-    Ok(Some(token))
+    Ok(Some(token.trim().to_string()))
 }
 
 async fn remote_response_error(
