@@ -1599,10 +1599,15 @@ pub fn map_path_with_mappings(cwd: &str, mappings: &[LaunchPathMapping]) -> Opti
     mappings
         .iter()
         .filter_map(|mapping| {
-            let local_prefix = lexical_path(&mapping.local_prefix);
+            let local_prefix_raw = mapping.local_prefix.trim();
+            let remote_prefix_raw = mapping.remote_prefix.trim();
+            if local_prefix_raw.is_empty() || remote_prefix_raw.is_empty() {
+                return None;
+            }
+            let local_prefix = lexical_path(local_prefix_raw);
             let rel = cwd.strip_prefix(&local_prefix).ok()?;
             let score = local_prefix.components().count();
-            let mut remote = PathBuf::from(&mapping.remote_prefix);
+            let mut remote = PathBuf::from(remote_prefix_raw);
             if !rel.as_os_str().is_empty() {
                 remote.push(rel);
             }

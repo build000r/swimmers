@@ -970,10 +970,17 @@ fn parse_launch_path_mappings(mappings: Vec<DevSanityLaunchPathMapping>) -> Vec<
 }
 
 fn parse_launch_path_mapping(mapping: DevSanityLaunchPathMapping) -> Option<LaunchPathMapping> {
+    let local_prefix = expanded_nonempty_launch_prefix(mapping.local_prefix?)?;
+    let remote_prefix = expanded_nonempty_launch_prefix(mapping.remote_prefix?)?;
     Some(LaunchPathMapping {
-        local_prefix: expand_path(&mapping.local_prefix?),
-        remote_prefix: expand_path(&mapping.remote_prefix?),
+        local_prefix,
+        remote_prefix,
     })
+}
+
+fn expanded_nonempty_launch_prefix(raw: String) -> Option<String> {
+    let expanded = expand_path(&raw);
+    (!expanded.trim().is_empty()).then_some(expanded)
 }
 
 fn ensure_local_launch_target(targets: &mut Vec<LaunchTargetSummary>) {
@@ -1016,6 +1023,9 @@ fn best_mapped_launch_target(path: &Path, targets: &[LaunchTargetSummary]) -> Op
 }
 
 fn launch_mapping_score(path: &Path, mapping: &LaunchPathMapping) -> Option<usize> {
+    if mapping.local_prefix.trim().is_empty() || mapping.remote_prefix.trim().is_empty() {
+        return None;
+    }
     let local_prefix = lexical_path_buf(&mapping.local_prefix);
     lexical_path_buf(path.to_string_lossy().as_ref())
         .strip_prefix(&local_prefix)

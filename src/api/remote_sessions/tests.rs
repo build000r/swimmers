@@ -490,6 +490,22 @@ fn map_path_respects_component_boundaries() {
 }
 
 #[test]
+fn map_path_ignores_empty_mapping_prefixes() {
+    let mappings = vec![
+        LaunchPathMapping {
+            local_prefix: String::new(),
+            remote_prefix: "/remote".to_string(),
+        },
+        LaunchPathMapping {
+            local_prefix: "/workspace/repos".to_string(),
+            remote_prefix: "   ".to_string(),
+        },
+    ];
+
+    assert!(map_path_with_mappings("/workspace/repos/swimmers", &mappings).is_none());
+}
+
+#[test]
 fn launch_cwd_rejects_missing_cwd() {
     let err = launch_cwd(Some("   ")).expect_err("blank cwd should be invalid");
     assert_eq!(err.status, StatusCode::BAD_REQUEST);

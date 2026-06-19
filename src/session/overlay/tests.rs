@@ -76,6 +76,25 @@ fn explicit_launch_default_wins_over_path_mapping() {
 }
 
 #[test]
+fn implicit_launch_default_ignores_empty_path_mapping_prefixes() {
+    let mut empty_local = mapped_launch_target("empty-local", "", "/srv/all");
+    let mut empty_remote = mapped_launch_target("empty-remote", "/tmp/repos", "");
+    empty_local.path_mappings[0].local_prefix.clear();
+    empty_remote.path_mappings[0].remote_prefix.clear();
+    let config = OverlayLaunchConfig {
+        default_target: "local".to_string(),
+        default_target_explicit: false,
+        targets: vec![LaunchTargetSummary::local(), empty_local, empty_remote],
+        group_defaults: BTreeMap::new(),
+    };
+
+    assert_eq!(
+        config.default_for_group_or_path(None, Path::new("/tmp/repos/swimmers")),
+        "local"
+    );
+}
+
+#[test]
 fn group_launch_default_wins_over_implicit_path_mapping() {
     let mut group_defaults = BTreeMap::new();
     group_defaults.insert("backend".to_string(), "backend-box".to_string());
@@ -317,6 +336,58 @@ fn parse_agent_launch_injects_local_and_filters_unknown_defaults() {
         .expect("remote target");
     assert_eq!(remote.label, "remote");
     assert_eq!(remote.kind, "swimmers_api");
+    assert_eq!(remote.path_mappings[0].local_prefix, "/local");
+    assert_eq!(remote.path_mappings[0].remote_prefix, "/remote");
+}
+
+#[test]
+fn parse_agent_launch_ignores_blank_or_empty_expanded_path_mappings() {
+    let key = "SWIMMERS_OVERLAY_EMPTY_MAPPING_TEST";
+    let prior = std::env::var(key).ok();
+    std::env::remove_var(key);
+
+    let launch = parse_agent_launch(Some(DevSanityAgentLaunch {
+        default_target: Some("remote".to_string()),
+        targets: vec![DevSanityLaunchTarget {
+            id: Some("remote".to_string()),
+            label: None,
+            kind: Some("swimmers_api".to_string()),
+            base_url: Some("http://remote.test:3210".to_string()),
+            auth_token_env: None,
+            path_mappings: vec![
+                DevSanityLaunchPathMapping {
+                    local_prefix: Some("".to_string()),
+                    remote_prefix: Some("/remote".to_string()),
+                },
+                DevSanityLaunchPathMapping {
+                    local_prefix: Some(format!("${{{key}}}")),
+                    remote_prefix: Some("/remote-env".to_string()),
+                },
+                DevSanityLaunchPathMapping {
+                    local_prefix: Some("/local".to_string()),
+                    remote_prefix: Some("   ".to_string()),
+                },
+                DevSanityLaunchPathMapping {
+                    local_prefix: Some("/local".to_string()),
+                    remote_prefix: Some("/remote".to_string()),
+                },
+            ],
+        }],
+        group_defaults: BTreeMap::new(),
+    }));
+
+    match prior {
+        Some(value) => std::env::set_var(key, value),
+        None => std::env::remove_var(key),
+    }
+
+    let remote = launch
+        .targets
+        .iter()
+        .find(|target| target.id == "remote")
+        .expect("remote target");
+
+    assert_eq!(remote.path_mappings.len(), 1);
     assert_eq!(remote.path_mappings[0].local_prefix, "/local");
     assert_eq!(remote.path_mappings[0].remote_prefix, "/remote");
 }
