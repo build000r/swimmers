@@ -34,7 +34,7 @@ The secondary wedge is the thought rail: a side panel showing the internal monol
 
 - **Parallel-agent operators.** Developers running 5-15 concurrent AI coding agents (Claude Code, Codex, Gemini CLI) across tmux sessions who need to monitor progress without context-switching.
 - **tmux power users.** Anyone maintaining many concurrent sessions — builds, deploys, log tails, test runs — who has outgrown `tmux ls` and fuzzy finders as a session management strategy.
-- **Remote-session monitors.** Teams using tmux on shared servers or VPS instances who want a visual overview over Tailscale or any network, without SSH-ing in to check each session.
+- **Remote-session monitors.** Teams using tmux on shared servers or VPS instances who want a visual overview over Tailscale or any network, without SSH-ing in to check each session. A local cockpit may also show explicitly configured SSH-only hosts as handoff rows, but those rows are not live session aggregation.
 - **Single-binary minimalists.** Developers who want session observability without running Docker, databases, or web app infrastructure.
 
 ## Who It Is Not For
@@ -43,7 +43,7 @@ The secondary wedge is the thought rail: a side panel showing the internal monol
 - **Session template seekers.** If you want to define tmux layouts, startup commands, and window arrangements, use tmuxinator or tmuxp. Swimmers discovers existing sessions; it does not define them.
 - **Non-tmux users.** Swimmers does not support Zellij, screen, or plain terminal tabs. tmux is the only backend.
 - **GUI-first developers.** If you work primarily in VS Code or a desktop IDE and rarely touch a terminal multiplexer, swimmers has nothing to offer you.
-- **Multi-host aggregation.** Swimmers manages sessions on the machine it runs on. It does not aggregate sessions across a cluster of hosts (though you can run separate instances and point TUIs at each).
+- **Multi-host aggregation by discovery.** Swimmers manages sessions on the machine it runs on. It does not discover or control arbitrary SSH fleets. A local cockpit can aggregate explicitly configured `swimmers_api` targets or show `ssh_only` handoff targets, but SSH-only rows are inventory/bootstrap hints until a trusted Swimmers API is running there.
 
 ## Competitive Fit
 
@@ -126,9 +126,9 @@ These are things swimmers will deliberately not become:
 
 - **Not a tmux replacement.** Swimmers sits above tmux, not beside it. It will never manage windows, panes, or key bindings.
 - **Not a session templating tool.** Swimmers discovers sessions that already exist. Defining layouts, startup commands, and window arrangements is tmuxinator's job.
-- **Not a general multi-host control plane.** Each swimmers instance manages sessions on one machine. It may aggregate explicitly configured `swimmers_api` launch targets for a single operator, but it will not become arbitrary cluster scheduling or fleet management.
+- **Not a general multi-host control plane.** Each swimmers instance manages sessions on one machine. It may aggregate explicitly configured `swimmers_api` launch targets for a single operator and display `ssh_only` handoff targets with attach/bootstrap hints, but it will not become arbitrary SSH discovery, cluster scheduling, or fleet management.
 - **Not an IDE or editor.** Swimmers shows session state and thought streams. It does not edit code, run LSP servers, or replace your terminal workflow.
-- **Not a general agent scheduler.** Swimmers can create tmux sessions and hand an initial request to the selected agent harness. It does not provision, configure, rank, or schedule AI coding agents beyond the operator's explicit local or overlay-declared launch target.
+- **Not a general agent scheduler.** Swimmers can create tmux sessions and hand an initial request to the selected agent harness. It does not provision, configure, rank, or schedule AI coding agents beyond the operator's explicit local or overlay-declared launch target. c0, NTM, and FrankenTerm can provide advisory metadata or terminal rendering, but they are not Swimmers' orchestration source of truth.
 - **Not a web-first app.** The TUI is the primary interface. The browser surface exists for remote convenience, not as the flagship experience.
 
 ## Product Test

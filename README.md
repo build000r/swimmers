@@ -43,7 +43,7 @@ A terminal aquarium for your tmux sessions. Each session becomes an animated fis
 | **Native terminal handoff** | Open any session directly in iTerm or Ghostty from the TUI |
 | **Mermaid diagrams** | Render and zoom Mermaid artifacts inline in the terminal |
 | **Repo themes** | Per-repo colors plus default sprite overrides via `.swimmers/colors.json` |
-| **Remote API + launch targets** | Point the TUI at a remote server, or route selected directory launches to overlay-declared remote `swimmers` APIs |
+| **Environment cockpit + launch targets** | Point the TUI at one remote server, or route selected directory launches to overlay-declared local, remote `swimmers` API, and SSH-only handoff targets |
 | **Prometheus metrics** | `GET /metrics` for monitoring session counts and API health |
 | **No database, no Docker** | File-based persistence, single binary, tmux is the only dependency |
 
@@ -151,7 +151,7 @@ swimmers serve    # explicit form for service managers and docs
 
 `Ctrl-C` stops it. `kill $(lsof -ti:3210)` works for a backgrounded instance.
 
-### Directory launch targets
+### Directory launch targets and environment cockpit
 
 When a `skillbox-config` client overlay declares `dev_sanity.agent_launch`,
 the directory picker shows a launch-target toggle next to the tool selector.
@@ -167,6 +167,56 @@ points the entire TUI at one backend, while launch targets let one local TUI
 spawn selected directory/list runs onto another configured machine and keep
 those sessions visible in the local aquarium.
 
+V2 environment cockpit setups use three target kinds:
+
+- `local` is the implicit loopback/in-process target.
+- `swimmers_api` is a trusted remote Swimmers backend, usually reached over a
+  Tailnet or token-auth URL. It can observe, launch, and send input only through
+  that configured API.
+- `ssh_only` is inventory and handoff only. It can show attach/bootstrap hints
+  such as `ssh skillbox-devbox` or `ssh skillbox-devbox 'swimmers serve'`, but
+  it is not treated as a live session source until that host has a trusted
+  `swimmers_api` target.
+
+Example overlay shape:
+
+```yaml
+dev_sanity:
+  agent_launch:
+    default_target: devbox
+    group_defaults:
+      swimmers: devbox
+    targets:
+      - id: devbox
+        label: Devbox API
+        kind: swimmers_api
+        base_url: http://100.101.123.63:3210
+        auth_token_env: SWIMMERS_DEVBOX_TOKEN
+        path_mappings:
+          - local_prefix: /Users/me/repos/opensource
+            remote_prefix: /srv/devbox/repos/opensource
+      - id: skillbox-devbox
+        label: Skillbox SSH
+        kind: ssh_only
+        bootstrap_hint: "ssh skillbox-devbox 'swimmers serve'"
+
+  fleet_lenses:
+    - id: swimmers-on-devbox
+      label: Swimmers on devbox
+      matchers:
+        - type: target_kind
+          kind: swimmers_api
+        - type: repo
+          key: /Users/me/repos/opensource/swimmers
+```
+
+Built-in saved fleet lenses include `all`, `local`, `remote-api`,
+`ssh-handoff`, `current-repo`, `needs-attention`, and `degraded`. Overlay
+lenses can combine target id/kind, repo key, readiness, transport,
+capability, degraded, and attention matchers. Lens definitions are labels and
+matchers only; do not persist tokens, raw terminal output, or command history
+in them.
+
 For the multi-environment cockpit proof lane, see
 [`docs/MULTI_ENV_COCKPIT_PROOF.md`](docs/MULTI_ENV_COCKPIT_PROOF.md) and run
 `make multi-env-smoke`. That lane covers configured local plus
@@ -174,6 +224,20 @@ overlay-declared `swimmers_api` targets, path mappings, remote write proxy
 guardrails, display grouping, fleet filters, attention inbox behavior, and
 advisory badges. It does not claim arbitrary SSH fleet control or make
 FrankenTerm the orchestration source of truth.
+
+For the v2 local plus remote API plus SSH-only handoff proof lane, see
+[`docs/MULTI_SSH_ENV_V2_PROOF.md`](docs/MULTI_SSH_ENV_V2_PROOF.md) and run
+`make multi-ssh-env-smoke`. That smoke is fixture-backed and does not require
+live SSH by default.
+
+| Failure mode | Swimmers behavior |
+|--------------|-------------------|
+| Wrong-host launch risk | launch previews and receipts name `target_id`, `target_kind`, requested cwd, resolved cwd, and the selected path mapping |
+| Unmapped cwd | remote launch is blocked with path-mapping guidance |
+| Down remote API | cached sessions are marked degraded/stale and demoted below fresh local attention work |
+| Missing token env | health/auth guidance is shown without printing token values |
+| Stale c0 or NTM advisory | badge remains `external` and stale; it never becomes trusted orchestration state |
+| SSH-only target | attach/bootstrap hints remain copyable, but no live session aggregation, send, or launch is implied |
 
 ---
 
@@ -560,7 +624,8 @@ launchctl load ~/Library/LaunchAgents/com.swimmers.plist
 **When to use swimmers:**
 - You run many tmux sessions and want a visual overview
 - You use AI coding agents and want to see their thought streams
-- You want to monitor remote sessions from a local TUI
+- You want to monitor remote sessions from a local TUI through a trusted
+  Swimmers API, or keep SSH-only hosts visible as explicit handoff targets
 
 **When swimmers is not the right tool:**
 - You only use one or two tmux sessions (tmux is fine on its own)
@@ -622,7 +687,7 @@ cargo build --release
 
 - **tmux only** — swimmers does not manage screen, zellij, or plain terminal sessions
 - **Browser UI is terminal-first** — the web surface keeps the live terminal primary; Trogdor presentation and cockpit panels summarize existing backend facts rather than inventing new state
-- **Single-machine sessions by default** — each API manages tmux sessions on the machine it runs on. One local cockpit may aggregate explicitly configured `swimmers_api` launch targets, but Swimmers does not discover or control arbitrary SSH fleets
+- **Single-machine sessions by default** — each API manages tmux sessions on the machine it runs on. One local cockpit may aggregate explicitly configured `swimmers_api` launch targets and show `ssh_only` handoff targets, but Swimmers does not discover or control arbitrary SSH fleets
 - **No session templating** — swimmers discovers existing tmux sessions but does not define layouts or startup commands (use tmuxinator for that)
 - **macOS and Linux only** — tmux does not run on Windows, so neither does swimmers
 

@@ -65,6 +65,55 @@ SWIMMERS_MULTI_SSH_SMOKE_SKIP_JS=1 make multi-ssh-env-smoke
 Those flags exist only to support environments where Rust and Node validation
 run on different machines. The default command remains the release contract.
 
+## Operator Setup
+
+Use `local` for the implicit loopback or in-process target. Add
+`swimmers_api` targets only for backends you intentionally run and trust:
+
+```yaml
+dev_sanity:
+  agent_launch:
+    default_target: devbox
+    group_defaults:
+      swimmers: devbox
+    targets:
+      - id: devbox
+        label: Devbox API
+        kind: swimmers_api
+        base_url: http://100.101.123.63:3210
+        auth_token_env: SWIMMERS_DEVBOX_TOKEN
+        path_mappings:
+          - local_prefix: /Users/me/repos/opensource
+            remote_prefix: /srv/devbox/repos/opensource
+      - id: skillbox-devbox
+        label: Skillbox SSH
+        kind: ssh_only
+        bootstrap_hint: "ssh skillbox-devbox 'swimmers serve'"
+
+  fleet_lenses:
+    - id: swimmers-on-devbox
+      label: Swimmers on devbox
+      matchers:
+        - type: target_kind
+          kind: swimmers_api
+        - type: repo
+          key: /Users/me/repos/opensource/swimmers
+```
+
+Run a remote backend with either Tailnet trust or token auth:
+
+```bash
+SWIMMERS_BIND=<tailscale-ip> AUTH_MODE=tailnet_trust swimmers serve
+```
+
+For token auth, keep values in environment variables. Do not put bearer tokens
+in `base_url`, screenshots, docs, lens definitions, or command history.
+
+Built-in saved lenses are `all`, `local`, `remote-api`, `ssh-handoff`,
+`current-repo`, `needs-attention`, and `degraded`. Overlay lenses are harmless
+labels plus matchers. They can match target id/kind, repo key, current repo,
+readiness, transport, capability, degraded, and needs-attention state.
+
 ## Supported
 
 - Display configured local, `swimmers_api`, and `ssh_only` targets in one
@@ -76,6 +125,17 @@ run on different machines. The default command remains the release contract.
 - Launch remote sessions only through configured `swimmers_api` targets with
   explicit target/cwd receipts.
 - Treat c0 and NTM metadata as stale-by-default passive badges.
+
+## Failure Modes
+
+| Failure mode | Expected behavior |
+|--------------|-------------------|
+| Wrong-host launch risk | launch preview and receipt name `target_id`, `target_kind`, requested cwd, resolved cwd, and path mapping |
+| Unmapped cwd | remote launch is blocked with stable path-mapping guidance |
+| Down remote API | cached sessions are marked degraded/stale and demoted below fresh local attention work |
+| Missing token env | health/auth guidance is shown without printing token values |
+| Stale c0 advisory | badge remains `external` and stale; it never becomes trusted status |
+| SSH-only target | attach/bootstrap hints are visible, but live aggregation and input are unavailable |
 
 ## Not Supported
 
