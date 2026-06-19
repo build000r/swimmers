@@ -32,6 +32,31 @@ test("surface action dispatch guards null, disabled, and direct zones", () => {
   });
 });
 
+test("surface action dispatch validates fleet filter payloads", () => {
+  assert.deepEqual(
+    surfaceActionDispatchPlan({ type: "action", actionId: "fleet_filter", kind: " TARGET ", key: " skillbox " }),
+    {
+      type: "set_fleet_filter",
+      filter: { kind: "target", key: "skillbox" },
+    },
+  );
+  assert.deepEqual(
+    surfaceActionDispatchPlan({ type: "action", actionId: "fleet_filter", kind: "", key: "" }),
+    {
+      type: "set_fleet_filter",
+      filter: { kind: "", key: "" },
+    },
+  );
+  assert.deepEqual(
+    surfaceActionDispatchPlan({ type: "action", actionId: "fleet_filter", kind: "target", key: "" }),
+    { type: "ignore" },
+  );
+  assert.deepEqual(
+    surfaceActionDispatchPlan({ type: "action", actionId: "fleet_filter", kind: "unknown", key: "skillbox" }),
+    { type: "ignore" },
+  );
+});
+
 test("surface action dispatch preserves gated current-session send behavior", () => {
   assert.deepEqual(surfaceActionDispatchPlan({ actionId: "open_send" }, { readOnly: true }), { type: "ignore" });
   assert.deepEqual(surfaceActionDispatchPlan({ actionId: "open_send" }, { readOnly: false }), { type: "ignore" });
@@ -84,6 +109,14 @@ test("surface action execution plans preserve payload passthroughs", () => {
   assert.deepEqual(
     surfaceActionExecutionPlan({ type: "set_fleet_filter", filter: { kind: "repo", key: "/tmp/repo" } }),
     { type: "set_fleet_filter", filter: { kind: "repo", key: "/tmp/repo" } },
+  );
+  assert.deepEqual(
+    surfaceActionExecutionPlan({ type: "set_fleet_filter", filter: { kind: "", key: "" } }),
+    { type: "set_fleet_filter", filter: { kind: "", key: "" } },
+  );
+  assert.deepEqual(
+    surfaceActionExecutionPlan({ type: "set_fleet_filter", filter: { kind: "target", key: "" } }),
+    { type: "ignore" },
   );
   assert.deepEqual(surfaceActionExecutionPlan({ type: "toggle_session_grouping" }), {
     type: "toggle_session_grouping",

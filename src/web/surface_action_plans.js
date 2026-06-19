@@ -1,3 +1,17 @@
+const FLEET_FILTER_KINDS = new Set(["target", "repo", "state", "readiness", "transport"]);
+
+function normalizeFleetFilterPayload(filter = {}) {
+  const kind = String(filter?.kind || "").trim().toLowerCase();
+  const key = String(filter?.key || "").trim();
+  if (!kind && !key) {
+    return { kind: "", key: "" };
+  }
+  if (!kind || !key || !FLEET_FILTER_KINDS.has(kind)) {
+    return null;
+  }
+  return { kind, key };
+}
+
 export function surfaceActionDispatchPlan(zone, context = {}) {
   if (!zone || zone.disabled) {
     return { type: "ignore" };
@@ -69,14 +83,16 @@ export function surfaceActionDispatchPlan(zone, context = {}) {
       return { type: "focus_terminal" };
     case "refresh":
       return { type: "refresh" };
-    case "fleet_filter":
+    case "fleet_filter": {
+      const filter = normalizeFleetFilterPayload(zone);
+      if (!filter) {
+        return { type: "ignore" };
+      }
       return {
         type: "set_fleet_filter",
-        filter: {
-          kind: String(zone.kind || ""),
-          key: String(zone.key || ""),
-        },
+        filter,
       };
+    }
     default:
       return { type: "ignore" };
   }
@@ -167,10 +183,11 @@ export function surfaceActionExecutionPlan(plan = {}, context = {}) {
     case "toggle_select":
     case "copy_selection":
     case "refresh":
-    case "set_fleet_filter":
-      return plan.type === "set_fleet_filter"
-        ? { type: plan.type, filter: plan.filter || { kind: "", key: "" } }
-        : { type: plan.type };
+      return { type: plan.type };
+    case "set_fleet_filter": {
+      const filter = normalizeFleetFilterPayload(plan.filter);
+      return filter ? { type: plan.type, filter } : { type: "ignore" };
+    }
     default:
       return { type: "ignore" };
   }
