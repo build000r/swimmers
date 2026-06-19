@@ -494,7 +494,8 @@ function drawCenterOverlay(frame, center, model) {
     width: overlay.w - 4,
   });
 
-  drawTrogdorPressureAtlas(frame, overlay, sessions, model, summary);
+  const environmentRowsUsed = drawEnvironmentMatrix(frame, overlay, model, overlay.y + 4);
+  drawTrogdorPressureAtlas(frame, overlay, sessions, model, summary, environmentRowsUsed);
 
   drawText(frame, overlay.x + 2, overlay.y + overlay.h - 2, truncate(summary.footer, overlay.w - 4), {
     fg: COLORS.muted,
@@ -503,9 +504,95 @@ function drawCenterOverlay(frame, center, model) {
   });
 }
 
-function drawTrogdorPressureAtlas(frame, overlay, sessions, model, summary) {
+function drawEnvironmentMatrix(frame, overlay, model, startY) {
+  const rows = Array.isArray(model?.environmentMatrix) ? model.environmentMatrix : [];
+  if (!rows.length || overlay.h < 12) {
+    return 0;
+  }
+  const handoffCount = rows.filter((row) => row.handoffOnly).length;
+  const degradedCount = rows.filter((row) => environmentRowIsDegraded(row)).length;
+  const header = `envs ${rows.length} / handoff ${handoffCount} / degraded ${degradedCount}`;
+  drawText(frame, overlay.x + 2, startY, truncate(header, overlay.w - 4), {
+    fg: degradedCount ? COLORS.warning : COLORS.muted,
+    width: overlay.w - 4,
+  });
+
+  const maxRows = overlay.h >= 20 ? 3 : 2;
+  const visibleRows = rows.slice(0, maxRows);
+  let y = startY + 1;
+  for (const row of visibleRows) {
+    const label = environmentRowLabel(row);
+    const fg = environmentRowColor(row);
+    drawText(frame, overlay.x + 2, y, truncate(label, overlay.w - 4), {
+      fg,
+      width: overlay.w - 4,
+    });
+    pushZone(
+      frame,
+      {
+        type: "environment",
+        actionId: "fleet_filter",
+        kind: "target",
+        key: row.id,
+        label: row.displayHost || row.label || row.id,
+      },
+      rect(overlay.x + 1, y, overlay.w - 2, 1),
+    );
+    y += 1;
+  }
+  if (rows.length > visibleRows.length) {
+    drawText(frame, overlay.x + 2, y, truncate(`more envs ${rows.length - visibleRows.length}`, overlay.w - 4), {
+      fg: COLORS.muted,
+      attrs: STYLE_ITALIC,
+      width: overlay.w - 4,
+    });
+    y += 1;
+  }
+  return y - startY;
+}
+
+function environmentRowLabel(row) {
+  const host = safeLabel(row?.displayHost || row?.label || row?.id, "environment");
+  const count = Number(row?.sessionCount || 0);
+  const readiness = safeLabel(row?.readinessLabel, "unknown");
+  const caps = Array.isArray(row?.capabilityLabels) && row.capabilityLabels.length
+    ? ` ${row.capabilityLabels.slice(0, 3).join("/")}`
+    : "";
+  const maps = Number(row?.pathMappingCount || 0) > 0 ? ` maps ${row.pathMappingCount}` : "";
+  return `${host} ${count} ${readiness}${caps}${maps}`;
+}
+
+function environmentRowColor(row) {
+  if (environmentRowIsDegraded(row)) {
+    return COLORS.danger;
+  }
+  switch (String(row?.readinessKey || "").toLowerCase()) {
+    case "needs_attention":
+      return COLORS.warning;
+    case "ready":
+      return COLORS.success;
+    case "handoff":
+      return COLORS.warning;
+    default:
+      return COLORS.muted;
+  }
+}
+
+function environmentRowIsDegraded(row) {
+  const status = String(row?.status || "").toLowerCase();
+  const readiness = String(row?.readinessKey || "").toLowerCase();
+  return Boolean(
+    row?.degradedCount > 0 ||
+      status === "degraded" ||
+      status === "unavailable" ||
+      readiness === "degraded" ||
+      readiness === "blocked",
+  );
+}
+
+function drawTrogdorPressureAtlas(frame, overlay, sessions, model, summary, environmentRowsUsed = 0) {
   const repoGroups = buildTrogdorRepoGroups(sessions);
-  const atlasTop = overlay.y + 5;
+  const atlasTop = overlay.y + 5 + Math.max(0, environmentRowsUsed);
   const atlasBottom = overlay.y + overlay.h - 3;
   const readerWidth = overlay.w >= 62 ? Math.min(40, Math.max(34, Math.floor(overlay.w * 0.44))) : 0;
   const atlasWidth = overlay.w - 4 - (readerWidth ? readerWidth + 1 : 0);

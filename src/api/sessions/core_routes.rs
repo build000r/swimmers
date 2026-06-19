@@ -77,6 +77,7 @@ async fn create_local_session_response(
     state: &Arc<AppState>,
     body: CreateSessionRequest,
 ) -> axum::response::Response {
+    let explicit_local_override = explicit_local_launch_override(body.launch_target.as_deref());
     match create_local_session(
         state,
         body.name,
@@ -86,7 +87,12 @@ async fn create_local_session_response(
     )
     .await
     {
-        Ok(response) => (StatusCode::CREATED, Json(response)).into_response(),
+        Ok(mut response) => {
+            if explicit_local_override {
+                mark_create_session_local_override(&mut response);
+            }
+            (StatusCode::CREATED, Json(response)).into_response()
+        }
         Err(error) => error_response(
             error.status(),
             error.code(),
@@ -190,14 +196,40 @@ async fn create_local_sessions_batch_response(
     state: Arc<AppState>,
     body: CreateSessionsBatchRequest,
 ) -> Response {
+    let explicit_local_override = explicit_local_launch_override(body.launch_target.as_deref());
     match create_local_sessions_batch(state, body.dirs, body.spawn_tool, body.initial_request).await
     {
-        Ok(response) => create_sessions_batch_response(response),
+        Ok(mut response) => {
+            if explicit_local_override {
+                mark_batch_local_override(&mut response);
+            }
+            create_sessions_batch_response(response)
+        }
         Err(error) => error_response(
             error.status(),
             error.code(),
             Some(error.message().to_string()),
         ),
+    }
+}
+
+fn explicit_local_launch_override(target: Option<&str>) -> bool {
+    target
+        .map(str::trim)
+        .is_some_and(|target| target.eq_ignore_ascii_case("local"))
+}
+
+fn mark_create_session_local_override(response: &mut crate::types::CreateSessionResponse) {
+    if let Some(receipt) = response.launch_receipt.as_mut() {
+        receipt.mark_local_override();
+    }
+}
+
+fn mark_batch_local_override(response: &mut CreateSessionsBatchResponse) {
+    for result in &mut response.results {
+        if let Some(receipt) = result.launch_receipt.as_mut() {
+            receipt.mark_local_override();
+        }
     }
 }
 

@@ -152,7 +152,7 @@ test("surface renders grouped session rail with host-disambiguated project label
     sessionId: "local",
     name: "local-agent",
     targetLabel: "local",
-    repoKey: "/Users/b/repos/opensource/swimmers",
+    repoKey: "/Users/tester/repos/opensource/swimmers",
     repoLabel: "opensource/swimmers",
     cwdLabel: "opensource/swimmers",
   });
@@ -160,7 +160,7 @@ test("surface renders grouped session rail with host-disambiguated project label
     sessionId: "remote",
     name: "remote-agent",
     targetLabel: "Skillbox devbox",
-    repoKey: "/Users/b/repos/opensource/swimmers",
+    repoKey: "/Users/tester/repos/opensource/swimmers",
     repoLabel: "opensource/swimmers",
     cwdLabel: "opensource/swimmers @ Skillbox devbox",
   });
@@ -175,7 +175,7 @@ test("surface renders grouped session rail with host-disambiguated project label
         type: "session",
         session: local,
         group: {
-          key: "/Users/b/repos/opensource/swimmers",
+          key: "/Users/tester/repos/opensource/swimmers",
           label: "opensource/swimmers",
           count: 2,
           hostSummary: "local + Skillbox devbox",
@@ -186,7 +186,7 @@ test("surface renders grouped session rail with host-disambiguated project label
         type: "session",
         session: remote,
         group: {
-          key: "/Users/b/repos/opensource/swimmers",
+          key: "/Users/tester/repos/opensource/swimmers",
           label: "opensource/swimmers",
           count: 2,
           hostSummary: "local + Skillbox devbox",
@@ -202,6 +202,71 @@ test("surface renders grouped session rail with host-disambiguated project label
   assert.match(text, /sessions grouped \/ inbox 2/);
   assert.match(text, /2x swimmers L\+Skillbox/);
   assert.ok(actionIds.includes("toggle_session_grouping"));
+});
+
+test("surface renders clickable environment matrix rows including ssh-only handoff targets", () => {
+  const remote = session({
+    sessionId: "remote",
+    name: "remote-agent",
+    state: "attention",
+    displayState: "attention",
+    targetLabel: "Skillbox API",
+    repoKey: "/Users/tester/repos/opensource/swimmers",
+    repoLabel: "opensource/swimmers",
+    cwdLabel: "opensource/swimmers @ Skillbox API",
+  });
+  const frame = buildSurfaceFrame(baseModel({
+    currentSession: null,
+    selectedSessionId: null,
+    sessions: [remote],
+    environmentMatrix: [
+      {
+        id: "skillbox-api",
+        displayHost: "Skillbox API",
+        label: "Skillbox API",
+        readinessKey: "needs_attention",
+        readinessLabel: "needs attention",
+        sessionCount: 1,
+        degradedCount: 0,
+        pathMappingCount: 2,
+        capabilityLabels: ["observe", "launch", "dirs"],
+      },
+      {
+        id: "skillbox-devbox",
+        displayHost: "Skillbox devbox",
+        label: "Skillbox devbox",
+        readinessKey: "handoff",
+        readinessLabel: "handoff",
+        sessionCount: 0,
+        degradedCount: 0,
+        pathMappingCount: 0,
+        capabilityLabels: ["ssh", "bootstrap", "external"],
+        handoffOnly: true,
+      },
+    ],
+  }));
+  const text = frameText(frame);
+  const handoffZone = frame.zones.find((zone) => (
+    zone.actionId === "fleet_filter" && zone.kind === "target" && zone.key === "skillbox-devbox"
+  ));
+
+  assert.match(text, /envs 2 \/ handoff 1 \/ degraded 0/);
+  assert.match(text, /Skillbox API 1 needs attention observe\/launch\/dirs maps 2/);
+  assert.match(text, /Skillbox devbox 0 handoff ssh\/bootstrap\/external/);
+  assert.deepEqual(
+    {
+      actionId: handoffZone?.actionId,
+      kind: handoffZone?.kind,
+      key: handoffZone?.key,
+      type: handoffZone?.type,
+    },
+    {
+      actionId: "fleet_filter",
+      kind: "target",
+      key: "skillbox-devbox",
+      type: "environment",
+    },
+  );
 });
 
 test("surface tolerates partial fleet chip labels", () => {

@@ -328,9 +328,13 @@ export function mapPathWithLaunchTarget(path, target) {
 export function launchTargetPreviewForPath(path, target) {
   const targetId = String(target?.id || "local").trim() || "local";
   const targetLabel = String(target?.label || targetId || "Local machine").trim() || targetId;
+  const targetKind = String(target?.kind || "").trim().toLowerCase();
   const localCwd = String(path || "").trim();
   if (targetId === "local") {
     return { targetId, targetLabel, localCwd, remoteCwd: null, blocked: false, reason: "" };
+  }
+  if (targetKind === "ssh_only" || targetKind === "ssh") {
+    return { targetId, targetLabel, localCwd, remoteCwd: null, blocked: false, reason: "handoff" };
   }
   const configBlocker = launchTargetConfigBlocker(target);
   if (configBlocker) {
@@ -372,6 +376,9 @@ export function launchTargetPreviewText(path, target) {
   if (preview.blocked) {
     return `${preview.targetLabel}: ${preview.reason}`;
   }
+  if (preview.reason === "handoff") {
+    return `${preview.targetLabel}: handoff for ${preview.localCwd || "(no cwd)"}`;
+  }
   return `${preview.targetLabel}: ${preview.remoteCwd}`;
 }
 
@@ -384,6 +391,9 @@ export function launchTargetStatusTextForPreview(preview) {
   }
   if (preview.blocked) {
     return `${preview.targetLabel}: ${preview.reason} for ${preview.localCwd || "(no cwd)"}`;
+  }
+  if (preview.reason === "handoff") {
+    return `${preview.targetLabel}: handoff for ${preview.localCwd || "(no cwd)"}`;
   }
   return `${preview.targetLabel}: ${preview.localCwd || "(no cwd)"} -> ${preview.remoteCwd}`;
 }
@@ -450,7 +460,9 @@ export function renderCreateBatchBar({ el, dirBrowser }) {
   if (el.createBatchPreview) {
     const firstPath = selected.values().next().value || el.createCwd?.value || "";
     const targetPreview = count > 1 && !blockers.length && String(target?.id || "local") !== "local"
-      ? `${target.label}: ${count} mapped`
+      ? String(target?.kind || "").trim().toLowerCase() === "ssh_only"
+        ? `${target.label}: ${count} handoff`
+        : `${target.label}: ${count} mapped`
       : launchTargetPreviewText(firstPath, target);
     el.createBatchPreview.textContent = `target: ${targetPreview} · request: ${createRequestPreviewText(el)}`;
   }

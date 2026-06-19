@@ -194,14 +194,32 @@ export interface EnvironmentAuthSummary {
   token_env_present: Nullable<boolean>;
 }
 
+export interface EnvironmentCapabilitySummary {
+  observe_sessions: boolean;
+  launch_session: boolean;
+  send_input: boolean;
+  group_input: boolean;
+  remote_dir_inventory: boolean;
+  native_attach: boolean;
+  ssh_attach_hint: boolean;
+  bootstrap_hint: boolean;
+  advisory_metadata: boolean;
+  health_probe: boolean;
+}
+
 export interface EnvironmentSummary {
   id: string;
   label: string;
   kind: string;
   backend_mode: string;
+  display_host: string;
+  capabilities: EnvironmentCapabilitySummary;
   base_url: Nullable<string>;
   auth: EnvironmentAuthSummary;
   path_mapping_count: number;
+  ssh_alias: Nullable<string>;
+  attach_hint: Nullable<string>;
+  bootstrap_hint: Nullable<string>;
   status: string;
   last_seen_at: Nullable<IsoDateTime>;
   last_error_at: Nullable<IsoDateTime>;
@@ -239,6 +257,42 @@ export interface SessionListResponse {
 export interface ErrorResponse {
   code: string;
   message?: Nullable<string>;
+}
+
+export interface LaunchReceipt {
+  outcome: string;
+  target_id: string;
+  target_label: string;
+  target_kind: string;
+  target_capability: string;
+  local_cwd: Nullable<string>;
+  remote_cwd: Nullable<string>;
+  session_id: Nullable<string>;
+  remote_session_id: Nullable<string>;
+  attach_hint: Nullable<string>;
+  bootstrap_hint: Nullable<string>;
+  message: Nullable<string>;
+  local_override: boolean;
+}
+
+export interface CreateSessionResponse {
+  session: Nullable<SessionSummary>;
+  repo_theme: Nullable<RepoTheme | Record<string, unknown>>;
+  launch_receipt: Nullable<LaunchReceipt>;
+}
+
+export interface CreateSessionsBatchResult {
+  index: number;
+  cwd: string;
+  ok: boolean;
+  launch_receipt: Nullable<LaunchReceipt>;
+  session: Nullable<SessionSummary>;
+  repo_theme: Nullable<RepoTheme | Record<string, unknown>>;
+  error: Nullable<ErrorResponse | Record<string, unknown>>;
+}
+
+export interface CreateSessionsBatchResponse {
+  results: CreateSessionsBatchResult[];
 }
 
 export interface PublishedSelectionResponse {
@@ -1009,6 +1063,10 @@ export function normalizeBootPayload(value: unknown): BootPayload;
 export function normalizeStateEvidence(value: unknown): StateEvidence;
 export function normalizeActionCue(value: unknown): ActionCue;
 export function normalizeSessionSummary(value: unknown): Nullable<SessionSummary>;
+export function normalizeLaunchReceipt(value: unknown): Nullable<LaunchReceipt>;
+export function normalizeCreateSessionResponse(value: unknown): CreateSessionResponse;
+export function normalizeCreateSessionsBatchResult(value: unknown): CreateSessionsBatchResult;
+export function normalizeCreateSessionsBatchResponse(value: unknown): CreateSessionsBatchResponse;
 export function normalizeSessionListResponse(value: unknown): SessionListResponse;
 export function normalizePublishedSelectionResponse(value: unknown): PublishedSelectionResponse;
 export function normalizeTerminalServerFrame(value: unknown): TerminalServerFrame;

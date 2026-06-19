@@ -3,8 +3,8 @@ use swimmers::color::hsl_to_rgb;
 use swimmers::fleet_lens::build_fleet_lens_summary;
 use swimmers::session_labels::{session_canonical_cwd_key, session_cwd_label};
 use swimmers::types::{
-    ActionCueKind, AdvisoryMetadataSummary, FleetLensBucket, FleetLensBucketKind,
-    SessionEnvironmentScope,
+    ActionCueKind, AdvisoryMetadataSummary, DependencyHealthStatus, FleetLensBucket,
+    FleetLensBucketKind, SessionEnvironmentScope,
 };
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
@@ -482,14 +482,184 @@ fn fleet_filter_chips<C: TuiApi>(app: &App<C>, filter: &ThoughtFilter) -> Vec<Fi
         .map(|entity| entity.session.clone())
         .collect::<Vec<_>>();
     let lens = build_fleet_lens_summary(&sessions);
-    lens.buckets
+    let environments_by_key = app
+        .environments
+        .iter()
+        .map(|environment| (environment_filter_target_key(environment), environment))
+        .filter(|(key, _)| !key.is_empty())
+        .collect::<HashMap<_, _>>();
+    let mut seen_target_keys = lens
+        .buckets
+        .iter()
+        .filter(|bucket| bucket.kind == FleetLensBucketKind::Target)
+        .map(|bucket| bucket.key.clone())
+        .collect::<HashSet<_>>();
+    let mut chips = lens
+        .buckets
         .iter()
         .filter(|bucket| fleet_bucket_is_useful_chip(bucket, &lens.buckets))
         .cloned()
         .collect::<Vec<_>>()
         .into_iter()
-        .filter_map(|bucket| fleet_filter_chip_data(bucket, filter))
+        .filter_map(|bucket| {
+            if bucket.kind == FleetLensBucketKind::Target {
+                if let Some(environment) = environments_by_key.get(&bucket.key) {
+                    return environment_filter_chip_data(&bucket, environment, filter);
+                }
+            }
+            fleet_filter_chip_data(bucket, filter)
+        })
+        .collect::<Vec<_>>();
+    chips.extend(environment_target_filter_chips(
+        &app.environments,
+        filter,
+        &mut seen_target_keys,
+    ));
+    chips
+}
+
+fn environment_target_filter_chips(
+    environments: &[EnvironmentSummary],
+    filter: &ThoughtFilter,
+    seen_target_keys: &mut HashSet<String>,
+) -> Vec<FilterChipData> {
+    environments
+        .iter()
+        .filter_map(|environment| {
+            let key = environment_filter_target_key(environment);
+            if key.is_empty() || !seen_target_keys.insert(key.clone()) {
+                return None;
+            }
+            let fleet = ThoughtFleetFilter {
+                kind: FleetLensBucketKind::Target,
+                key,
+                label: environment_filter_target_label(environment),
+            };
+            environment_filter_chip_data_for_fleet(environment, fleet, filter)
+        })
         .collect()
+}
+
+fn environment_filter_chip_data(
+    bucket: &FleetLensBucket,
+    environment: &EnvironmentSummary,
+    filter: &ThoughtFilter,
+) -> Option<FilterChipData> {
+    let fleet = ThoughtFleetFilter {
+        kind: bucket.kind,
+        key: bucket.key.clone(),
+        label: bucket.label.clone(),
+    };
+    environment_filter_chip_data_for_fleet(environment, fleet, filter)
+}
+
+fn environment_filter_chip_data_for_fleet(
+    environment: &EnvironmentSummary,
+    fleet: ThoughtFleetFilter,
+    filter: &ThoughtFilter,
+) -> Option<FilterChipData> {
+    let label = environment_filter_chip_label(environment, &fleet, filter);
+    let width = display_width(&label);
+    (width > 0).then(|| FilterChipData {
+        cwd: None,
+        fleet: Some(fleet.clone()),
+        label,
+        color: environment_filter_chip_color(environment, &fleet, filter),
+        width,
+    })
+}
+
+fn environment_filter_target_key(environment: &EnvironmentSummary) -> String {
+    [
+        environment.id.as_str(),
+        environment.display_host.as_str(),
+        environment.label.as_str(),
+    ]
+    .into_iter()
+    .map(str::trim)
+    .find(|value| !value.is_empty())
+    .unwrap_or_default()
+    .to_string()
+}
+
+fn environment_filter_target_label(environment: &EnvironmentSummary) -> String {
+    [
+        environment.display_host.as_str(),
+        environment.label.as_str(),
+        environment.id.as_str(),
+    ]
+    .into_iter()
+    .map(str::trim)
+    .find(|value| !value.is_empty())
+    .unwrap_or("environment")
+    .to_string()
+}
+
+fn environment_filter_chip_label(
+    environment: &EnvironmentSummary,
+    fleet: &ThoughtFleetFilter,
+    filter: &ThoughtFilter,
+) -> String {
+    let active = filter.fleet.as_ref() == Some(fleet);
+    let base = fleet_filter_chip_label(fleet, active);
+    if active {
+        return base;
+    }
+    let capabilities = environment_filter_capability_labels(environment);
+    if capabilities.is_empty() {
+        base
+    } else {
+        format!("{base} {}", capabilities.join("/"))
+    }
+}
+
+fn environment_filter_capability_labels(environment: &EnvironmentSummary) -> Vec<&'static str> {
+    let capabilities = &environment.capabilities;
+    let mut labels = Vec::new();
+    if capabilities.observe_sessions {
+        labels.push("observe");
+    }
+    if capabilities.launch_session {
+        labels.push("launch");
+    }
+    if capabilities.send_input {
+        labels.push("send");
+    }
+    if capabilities.remote_dir_inventory {
+        labels.push("dirs");
+    }
+    if capabilities.ssh_attach_hint {
+        labels.push("ssh");
+    }
+    if capabilities.bootstrap_hint {
+        labels.push("bootstrap");
+    }
+    if capabilities.advisory_metadata {
+        labels.push("external");
+    }
+    labels.truncate(3);
+    labels
+}
+
+fn environment_filter_chip_color(
+    environment: &EnvironmentSummary,
+    fleet: &ThoughtFleetFilter,
+    filter: &ThoughtFilter,
+) -> Color {
+    if filter.fleet.as_ref() == Some(fleet) {
+        return Color::Cyan;
+    }
+    match environment.status {
+        DependencyHealthStatus::Unavailable | DependencyHealthStatus::Degraded => Color::Red,
+        DependencyHealthStatus::Unknown => Color::Magenta,
+        DependencyHealthStatus::NotConfigured
+            if environment.kind.trim().eq_ignore_ascii_case("ssh_only") =>
+        {
+            Color::Yellow
+        }
+        DependencyHealthStatus::NotConfigured => Color::DarkGrey,
+        DependencyHealthStatus::Healthy => Color::Yellow,
+    }
 }
 
 fn fleet_bucket_is_useful_chip(bucket: &FleetLensBucket, buckets: &[FleetLensBucket]) -> bool {
@@ -1853,16 +2023,28 @@ fn thought_panel_fleet_lens_header<C: TuiApi>(app: &App<C>) -> Option<String> {
         .map(|entity| entity.session.clone())
         .collect::<Vec<_>>();
     let lens = build_fleet_lens_summary(&sessions);
-    let target_count = lens
+    let session_target_count = lens
         .buckets
         .iter()
         .filter(|bucket| bucket.kind == FleetLensBucketKind::Target)
         .count();
+    let environment_count = app.environments.len();
     let advisory_count = app
         .entities
         .iter()
         .map(|entity| entity.session.environment.advisory.len())
-        .sum::<usize>();
+        .sum::<usize>()
+        + app
+            .environments
+            .iter()
+            .map(|environment| environment.advisory.len())
+            .sum::<usize>();
+    let handoff_count = app
+        .environments
+        .iter()
+        .filter(|environment| environment.kind == "ssh_only")
+        .count();
+    let target_count = environment_count.max(session_target_count);
     if target_count <= 1 && advisory_count == 0 {
         return None;
     }
@@ -1871,12 +2053,25 @@ fn thought_panel_fleet_lens_header<C: TuiApi>(app: &App<C>) -> Option<String> {
         .iter()
         .filter(|bucket| bucket.kind == FleetLensBucketKind::Repo)
         .count();
-    let degraded = lens
+    let degraded_sessions = lens
         .buckets
         .iter()
         .filter(|bucket| bucket.kind == FleetLensBucketKind::Transport && bucket.key != "healthy")
         .map(|bucket| bucket.count)
         .sum::<usize>();
+    let degraded_environments = app
+        .environments
+        .iter()
+        .filter(|environment| {
+            matches!(
+                environment.status,
+                DependencyHealthStatus::Degraded
+                    | DependencyHealthStatus::Unavailable
+                    | DependencyHealthStatus::Unknown
+            )
+        })
+        .count();
+    let degraded = degraded_sessions.max(degraded_environments);
     let inbox = lens
         .buckets
         .iter()
@@ -1895,13 +2090,18 @@ fn thought_panel_fleet_lens_header<C: TuiApi>(app: &App<C>) -> Option<String> {
     } else {
         String::new()
     };
+    let handoff_suffix = if handoff_count > 0 {
+        format!(" · {handoff_count} handoff")
+    } else {
+        String::new()
+    };
     let advisory_suffix = if advisory_count > 0 {
         format!(" · ext {advisory_count}")
     } else {
         String::new()
     };
     Some(format!(
-        "fleet {target_count} host{} / {repo_count} project{}{inbox_suffix}{degraded_suffix}{advisory_suffix}",
+        "fleet {target_count} host{} / {repo_count} project{}{inbox_suffix}{degraded_suffix}{handoff_suffix}{advisory_suffix}",
         pluralize(target_count),
         pluralize(repo_count)
     ))

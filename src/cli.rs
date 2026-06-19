@@ -20,6 +20,7 @@ use std::process::{Child, Command as ProcessCommand, ExitStatus, Output, Stdio};
 use std::time::{Duration, Instant};
 
 use clap::{Parser, Subcommand};
+use serde::Serialize;
 
 use crate::config::{
     bool_env_value, AuthMode, Config, ConfigDiagnostic, ConfigDiagnosticLevel, ConfigLoad,
@@ -299,6 +300,21 @@ pub enum ConfigAction {
     /// Exits 0 if all checks pass, 1 otherwise. Doctor is advisory — the
     /// server itself also enforces trusted bind-address gates at startup.
     Doctor,
+
+    /// Propose untrusted ssh_only overlay targets from SSH config.
+    ///
+    /// This command is dry-run only: it parses Host blocks, emits candidate
+    /// overlay snippets, and never connects to remote hosts or writes files.
+    #[command(name = "ssh-import")]
+    SshImport {
+        /// Required safety gate; without it the command refuses to run.
+        #[arg(long)]
+        dry_run: bool,
+
+        /// SSH config file to inspect. Defaults to ~/.ssh/config.
+        #[arg(long = "ssh-config")]
+        ssh_config: Option<PathBuf>,
+    },
 }
 
 #[derive(Subcommand, Debug, PartialEq, Eq)]
@@ -462,6 +478,218 @@ pub fn print_config_diagnostics(diagnostics: &[ConfigDiagnostic]) {
             diagnostic.message
         );
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct SshImportReport {
+    pub mode: &'static str,
+    pub source_path: String,
+    pub writes_files: bool,
+    pub connects_to_hosts: bool,
+    pub proposals: Vec<SshImportProposal>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct SshImportProposal {
+    pub id: String,
+    pub label: String,
+    pub kind: &'static str,
+    pub trust: &'static str,
+    pub source: String,
+    pub attach_hint: String,
+    pub bootstrap_hint: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub host_name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub user: Option<String>,
+    pub overlay_snippet: String,
+}
+
+#[derive(Debug, Default)]
+struct SshHostBlock {
+    aliases: Vec<String>,
+    host_name: Option<String>,
+    user: Option<String>,
+    line_number: usize,
+}
+
+pub fn default_ssh_config_path() -> Option<PathBuf> {
+    std::env::var_os("HOME")
+        .filter(|home| !home.is_empty())
+        .map(PathBuf::from)
+        .map(|home| home.join(".ssh").join("config"))
+}
+
+pub fn ssh_import_report_from_config(
+    source_path: impl Into<String>,
+    config: &str,
+) -> SshImportReport {
+    SshImportReport {
+        mode: "dry_run",
+        source_path: source_path.into(),
+        writes_files: false,
+        connects_to_hosts: false,
+        proposals: ssh_import_proposals_from_config(config),
+    }
+}
+
+pub fn ssh_import_proposals_from_config(config: &str) -> Vec<SshImportProposal> {
+    let mut proposals = Vec::new();
+    let mut current = SshHostBlock::default();
+    let mut inside_match_block = false;
+
+    for (line_index, raw_line) in config.lines().enumerate() {
+        let line_number = line_index + 1;
+        let is_indented = raw_line
+            .chars()
+            .next()
+            .is_some_and(|ch| ch.is_ascii_whitespace());
+        let line = strip_ssh_config_comment(raw_line).trim();
+        if line.is_empty() {
+            continue;
+        }
+        let mut parts = line.split_whitespace();
+        let Some(keyword) = parts.next() else {
+            continue;
+        };
+        if keyword.eq_ignore_ascii_case("Host") {
+            if inside_match_block && is_indented {
+                continue;
+            }
+            inside_match_block = false;
+            append_ssh_import_block(&mut proposals, std::mem::take(&mut current));
+            current.aliases = parts.map(ToOwned::to_owned).collect();
+            current.line_number = line_number;
+        } else if keyword.eq_ignore_ascii_case("Match") {
+            append_ssh_import_block(&mut proposals, std::mem::take(&mut current));
+            inside_match_block = true;
+        } else if inside_match_block {
+            continue;
+        } else if keyword.eq_ignore_ascii_case("HostName") {
+            current.host_name = parts.next().map(ToOwned::to_owned);
+        } else if keyword.eq_ignore_ascii_case("User") {
+            current.user = parts.next().map(ToOwned::to_owned);
+        }
+    }
+
+    append_ssh_import_block(&mut proposals, current);
+    proposals
+}
+
+fn strip_ssh_config_comment(line: &str) -> &str {
+    line.split_once('#')
+        .map(|(before, _)| before)
+        .unwrap_or(line)
+}
+
+fn append_ssh_import_block(proposals: &mut Vec<SshImportProposal>, block: SshHostBlock) {
+    let SshHostBlock {
+        aliases,
+        host_name,
+        user,
+        line_number,
+    } = block;
+    for alias in aliases
+        .into_iter()
+        .filter(|alias| is_importable_ssh_alias(alias))
+    {
+        proposals.push(ssh_import_proposal(
+            alias,
+            host_name.as_deref(),
+            user.as_deref(),
+            line_number,
+        ));
+    }
+}
+
+fn ssh_import_proposal(
+    alias: String,
+    host_name: Option<&str>,
+    user: Option<&str>,
+    line_number: usize,
+) -> SshImportProposal {
+    let label = ssh_import_label(&alias, host_name, user);
+    SshImportProposal {
+        attach_hint: format!("ssh {alias}"),
+        bootstrap_hint: format!("ssh {alias} 'swimmers serve'"),
+        overlay_snippet: ssh_import_overlay_snippet(&alias, &label),
+        source: format!("ssh_config:{line_number}"),
+        id: alias,
+        label,
+        kind: "ssh_only",
+        trust: "untrusted",
+        host_name: host_name.map(ToOwned::to_owned),
+        user: user.map(ToOwned::to_owned),
+    }
+}
+
+fn ssh_import_label(alias: &str, host_name: Option<&str>, user: Option<&str>) -> String {
+    match (user, host_name) {
+        (Some(user), Some(host)) => format!("{user}@{host}"),
+        (_, Some(host)) => host.to_string(),
+        _ => alias.to_string(),
+    }
+}
+
+fn ssh_import_overlay_snippet(alias: &str, label: &str) -> String {
+    let snippet = SshImportOverlaySnippet {
+        dev_sanity: SshImportDevSanity {
+            agent_launch: SshImportAgentLaunch {
+                targets: vec![SshImportOverlayTarget {
+                    id: alias,
+                    label,
+                    kind: "ssh_only",
+                }],
+            },
+        },
+    };
+    serde_yaml::to_string(&snippet).unwrap_or_else(|_| {
+        format!(
+            "dev_sanity:\n  agent_launch:\n    targets:\n      - id: {alias}\n        label: {label}\n        kind: ssh_only\n"
+        )
+    })
+}
+
+#[derive(Serialize)]
+struct SshImportOverlaySnippet<'a> {
+    dev_sanity: SshImportDevSanity<'a>,
+}
+
+#[derive(Serialize)]
+struct SshImportDevSanity<'a> {
+    agent_launch: SshImportAgentLaunch<'a>,
+}
+
+#[derive(Serialize)]
+struct SshImportAgentLaunch<'a> {
+    targets: Vec<SshImportOverlayTarget<'a>>,
+}
+
+#[derive(Serialize)]
+struct SshImportOverlayTarget<'a> {
+    id: &'a str,
+    label: &'a str,
+    kind: &'a str,
+}
+
+fn is_importable_ssh_alias(alias: &str) -> bool {
+    !alias.is_empty()
+        && !alias.starts_with('!')
+        && !alias.contains('*')
+        && !alias.contains('?')
+        && alias.bytes().all(|byte| {
+            matches!(
+                byte,
+                b'A'..=b'Z'
+                    | b'a'..=b'z'
+                    | b'0'..=b'9'
+                    | b'.'
+                    | b'_'
+                    | b'-'
+                    | b'@'
+                    | b':'
+            )
+        })
 }
 
 /// Severity of a single doctor finding.
@@ -647,9 +875,29 @@ pub fn doctor_remote_targets_finding(snapshot: &DependencyHealthSnapshot) -> Doc
         .map(|error| format!(": {error}"))
         .unwrap_or_default();
     let summary = format!(
-        "status={} configured={} auth_env_missing={} targets_without_path_mappings={}{}",
+        "status={} configured={} swimmers_api={} ssh_only={} handoff={} attach_hint_missing={} auth_env_missing={} targets_without_path_mappings={}{}",
         dependency_status_label(snapshot.status),
         configured,
+        snapshot
+            .details
+            .get("swimmers_api_targets")
+            .map(String::as_str)
+            .unwrap_or("0"),
+        snapshot
+            .details
+            .get("ssh_only_targets")
+            .map(String::as_str)
+            .unwrap_or("0"),
+        snapshot
+            .details
+            .get("handoff_targets")
+            .map(String::as_str)
+            .unwrap_or("0"),
+        snapshot
+            .details
+            .get("attach_hint_missing")
+            .map(String::as_str)
+            .unwrap_or("0"),
         snapshot
             .details
             .get("auth_env_missing")

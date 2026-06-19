@@ -17,7 +17,11 @@ import {
   visibleDirBatchPlan,
   visibleSelectableDirPaths as dirBrowserVisibleSelectableDirPaths,
 } from "./dir_browser.js";
-import { normalizeDirListResponse } from "./contracts.js";
+import {
+  normalizeCreateSessionResponse,
+  normalizeCreateSessionsBatchResponse,
+  normalizeDirListResponse,
+} from "./contracts.js";
 import { responseJson as defaultResponseJson } from "./api_client.js";
 
 export function shouldRetryDirListingFromBase(error, targetPath, groupName, options = {}) {
@@ -38,6 +42,29 @@ export function batchFailureLines(results) {
       const message = result?.error?.message || result?.error?.code || "unknown error";
       return `${cwd} (${message})`;
     });
+}
+
+export function launchReceiptStatusLine(receipt) {
+  if (!receipt) return "";
+  const target = receipt.target_label || receipt.target_id || "target";
+  if (receipt.outcome === "handoff") {
+    const command = receipt.attach_hint || receipt.bootstrap_hint || "configure a safe ssh alias";
+    return `Handoff ${target}: ${command}`;
+  }
+  if (receipt.outcome === "created") {
+    const session = receipt.session_id || "session";
+    if (receipt.local_cwd && receipt.remote_cwd) {
+      return `Created ${session} on ${target}: ${receipt.local_cwd} -> ${receipt.remote_cwd}`;
+    }
+    if (receipt.local_override) {
+      return `Created ${session} on local machine with explicit override`;
+    }
+    return `Created ${session} on ${target}`;
+  }
+  if (receipt.outcome === "blocked") {
+    return receipt.message || `Launch blocked for ${target}`;
+  }
+  return receipt.message || `Launch ${receipt.outcome || "result"} for ${target}`;
 }
 
 export function createDirBrowserController(runtime) {
@@ -374,7 +401,7 @@ export function createDirBrowserController(runtime) {
         initial_request: initialRequest || "",
       }),
     });
-    const payload = await response.json();
+    const payload = normalizeCreateSessionsBatchResponse(await response.json());
     const results = Array.isArray(payload?.results) ? payload.results : [];
     const total = dirs.length;
     const successResults = results.filter((result) => result?.ok);
@@ -400,6 +427,17 @@ export function createDirBrowserController(runtime) {
       if (successCount === 0) {
         setDirStatus(`Batch send failed for all ${total}: ${preview}${overflow}`, true);
       }
+      return;
+    }
+
+    const handoffResults = successResults.filter((result) => (
+      result?.launch_receipt?.outcome === "handoff" && !result?.session?.session_id
+    ));
+    if (handoffResults.length > 0) {
+      const first = launchReceiptStatusLine(handoffResults[0].launch_receipt);
+      const overflow = handoffResults.length > 1 ? ` (+${handoffResults.length - 1} more)` : "";
+      setDirStatus(`${first}${overflow}`, false);
+      setUtilityStatus(`${handoffResults.length}/${total} handoff receipts ready`, false, 6200);
       return;
     }
 
@@ -443,12 +481,16 @@ export function createDirBrowserController(runtime) {
       }),
     });
 
-    const payload = await response.json();
+    const payload = normalizeCreateSessionResponse(await response.json());
     const created = payload?.session;
     if (created?.session_id) {
       closeSheets();
       await refreshSessions();
       await selectSession(created.session_id);
+    }
+    const receiptLine = launchReceiptStatusLine(payload?.launch_receipt);
+    if (receiptLine) {
+      setDirStatus(receiptLine, false);
     }
   }
 

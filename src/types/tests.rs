@@ -218,7 +218,7 @@ fn create_session_response_serializes_repo_theme() {
         sprite: Some("jelly".into()),
     };
     let resp = CreateSessionResponse {
-        session: SessionSummary {
+        session: Some(SessionSummary {
             session_id: "s1".into(),
             tmux_name: "1".into(),
             state: SessionState::Idle,
@@ -245,8 +245,9 @@ fn create_session_response_serializes_repo_theme() {
             repo_theme_id: Some("/tmp/proj".into()),
             batch: None,
             environment: Default::default(),
-        },
+        }),
         repo_theme: Some(theme),
+        launch_receipt: None,
     };
     let json = serde_json::to_string(&resp).unwrap();
     assert!(
@@ -262,6 +263,7 @@ fn create_session_response_serializes_repo_theme() {
     let resp_none = CreateSessionResponse {
         session: resp.session,
         repo_theme: None,
+        launch_receipt: None,
     };
     let json_none = serde_json::to_string(&resp_none).unwrap();
     assert!(

@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { createDirBrowserController } from "./dir_browser_controller.js";
+import { createDirBrowserController, launchReceiptStatusLine } from "./dir_browser_controller.js";
 
 function createRuntime(overrides = {}) {
   const storage = new Map();
@@ -98,6 +98,27 @@ function submitEvent() {
     },
   };
 }
+
+test("launch receipt status lines distinguish handoff and mapped creates", () => {
+  assert.equal(
+    launchReceiptStatusLine({
+      outcome: "handoff",
+      target_label: "Skillbox devbox",
+      attach_hint: "ssh skillbox-devbox",
+    }),
+    "Handoff Skillbox devbox: ssh skillbox-devbox",
+  );
+  assert.equal(
+    launchReceiptStatusLine({
+      outcome: "created",
+      target_label: "Devbox",
+      session_id: "devbox::sess_2",
+      local_cwd: "/workspace/swimmers",
+      remote_cwd: "/srv/workspace/swimmers",
+    }),
+    "Created devbox::sess_2 on Devbox: /workspace/swimmers -> /srv/workspace/swimmers",
+  );
+});
 
 test("directory browser controller delegates dynamic view rendering while preserving state ownership", () => {
   const views = [];
@@ -323,6 +344,62 @@ test("directory browser controller lets API resolve remote cold launch without c
   });
   assert.equal(state.dirBrowser.singleLaunchBlocker, null);
   assert.equal(statuses.some((status) => /unsupported target/.test(status.message)), false);
+});
+
+test("directory browser controller surfaces ssh-only create handoff receipts", async () => {
+  const calls = [];
+  let refreshed = 0;
+  let selected = "";
+  const { runtime, state, el, statuses } = createRuntime({
+    apiFetch: async (...args) => {
+      calls.push(args);
+      return {
+        json: async () => ({
+          session: null,
+          launch_receipt: {
+            outcome: "handoff",
+            target_id: "skillbox-devbox",
+            target_label: "Skillbox devbox",
+            target_kind: "ssh_only",
+            local_cwd: "/workspace/swimmers",
+            attach_hint: "ssh skillbox-devbox",
+          },
+        }),
+      };
+    },
+    async refreshSessions() {
+      refreshed += 1;
+    },
+    async selectSession(sessionId) {
+      selected = sessionId;
+    },
+  });
+  state.readOnly = false;
+  state.dirBrowser.launchTargets = [{
+    id: "skillbox-devbox",
+    label: "Skillbox devbox",
+    kind: "ssh_only",
+  }];
+  state.dirBrowser.launchTarget = "skillbox-devbox";
+  el.createLaunchTarget = selectElement("skillbox-devbox");
+  el.createCwd.value = "/workspace/swimmers";
+
+  const controller = createDirBrowserController(runtime);
+  await controller.handleCreateFormSubmit(submitEvent());
+
+  assert.equal(calls.length, 1);
+  assert.deepEqual(JSON.parse(calls[0][1].body), {
+    cwd: "/workspace/swimmers",
+    spawn_tool: "grok",
+    launch_target: "skillbox-devbox",
+    initial_request: null,
+  });
+  assert.equal(refreshed, 0);
+  assert.equal(selected, "");
+  assert.deepEqual(statuses.at(-1), {
+    message: "Handoff Skillbox devbox: ssh skillbox-devbox",
+    isError: false,
+  });
 });
 
 test("directory browser controller reloads inventory when launch target changes", async () => {

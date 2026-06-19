@@ -26,6 +26,32 @@ fn with_remote_environment(
     session
 }
 
+fn ssh_only_environment(id: &str, label: &str) -> swimmers::types::EnvironmentSummary {
+    swimmers::types::EnvironmentSummary {
+        id: id.to_string(),
+        label: label.to_string(),
+        kind: "ssh_only".to_string(),
+        backend_mode: "ssh_handoff".to_string(),
+        display_host: label.to_string(),
+        capabilities: swimmers::types::EnvironmentCapabilitySummary::ssh_handoff(true),
+        base_url: None,
+        auth: swimmers::types::EnvironmentAuthSummary {
+            mode: "none".to_string(),
+            token_env_present: None,
+        },
+        path_mapping_count: 0,
+        ssh_alias: Some(id.to_string()),
+        attach_hint: Some(format!("ssh {id}")),
+        bootstrap_hint: Some(format!("ssh {id} 'swimmers serve'")),
+        status: swimmers::types::DependencyHealthStatus::NotConfigured,
+        last_seen_at: None,
+        last_error_at: None,
+        last_error: None,
+        freshness_ms: None,
+        advisory: Vec::new(),
+    }
+}
+
 #[test]
 fn thought_panel_groups_by_pwd_by_default() {
     let api = MockApi::new();
@@ -978,6 +1004,77 @@ fn thought_panel_marks_advisory_metadata_as_external_and_stale() {
         thought_panel_header(&app),
         "clawgs / pwd / all · 0/1 asleep · > asleep · fleet 1 host / 1 project · ext 1"
     );
+}
+
+#[test]
+fn thought_panel_header_counts_zero_session_ssh_only_environments() {
+    let api = MockApi::new();
+    let layout = test_layout(120, 32);
+    let mut app = make_app(api);
+
+    let local = session_summary_with_thought(
+        "sess-local",
+        "7",
+        TEST_REPO_SWIMMERS,
+        "local is working",
+        "2026-03-08T14:00:05Z",
+    );
+    app.capture_thought_updates(&[local.clone()], layout.thought_entry_capacity());
+    app.entities = vec![SessionEntity::new(local, layout.overview_field)];
+    app.environments = vec![
+        swimmers::types::EnvironmentSummary::local(),
+        ssh_only_environment("skillbox-devbox", "Skillbox devbox"),
+    ];
+
+    assert_eq!(
+        thought_panel_header(&app),
+        "clawgs / pwd / all · 0/1 asleep · > asleep · fleet 2 hosts / 1 project · 1 handoff"
+    );
+}
+
+#[test]
+fn header_filter_strip_exposes_zero_session_ssh_only_targets_without_fake_sessions() {
+    let api = MockApi::new();
+    let layout = test_layout(160, 32);
+    let mut app = make_app(api);
+
+    let local = session_summary_with_thought(
+        "sess-local",
+        "7",
+        TEST_REPO_SWIMMERS,
+        "local is working",
+        "2026-03-08T14:00:05Z",
+    );
+    app.capture_thought_updates(&[local.clone()], layout.thought_entry_capacity());
+    app.entities = vec![SessionEntity::new(local.clone(), layout.overview_field)];
+    app.environments = vec![
+        swimmers::types::EnvironmentSummary::local(),
+        ssh_only_environment("skillbox-devbox", "Skillbox devbox"),
+    ];
+
+    let strip = build_header_filter_layout(&app, 160);
+    let chip = strip
+        .chips
+        .iter()
+        .find(|chip| chip.label == "host:Skillbox devbox ssh/bootstrap/external")
+        .expect("ssh-only target chip");
+    assert_eq!(
+        header_filter_action_at(&app, 160, chip.rect.x, chip.rect.y),
+        Some(ThoughtPanelAction::FilterByFleet(ThoughtFleetFilter {
+            kind: swimmers::types::FleetLensBucketKind::Target,
+            key: "skillbox-devbox".to_string(),
+            label: "Skillbox devbox".to_string(),
+        }))
+    );
+
+    app.thought_filter.fleet = Some(ThoughtFleetFilter {
+        kind: swimmers::types::FleetLensBucketKind::Target,
+        key: "skillbox-devbox".to_string(),
+        label: "Skillbox devbox".to_string(),
+    });
+    assert!(!app.thought_filter.matches_session(&local));
+    let active_strip = build_header_filter_layout(&app, 160);
+    assert!(active_strip.chips.iter().any(|chip| chip.label == "host ."));
 }
 
 #[test]

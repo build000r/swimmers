@@ -374,8 +374,9 @@ async fn api_client_create_session_allows_slower_session_creation_responses() {
         .expect("create session should outlive the default polling timeout");
 
     handle.abort();
-    assert_eq!(response.session.session_id, "sess-1");
-    assert_eq!(response.session.tmux_name, "7");
+    let session = response.session.as_ref().expect("created session");
+    assert_eq!(session.session_id, "sess-1");
+    assert_eq!(session.tmux_name, "7");
 }
 
 #[tokio::test]

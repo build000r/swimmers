@@ -326,6 +326,13 @@ mod picker {
         assert_eq!(blocker.remote_cwd, None);
         assert_eq!(blocker.blocked_reason, Some("unmapped cwd"));
 
+        let mut ssh_only = apply_response_target("skillbox-devbox");
+        ssh_only.kind = "ssh_only".to_string();
+        let handoff = launch_target_preview_for_path("/tmp/outside", &ssh_only);
+        assert_eq!(handoff.target_id, "skillbox-devbox");
+        assert_eq!(handoff.remote_cwd, None);
+        assert_eq!(handoff.blocked_reason, None);
+
         let unsupported = launch_target_preview_for_path(
             "/Users/tester/repos/swimmers",
             &apply_response_target("legacy"),

@@ -3,6 +3,8 @@ import assert from "node:assert/strict";
 
 import {
   normalizeBootPayload,
+  normalizeCreateSessionResponse,
+  normalizeCreateSessionsBatchResponse,
   normalizeDirListResponse,
   normalizeMermaidArtifactResponse,
   normalizeNativeDesktopStatusResponse,
@@ -45,6 +47,59 @@ test("normalizeBootPayload preserves boot fields and tolerates malformed asset i
   assert.equal(normalizeBootPayload({ franken_term_available: "yes" }).franken_term_available, false);
 });
 
+test("normalize create responses preserve launch receipts and nullable sessions", () => {
+  const create = normalizeCreateSessionResponse({
+    session: null,
+    repo_theme: null,
+    launch_receipt: {
+      outcome: "handoff",
+      target_id: "skillbox-devbox",
+      target_label: "Skillbox devbox",
+      target_kind: "ssh_only",
+      target_capability: "ssh_handoff",
+      local_cwd: "/Users/tester/repos/opensource/swimmers",
+      attach_hint: "ssh skillbox-devbox",
+      bootstrap_hint: null,
+      local_override: "no",
+    },
+  });
+  assert.equal(create.session, null);
+  assert.deepEqual(create.launch_receipt, {
+    outcome: "handoff",
+    target_id: "skillbox-devbox",
+    target_label: "Skillbox devbox",
+    target_kind: "ssh_only",
+    target_capability: "ssh_handoff",
+    local_cwd: "/Users/tester/repos/opensource/swimmers",
+    remote_cwd: null,
+    session_id: null,
+    remote_session_id: null,
+    attach_hint: "ssh skillbox-devbox",
+    bootstrap_hint: null,
+    message: null,
+    local_override: false,
+  });
+
+  const batch = normalizeCreateSessionsBatchResponse({
+    results: [
+      {
+        index: "1",
+        cwd: 42,
+        ok: true,
+        launch_receipt: { outcome: "created", target_id: "local" },
+        session: { session_id: "sess-1", cwd: "/tmp/app" },
+      },
+      {},
+    ],
+  });
+  assert.equal(batch.results.length, 2);
+  assert.equal(batch.results[0].index, 1);
+  assert.equal(batch.results[0].cwd, "42");
+  assert.equal(batch.results[0].session.session_id, "sess-1");
+  assert.equal(batch.results[0].launch_receipt.target_label, "Local machine");
+  assert.equal(batch.results[1].ok, false);
+});
+
 test("normalizeSessionListResponse preserves SessionSummary-derived web fields with tolerant defaults", () => {
   const payload = normalizeSessionListResponse({
     version: "7",
@@ -77,15 +132,49 @@ test("normalizeSessionListResponse preserves SessionSummary-derived web fields w
         label: "Remote",
         kind: "swimmers_api",
         backend_mode: "remote_swimmers_api",
+        display_host: "Remote",
+        capabilities: {
+          observe_sessions: true,
+          launch_session: true,
+          send_input: true,
+          group_input: true,
+          remote_dir_inventory: true,
+          native_attach: false,
+          ssh_attach_hint: false,
+          bootstrap_hint: false,
+          advisory_metadata: true,
+          health_probe: true,
+        },
         base_url: "https://remote.example.test",
         auth: { mode: "token_env", token_env_present: true },
         path_mapping_count: "2",
+        ssh_alias: null,
+        attach_hint: null,
+        bootstrap_hint: null,
         status: "Healthy",
         last_seen_at: "2026-06-05T00:01:00Z",
         last_error_at: null,
         last_error: 404,
         freshness_ms: "5",
         advisory: [{ source: "c0", label: "c0 group", value: 42, stale: false }],
+      },
+      {
+        id: "skillbox-devbox",
+        label: "Skillbox devbox",
+        kind: "ssh_only",
+        backend_mode: "ssh_handoff",
+        display_host: "Skillbox devbox",
+        capabilities: {
+          ssh_attach_hint: true,
+          bootstrap_hint: true,
+          advisory_metadata: true,
+        },
+        auth: { mode: "none", token_env_present: null },
+        path_mapping_count: 0,
+        ssh_alias: "skillbox-devbox",
+        attach_hint: "ssh skillbox-devbox",
+        bootstrap_hint: "ssh skillbox-devbox 'swimmers serve'",
+        status: "NotConfigured",
       },
       null,
     ],
@@ -164,9 +253,25 @@ test("normalizeSessionListResponse preserves SessionSummary-derived web fields w
     label: "Remote",
     kind: "swimmers_api",
     backend_mode: "remote_swimmers_api",
+    display_host: "Remote",
+    capabilities: {
+      observe_sessions: true,
+      launch_session: true,
+      send_input: true,
+      group_input: true,
+      remote_dir_inventory: true,
+      native_attach: false,
+      ssh_attach_hint: false,
+      bootstrap_hint: false,
+      advisory_metadata: true,
+      health_probe: true,
+    },
     base_url: "https://remote.example.test",
     auth: { mode: "token_env", token_env_present: true },
     path_mapping_count: 2,
+    ssh_alias: null,
+    attach_hint: null,
+    bootstrap_hint: null,
     status: "Healthy",
     last_seen_at: "2026-06-05T00:01:00Z",
     last_error_at: null,
@@ -179,6 +284,37 @@ test("normalizeSessionListResponse preserves SessionSummary-derived web fields w
       status: "external",
       stale: false,
     }],
+  },
+  {
+    id: "skillbox-devbox",
+    label: "Skillbox devbox",
+    kind: "ssh_only",
+    backend_mode: "ssh_handoff",
+    display_host: "Skillbox devbox",
+    capabilities: {
+      observe_sessions: false,
+      launch_session: false,
+      send_input: false,
+      group_input: false,
+      remote_dir_inventory: false,
+      native_attach: false,
+      ssh_attach_hint: true,
+      bootstrap_hint: true,
+      advisory_metadata: true,
+      health_probe: false,
+    },
+    base_url: null,
+    auth: { mode: "none", token_env_present: null },
+    path_mapping_count: 0,
+    ssh_alias: "skillbox-devbox",
+    attach_hint: "ssh skillbox-devbox",
+    bootstrap_hint: "ssh skillbox-devbox 'swimmers serve'",
+    status: "NotConfigured",
+    last_seen_at: null,
+    last_error_at: null,
+    last_error: null,
+    freshness_ms: null,
+    advisory: [],
   }]);
   assert.deepEqual(payload.fleet_lens, {
     total_sessions: 2,

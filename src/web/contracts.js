@@ -183,6 +183,60 @@ export function normalizeSessionEnvironmentSummary(value) {
   };
 }
 
+export function normalizeLaunchReceipt(value) {
+  const receipt = objectRecord(value);
+  if (!receipt) {
+    return null;
+  }
+  return {
+    outcome: stringValue(receipt.outcome),
+    target_id: stringValue(receipt.target_id, "local"),
+    target_label: stringValue(receipt.target_label, "Local machine"),
+    target_kind: stringValue(receipt.target_kind, "local"),
+    target_capability: stringValue(receipt.target_capability),
+    local_cwd: optionalString(receipt.local_cwd),
+    remote_cwd: optionalString(receipt.remote_cwd),
+    session_id: optionalString(receipt.session_id),
+    remote_session_id: optionalString(receipt.remote_session_id),
+    attach_hint: optionalString(receipt.attach_hint),
+    bootstrap_hint: optionalString(receipt.bootstrap_hint),
+    message: optionalString(receipt.message),
+    local_override: booleanValue(receipt.local_override),
+  };
+}
+
+export function normalizeCreateSessionResponse(value) {
+  const payload = objectRecord(value) || {};
+  return {
+    ...payload,
+    session: normalizeSessionSummary(payload.session),
+    repo_theme: objectRecord(payload.repo_theme),
+    launch_receipt: normalizeLaunchReceipt(payload.launch_receipt),
+  };
+}
+
+export function normalizeCreateSessionsBatchResult(value) {
+  const result = objectRecord(value) || {};
+  return {
+    ...result,
+    index: finiteNumber(result.index),
+    cwd: stringValue(result.cwd),
+    ok: booleanValue(result.ok),
+    launch_receipt: normalizeLaunchReceipt(result.launch_receipt),
+    session: normalizeSessionSummary(result.session),
+    repo_theme: objectRecord(result.repo_theme),
+    error: objectRecord(result.error),
+  };
+}
+
+export function normalizeCreateSessionsBatchResponse(value) {
+  const payload = objectRecord(value) || {};
+  return {
+    ...payload,
+    results: objectArray(payload.results).map(normalizeCreateSessionsBatchResult),
+  };
+}
+
 function normalizeEnvironmentAuthSummary(value) {
   const auth = objectRecord(value) || {};
   const tokenEnvPresent =
@@ -193,6 +247,22 @@ function normalizeEnvironmentAuthSummary(value) {
   };
 }
 
+function normalizeEnvironmentCapabilitySummary(value) {
+  const capabilities = objectRecord(value) || {};
+  return {
+    observe_sessions: capabilities.observe_sessions === true,
+    launch_session: capabilities.launch_session === true,
+    send_input: capabilities.send_input === true,
+    group_input: capabilities.group_input === true,
+    remote_dir_inventory: capabilities.remote_dir_inventory === true,
+    native_attach: capabilities.native_attach === true,
+    ssh_attach_hint: capabilities.ssh_attach_hint === true,
+    bootstrap_hint: capabilities.bootstrap_hint === true,
+    advisory_metadata: capabilities.advisory_metadata !== false,
+    health_probe: capabilities.health_probe === true,
+  };
+}
+
 export function normalizeEnvironmentSummary(value) {
   const environment = objectRecord(value) || {};
   return {
@@ -200,9 +270,14 @@ export function normalizeEnvironmentSummary(value) {
     label: stringValue(environment.label, "Local machine"),
     kind: stringValue(environment.kind, "local"),
     backend_mode: stringValue(environment.backend_mode, "local"),
+    display_host: stringValue(environment.display_host, "local"),
+    capabilities: normalizeEnvironmentCapabilitySummary(environment.capabilities),
     base_url: optionalString(environment.base_url),
     auth: normalizeEnvironmentAuthSummary(environment.auth),
     path_mapping_count: finiteNumber(environment.path_mapping_count),
+    ssh_alias: optionalString(environment.ssh_alias),
+    attach_hint: optionalString(environment.attach_hint),
+    bootstrap_hint: optionalString(environment.bootstrap_hint),
     status: stringValue(environment.status, "Unknown"),
     last_seen_at: optionalString(environment.last_seen_at),
     last_error_at: optionalString(environment.last_error_at),

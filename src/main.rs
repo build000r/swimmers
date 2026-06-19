@@ -243,7 +243,13 @@ fn run_config_subcommand(action: Option<ConfigAction>) -> i32 {
     // Load .env so subcommands see the same environment the server would.
     let _ = dotenvy::dotenv();
 
-    config_subcommand_runner(action)(Config::from_env_report())
+    match action {
+        Some(ConfigAction::SshImport {
+            dry_run,
+            ssh_config,
+        }) => run_config_ssh_import(dry_run, ssh_config),
+        action => config_subcommand_runner(action)(Config::from_env_report()),
+    }
 }
 
 type ConfigSubcommandRunner = fn(ConfigLoad) -> i32;
@@ -280,6 +286,36 @@ fn run_config_doctor(load: ConfigLoad) -> i32 {
     let printed_code = cli::print_doctor_findings(&findings);
     debug_assert_eq!(printed_code, config_doctor_exit_code(&findings));
     printed_code
+}
+
+fn run_config_ssh_import(dry_run: bool, ssh_config: Option<PathBuf>) -> i32 {
+    if !dry_run {
+        eprintln!("ssh-import is proposal-only; rerun with --dry-run");
+        return 2;
+    }
+
+    let Some(path) = ssh_config.or_else(cli::default_ssh_config_path) else {
+        eprintln!("ssh-import could not resolve ~/.ssh/config; pass --ssh-config <path>");
+        return 1;
+    };
+    let contents = match std::fs::read_to_string(&path) {
+        Ok(contents) => contents,
+        Err(err) => {
+            eprintln!("ssh-import failed to read {}: {err}", path.display());
+            return 1;
+        }
+    };
+    let report = cli::ssh_import_report_from_config(path.display().to_string(), &contents);
+    match serde_json::to_string_pretty(&report) {
+        Ok(json) => {
+            println!("{json}");
+            0
+        }
+        Err(err) => {
+            eprintln!("ssh-import failed to serialize report: {err}");
+            1
+        }
+    }
 }
 
 fn config_doctor_findings(

@@ -1,0 +1,87 @@
+{
+  "version": 1,
+  "fixture_id": "multi_ssh_env_v2",
+  "scope": {
+    "truth_source": "explicitly configured Swimmers environment targets",
+    "not_supported": [
+      "arbitrary SSH fleet discovery",
+      "implicit SSH execution",
+      "cross-host tmux session merging",
+      "treating c0 or NTM advisory metadata as orchestration authority"
+    ]
+  },
+  "targets": [
+    {
+      "id": "local",
+      "kind": "local",
+      "backend_mode": "local",
+      "display_host": "local",
+      "capabilities": {
+        "observe_sessions": true,
+        "launch_session": true,
+        "send_input": true,
+        "group_input": true,
+        "remote_dir_inventory": true,
+        "native_attach": true,
+        "ssh_attach_hint": false,
+        "bootstrap_hint": false,
+        "advisory_metadata": true,
+        "health_probe": true
+      }
+    },
+    {
+      "id": "devbox",
+      "kind": "swimmers_api",
+      "backend_mode": "remote_swimmers_api",
+      "display_host": "devbox-tailnet",
+      "base_url": "http://devbox.tailnet.example:3210/",
+      "capabilities": {
+        "observe_sessions": true,
+        "launch_session": true,
+        "send_input": true,
+        "group_input": true,
+        "remote_dir_inventory": true,
+        "native_attach": false,
+        "ssh_attach_hint": false,
+        "bootstrap_hint": false,
+        "advisory_metadata": true,
+        "health_probe": true
+      },
+      "credential_rule": "tokens come from env and are not serialized as values or env names in environment inventory"
+    },
+    {
+      "id": "skillbox-devbox",
+      "kind": "ssh_only",
+      "backend_mode": "ssh_handoff",
+      "display_host": "Skillbox devbox",
+      "capabilities": {
+        "observe_sessions": false,
+        "launch_session": false,
+        "send_input": false,
+        "group_input": false,
+        "remote_dir_inventory": false,
+        "native_attach": false,
+        "ssh_attach_hint": true,
+        "bootstrap_hint": true,
+        "advisory_metadata": true,
+        "health_probe": false
+      },
+      "ssh_alias": "skillbox-devbox",
+      "attach_hint": "ssh skillbox-devbox",
+      "bootstrap_hint": "ssh skillbox-devbox 'swimmers serve'",
+      "status": "NotConfigured"
+    }
+  ],
+  "ssh_import": {
+    "mode": "dry_run",
+    "writes_files": false,
+    "connects_to_hosts": false,
+    "trust": "untrusted_until_reviewed",
+    "ignored_aliases": [
+      "wildcard Host patterns",
+      "negated Host patterns",
+      "aliases requiring shell quoting"
+    ],
+    "proposal_kind": "ssh_only"
+  }
+}

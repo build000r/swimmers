@@ -565,15 +565,107 @@ pub struct EnvironmentAuthSummary {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EnvironmentCapabilitySummary {
+    pub observe_sessions: bool,
+    pub launch_session: bool,
+    pub send_input: bool,
+    pub group_input: bool,
+    pub remote_dir_inventory: bool,
+    pub native_attach: bool,
+    pub ssh_attach_hint: bool,
+    pub bootstrap_hint: bool,
+    pub advisory_metadata: bool,
+    pub health_probe: bool,
+}
+
+impl EnvironmentCapabilitySummary {
+    pub fn local() -> Self {
+        Self {
+            observe_sessions: true,
+            launch_session: true,
+            send_input: true,
+            group_input: true,
+            remote_dir_inventory: true,
+            native_attach: true,
+            ssh_attach_hint: false,
+            bootstrap_hint: false,
+            advisory_metadata: true,
+            health_probe: true,
+        }
+    }
+
+    pub fn remote_swimmers_api(ready: bool, has_path_mappings: bool) -> Self {
+        Self {
+            observe_sessions: ready,
+            launch_session: ready,
+            send_input: ready,
+            group_input: ready,
+            remote_dir_inventory: ready && has_path_mappings,
+            native_attach: false,
+            ssh_attach_hint: false,
+            bootstrap_hint: false,
+            advisory_metadata: true,
+            health_probe: true,
+        }
+    }
+
+    pub fn ssh_handoff(has_safe_alias: bool) -> Self {
+        Self {
+            observe_sessions: false,
+            launch_session: false,
+            send_input: false,
+            group_input: false,
+            remote_dir_inventory: false,
+            native_attach: false,
+            ssh_attach_hint: has_safe_alias,
+            bootstrap_hint: has_safe_alias,
+            advisory_metadata: true,
+            health_probe: false,
+        }
+    }
+
+    pub fn advisory_only() -> Self {
+        Self {
+            observe_sessions: false,
+            launch_session: false,
+            send_input: false,
+            group_input: false,
+            remote_dir_inventory: false,
+            native_attach: false,
+            ssh_attach_hint: false,
+            bootstrap_hint: false,
+            advisory_metadata: true,
+            health_probe: false,
+        }
+    }
+}
+
+impl Default for EnvironmentCapabilitySummary {
+    fn default() -> Self {
+        Self::advisory_only()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EnvironmentSummary {
     pub id: String,
     pub label: String,
     pub kind: String,
     pub backend_mode: String,
+    #[serde(default = "default_environment_display_host")]
+    pub display_host: String,
+    #[serde(default)]
+    pub capabilities: EnvironmentCapabilitySummary,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub base_url: Option<String>,
     pub auth: EnvironmentAuthSummary,
     pub path_mapping_count: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ssh_alias: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attach_hint: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bootstrap_hint: Option<String>,
     pub status: DependencyHealthStatus,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_seen_at: Option<DateTime<Utc>>,
@@ -587,6 +679,10 @@ pub struct EnvironmentSummary {
     pub advisory: Vec<AdvisoryMetadataSummary>,
 }
 
+fn default_environment_display_host() -> String {
+    "local".to_string()
+}
+
 impl EnvironmentSummary {
     pub fn local() -> Self {
         Self {
@@ -594,12 +690,17 @@ impl EnvironmentSummary {
             label: "Local machine".to_string(),
             kind: "local".to_string(),
             backend_mode: "local".to_string(),
+            display_host: "local".to_string(),
+            capabilities: EnvironmentCapabilitySummary::local(),
             base_url: None,
             auth: EnvironmentAuthSummary {
                 mode: "none".to_string(),
                 token_env_present: None,
             },
             path_mapping_count: 0,
+            ssh_alias: None,
+            attach_hint: None,
+            bootstrap_hint: None,
             status: DependencyHealthStatus::Healthy,
             last_seen_at: Some(Utc::now()),
             last_error_at: None,
@@ -1334,6 +1435,8 @@ pub struct CreateSessionsBatchResult {
     pub cwd: String,
     pub ok: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub launch_receipt: Option<LaunchReceipt>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session: Option<SessionSummary>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub repo_theme: Option<RepoTheme>,
@@ -1526,9 +1629,77 @@ pub struct SessionSkillListResponse {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CreateSessionResponse {
-    pub session: SessionSummary,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session: Option<SessionSummary>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub repo_theme: Option<RepoTheme>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub launch_receipt: Option<LaunchReceipt>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct LaunchReceipt {
+    pub outcome: String,
+    pub target_id: String,
+    pub target_label: String,
+    pub target_kind: String,
+    pub target_capability: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub local_cwd: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub remote_cwd: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub remote_session_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attach_hint: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bootstrap_hint: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub local_override: bool,
+}
+
+impl LaunchReceipt {
+    pub fn local(
+        cwd: impl Into<String>,
+        session_id: impl Into<String>,
+        local_override: bool,
+    ) -> Self {
+        let local_cwd = cwd.into();
+        let session_id = session_id.into();
+        Self {
+            outcome: "created".to_string(),
+            target_id: "local".to_string(),
+            target_label: "Local machine".to_string(),
+            target_kind: "local".to_string(),
+            target_capability: if local_override {
+                "local_override"
+            } else {
+                "local"
+            }
+            .to_string(),
+            local_cwd: (!local_cwd.is_empty()).then_some(local_cwd),
+            remote_cwd: None,
+            session_id: (!session_id.is_empty()).then_some(session_id),
+            remote_session_id: None,
+            attach_hint: None,
+            bootstrap_hint: None,
+            message: local_override.then(|| "explicit local override".to_string()),
+            local_override,
+        }
+    }
+
+    pub fn mark_local_override(&mut self) {
+        if self.target_id != "local" {
+            return;
+        }
+        self.target_capability = "local_override".to_string();
+        self.local_override = true;
+        self.message = Some("explicit local override".to_string());
+    }
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]

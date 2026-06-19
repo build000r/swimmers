@@ -477,6 +477,9 @@ pub(crate) trait TuiApi: Send + Sync + 'static {
     ) -> BoxFuture<'_, Result<Vec<SessionSummary>, String>> {
         self.fetch_sessions()
     }
+    fn fetch_environments(&self) -> BoxFuture<'_, Result<Vec<EnvironmentSummary>, String>> {
+        Box::pin(async { Ok(Vec::new()) })
+    }
     fn fetch_backend_health(&self) -> BoxFuture<'_, Result<BackendHealthResponse, String>>;
     fn fetch_thought_config(&self) -> BoxFuture<'_, Result<ThoughtConfigResponse, String>>;
     fn update_thought_config(
@@ -614,6 +617,27 @@ impl TuiApi for ApiClient {
                     .json::<ThoughtConfigResponse>()
                     .await
                     .map_err(|err| format!("failed to parse thought config: {err}"));
+            }
+
+            Err(read_error(response).await)
+        })
+    }
+
+    fn fetch_environments(&self) -> BoxFuture<'_, Result<Vec<EnvironmentSummary>, String>> {
+        Box::pin(async move {
+            let url = format!("{}/v1/sessions", self.base_url);
+            let response = self
+                .with_auth(self.http.get(url).timeout(API_SESSION_LIST_TIMEOUT))
+                .send()
+                .await
+                .map_err(|err| self.transport_error("refresh environments", err))?;
+
+            if response.status().is_success() {
+                let payload = response
+                    .json::<SessionListResponse>()
+                    .await
+                    .map_err(|err| format!("failed to parse environments response: {err}"))?;
+                return Ok(payload.environments);
             }
 
             Err(read_error(response).await)

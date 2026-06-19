@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 
 import {
   buildAttentionInbox,
+  buildEnvironmentMatrix,
   buildSessionRailRows,
   buildSurfaceModel,
   surfaceSession,
@@ -144,17 +145,17 @@ test("surfaceSession separates raw cwd from mapped canonical cwd and host label"
       display_host: "Skillbox devbox",
       remote_session_id: "remote-1",
       remote_cwd: "/srv/skillbox/repos/swimmers",
-      local_cwd: "/Users/b/repos/opensource/swimmers",
-      canonical_cwd: "/Users/b/repos/opensource/swimmers",
+      local_cwd: "/Users/tester/repos/opensource/swimmers",
+      canonical_cwd: "/Users/tester/repos/opensource/swimmers",
     },
   }));
 
   assert.equal(session.fullCwd, "/srv/skillbox/repos/swimmers");
-  assert.equal(session.canonicalCwd, "/Users/b/repos/opensource/swimmers");
-  assert.equal(session.launchCwd, "/Users/b/repos/opensource/swimmers");
+  assert.equal(session.canonicalCwd, "/Users/tester/repos/opensource/swimmers");
+  assert.equal(session.launchCwd, "/Users/tester/repos/opensource/swimmers");
   assert.equal(session.launchTarget, "skillbox");
   assert.equal(session.cwdLabel, "opensource/swimmers @ Skillbox devbox");
-  assert.equal(session.repoKey, "/Users/b/repos/opensource/swimmers");
+  assert.equal(session.repoKey, "/Users/tester/repos/opensource/swimmers");
   assert.equal(session.repoLabel, "opensource/swimmers");
 });
 
@@ -210,7 +211,7 @@ test("surfaceSession exposes advisory metadata as passive external badges", () =
       target_label: "Local machine",
       target_kind: "local",
       display_host: "local",
-      canonical_cwd: "/Users/b/repos/opensource/swimmers",
+      canonical_cwd: "/Users/tester/repos/opensource/swimmers",
       advisory: [
         { source: "c0", label: "c0 group", value: "wave-a", status: "external", stale: true },
         { source: "ntm", label: "", value: "ignored", status: "external", stale: true },
@@ -272,7 +273,7 @@ test("buildAttentionInbox keeps healthy actionable sessions ahead of degraded re
       target_label: "Skillbox devbox",
       target_kind: "swimmers_api",
       display_host: "Skillbox devbox",
-      canonical_cwd: "/Users/b/repos/opensource/swimmers",
+      canonical_cwd: "/Users/tester/repos/opensource/swimmers",
     },
   }), {
     operatorPressure: {
@@ -355,14 +356,14 @@ test("buildSurfaceModel applies fleet lens filters without losing bucket counts"
   const local = rawSession({
     session_id: "local",
     tmux_name: "local",
-    cwd: "/Users/b/repos/opensource/swimmers",
+    cwd: "/Users/tester/repos/opensource/swimmers",
     environment: {
       scope: "local",
       target_id: "local",
       target_label: "Local machine",
       target_kind: "local",
       display_host: "local",
-      canonical_cwd: "/Users/b/repos/opensource/swimmers",
+      canonical_cwd: "/Users/tester/repos/opensource/swimmers",
     },
   });
   const remote = rawSession({
@@ -377,7 +378,7 @@ test("buildSurfaceModel applies fleet lens filters without losing bucket counts"
       target_label: "Skillbox devbox",
       target_kind: "swimmers_api",
       display_host: "Skillbox devbox",
-      canonical_cwd: "/Users/b/repos/opensource/swimmers",
+      canonical_cwd: "/Users/tester/repos/opensource/swimmers",
       advisory: [{ source: "load_guard", label: "capacity", value: "tight", status: "external", stale: true }],
     },
   });
@@ -412,36 +413,138 @@ test("buildSurfaceModel applies fleet lens filters without losing bucket counts"
   assert.equal(model.fleetChips[1].active, true);
 });
 
-test("buildSurfaceModel collapses repo fallback buckets without pressure data", () => {
-  const root = rawSession({
-    session_id: "root",
-    tmux_name: "root-agent",
-    cwd: "/Users/b/repos/opensource/swimmers",
+test("buildEnvironmentMatrix keeps ssh-only handoff targets visible without fake sessions", () => {
+  const liveRemote = surfaceSession(rawSession({
+    session_id: "skillbox::remote",
+    state: "attention",
+    environment: {
+      scope: "remote",
+      target_id: "skillbox-api",
+      target_label: "Skillbox API",
+      target_kind: "swimmers_api",
+      display_host: "Skillbox API",
+      canonical_cwd: "/Users/tester/repos/opensource/swimmers",
+    },
+  }));
+  const rows = buildEnvironmentMatrix([
+    {
+      id: "local",
+      label: "Local machine",
+      kind: "local",
+      display_host: "local",
+      backend_mode: "local",
+      status: "Healthy",
+      capabilities: { observe_sessions: true, launch_session: true, advisory_metadata: true },
+      path_mapping_count: 0,
+    },
+    {
+      id: "skillbox-api",
+      label: "Skillbox API",
+      kind: "swimmers_api",
+      display_host: "Skillbox API",
+      backend_mode: "remote_swimmers_api",
+      status: "Healthy",
+      capabilities: { observe_sessions: true, launch_session: true, remote_dir_inventory: true },
+      path_mapping_count: 2,
+    },
+    {
+      id: "skillbox-devbox",
+      label: "Skillbox devbox",
+      kind: "ssh_only",
+      display_host: "Skillbox devbox",
+      backend_mode: "ssh_handoff",
+      status: "NotConfigured",
+      capabilities: { ssh_attach_hint: true, bootstrap_hint: true, advisory_metadata: true },
+      attach_hint: "ssh skillbox-devbox",
+      bootstrap_hint: "ssh skillbox-devbox 'swimmers serve'",
+      path_mapping_count: 0,
+    },
+  ], [liveRemote]);
+
+  assert.deepEqual(rows.map((row) => row.id), ["skillbox-api", "local", "skillbox-devbox"]);
+  assert.equal(rows[0].sessionCount, 1);
+  assert.equal(rows[0].attentionCount, 1);
+  assert.equal(rows[0].readinessKey, "needs_attention");
+  assert.equal(rows[2].sessionCount, 0);
+  assert.equal(rows[2].handoffOnly, true);
+  assert.equal(rows[2].observeCapable, false);
+  assert.equal(rows[2].launchCapable, false);
+  assert.equal(rows[2].readinessKey, "handoff");
+  assert.deepEqual(rows[2].capabilityLabels, ["ssh", "bootstrap", "external"]);
+  assert.equal(rows[2].attachHint, "ssh skillbox-devbox");
+});
+
+test("buildSurfaceModel exposes environment matrix independent of active session filter", () => {
+  const local = rawSession({
+    session_id: "local",
     environment: {
       scope: "local",
       target_id: "local",
       target_label: "Local machine",
       target_kind: "local",
       display_host: "local",
-      canonical_cwd: "/Users/b/repos/opensource/swimmers",
+      canonical_cwd: "/Users/tester/repos/opensource/swimmers",
+    },
+  });
+  const state = baseState({
+    sessions: [local],
+    fleetFilter: { kind: "target", key: "missing" },
+    environments: [{
+      id: "skillbox-devbox",
+      label: "Skillbox devbox",
+      kind: "ssh_only",
+      display_host: "Skillbox devbox",
+      backend_mode: "ssh_handoff",
+      status: "NotConfigured",
+      capabilities: { ssh_attach_hint: true, bootstrap_hint: true, advisory_metadata: true },
+      attach_hint: "ssh skillbox-devbox",
+    }],
+  });
+
+  const model = buildSurfaceModel({
+    state,
+    boot: { focus_layout: false, franken_term_available: true },
+    websocketOpen: 7,
+  });
+
+  assert.deepEqual(model.fleetFilter, { kind: "", key: "" });
+  assert.equal(model.sessions.length, 1);
+  assert.equal(model.environmentMatrix.length, 1);
+  assert.equal(model.environmentMatrix[0].id, "skillbox-devbox");
+  assert.equal(model.environmentMatrix[0].sessionCount, 0);
+  assert.equal(model.environmentMatrix[0].readinessKey, "handoff");
+});
+
+test("buildSurfaceModel collapses repo fallback buckets without pressure data", () => {
+  const root = rawSession({
+    session_id: "root",
+    tmux_name: "root-agent",
+    cwd: "/Users/tester/repos/opensource/swimmers",
+    environment: {
+      scope: "local",
+      target_id: "local",
+      target_label: "Local machine",
+      target_kind: "local",
+      display_host: "local",
+      canonical_cwd: "/Users/tester/repos/opensource/swimmers",
     },
   });
   const nested = rawSession({
     session_id: "nested",
     tmux_name: "nested-agent",
-    cwd: "/Users/b/repos/opensource/swimmers/src/web",
+    cwd: "/Users/tester/repos/opensource/swimmers/src/web",
     environment: {
       scope: "local",
       target_id: "local",
       target_label: "Local machine",
       target_kind: "local",
       display_host: "local",
-      canonical_cwd: "/Users/b/repos/opensource/swimmers/src/web",
+      canonical_cwd: "/Users/tester/repos/opensource/swimmers/src/web",
     },
   });
   const state = baseState({
     sessions: [root, nested],
-    fleetFilter: { kind: "repo", key: "/Users/b/repos/opensource/swimmers" },
+    fleetFilter: { kind: "repo", key: "/Users/tester/repos/opensource/swimmers" },
   });
 
   const model = buildSurfaceModel({
@@ -452,7 +555,7 @@ test("buildSurfaceModel collapses repo fallback buckets without pressure data", 
 
   assert.deepEqual(model.fleetFilter, {
     kind: "repo",
-    key: "/Users/b/repos/opensource/swimmers",
+    key: "/Users/tester/repos/opensource/swimmers",
   });
   assert.deepEqual(
     model.sessions.map((session) => session.sessionId),
@@ -462,7 +565,7 @@ test("buildSurfaceModel collapses repo fallback buckets without pressure data", 
     model.fleetLens.buckets
       .filter((bucket) => bucket.kind === "repo")
       .map((bucket) => [bucket.key, bucket.label, bucket.count]),
-    [["/Users/b/repos/opensource/swimmers", "opensource/swimmers", 2]],
+    [["/Users/tester/repos/opensource/swimmers", "opensource/swimmers", 2]],
   );
 });
 
@@ -470,14 +573,14 @@ test("buildSurfaceModel suppresses selected details outside the active fleet fil
   const local = rawSession({
     session_id: "local",
     tmux_name: "local",
-    cwd: "/Users/b/repos/opensource/swimmers",
+    cwd: "/Users/tester/repos/opensource/swimmers",
     environment: {
       scope: "local",
       target_id: "local",
       target_label: "Local machine",
       target_kind: "local",
       display_host: "local",
-      canonical_cwd: "/Users/b/repos/opensource/swimmers",
+      canonical_cwd: "/Users/tester/repos/opensource/swimmers",
     },
   });
   const remote = rawSession({
@@ -490,7 +593,7 @@ test("buildSurfaceModel suppresses selected details outside the active fleet fil
       target_label: "Skillbox devbox",
       target_kind: "swimmers_api",
       display_host: "Skillbox devbox",
-      canonical_cwd: "/Users/b/repos/opensource/swimmers",
+      canonical_cwd: "/Users/tester/repos/opensource/swimmers",
     },
   });
 
@@ -515,14 +618,14 @@ test("buildSurfaceModel drops saved fleet filters when the bucket is unavailable
   const local = rawSession({
     session_id: "local",
     tmux_name: "local",
-    cwd: "/Users/b/repos/opensource/swimmers",
+    cwd: "/Users/tester/repos/opensource/swimmers",
     environment: {
       scope: "local",
       target_id: "local",
       target_label: "Local machine",
       target_kind: "local",
       display_host: "local",
-      canonical_cwd: "/Users/b/repos/opensource/swimmers",
+      canonical_cwd: "/Users/tester/repos/opensource/swimmers",
     },
   });
   const state = baseState({
@@ -546,14 +649,14 @@ test("buildSurfaceModel builds display-only project groups across local and remo
   const local = rawSession({
     session_id: "local",
     tmux_name: "local-agent",
-    cwd: "/Users/b/repos/opensource/swimmers",
+    cwd: "/Users/tester/repos/opensource/swimmers",
     environment: {
       scope: "local",
       target_id: "local",
       target_label: "Local machine",
       target_kind: "local",
       display_host: "local",
-      canonical_cwd: "/Users/b/repos/opensource/swimmers",
+      canonical_cwd: "/Users/tester/repos/opensource/swimmers",
     },
   });
   const remote = rawSession({
@@ -566,20 +669,20 @@ test("buildSurfaceModel builds display-only project groups across local and remo
       target_label: "Skillbox devbox",
       target_kind: "swimmers_api",
       display_host: "Skillbox devbox",
-      canonical_cwd: "/Users/b/repos/opensource/swimmers",
+      canonical_cwd: "/Users/tester/repos/opensource/swimmers",
     },
   });
   const other = rawSession({
     session_id: "other",
     tmux_name: "other-agent",
-    cwd: "/Users/b/repos/opensource/skills",
+    cwd: "/Users/tester/repos/opensource/skills",
     environment: {
       scope: "local",
       target_id: "local",
       target_label: "Local machine",
       target_kind: "local",
       display_host: "local",
-      canonical_cwd: "/Users/b/repos/opensource/skills",
+      canonical_cwd: "/Users/tester/repos/opensource/skills",
     },
   });
 

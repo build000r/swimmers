@@ -472,6 +472,32 @@ test("launch target preview blocks non-local ids without swimmers api kind", () 
   });
 });
 
+test("launch target preview treats ssh-only targets as handoff receipts", () => {
+  const target = {
+    id: "skillbox-devbox",
+    label: "Skillbox devbox",
+    kind: "ssh_only",
+  };
+
+  assert.deepEqual(launchTargetPreviewForPath("/Users/tester/repos/swimmers", target), {
+    targetId: "skillbox-devbox",
+    targetLabel: "Skillbox devbox",
+    localCwd: "/Users/tester/repos/swimmers",
+    remoteCwd: null,
+    blocked: false,
+    reason: "handoff",
+  });
+  assert.equal(
+    launchTargetPreviewText("/Users/tester/repos/swimmers", target),
+    "Skillbox devbox: handoff for /Users/tester/repos/swimmers",
+  );
+  assert.equal(
+    launchTargetStatusTextForPreview(launchTargetPreviewForPath("/Users/tester/repos/swimmers", target)),
+    "Skillbox devbox: handoff for /Users/tester/repos/swimmers",
+  );
+  assert.deepEqual(launchTargetBlockersForPaths(["/tmp/outside"], target), []);
+});
+
 test("launch target preview blocks swimmers api targets without a safe base url", () => {
   const baseTarget = {
     id: "devbox",

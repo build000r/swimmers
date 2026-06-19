@@ -408,8 +408,9 @@ fn assert_dark_terminal_readable(color: Color) {
 
 fn create_response(session_id: &str, tmux_name: &str, cwd: &str) -> CreateSessionResponse {
     CreateSessionResponse {
-        session: session_summary(session_id, tmux_name, cwd),
+        session: Some(session_summary(session_id, tmux_name, cwd)),
         repo_theme: None,
+        launch_receipt: None,
     }
 }
 
@@ -418,8 +419,9 @@ fn create_response_with_theme(
     repo_theme: RepoTheme,
 ) -> CreateSessionResponse {
     CreateSessionResponse {
-        session,
+        session: Some(session),
         repo_theme: Some(repo_theme),
+        launch_receipt: None,
     }
 }
 
@@ -433,6 +435,7 @@ fn create_batch_response(items: &[(&str, &str, &str)]) -> CreateSessionsBatchRes
                     index,
                     cwd: (*cwd).to_string(),
                     ok: true,
+                    launch_receipt: None,
                     session: Some(session_summary(session_id, tmux_name, cwd)),
                     repo_theme: None,
                     error: None,

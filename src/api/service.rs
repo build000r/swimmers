@@ -30,9 +30,10 @@ use crate::thought_ui::thought_config_ui_metadata;
 use crate::types::{
     CreateSessionResponse, CreateSessionsBatchResponse, CreateSessionsBatchResult, DirEntry,
     DirGroupMemberships, DirListResponse, DirRepoActionResponse, DirRestartResponse, ErrorResponse,
-    LaunchTargetSummary, NativeDesktopApp, NativeDesktopOpenResponse, NativeDesktopStatusResponse,
-    PlanFileResponse, RepoActionKind, RepoActionState, RepoActionStatus, RepoTheme,
-    SessionBatchMembership, SessionState, SessionSummary, SpawnTool, ThoughtConfigResponse,
+    LaunchReceipt, LaunchTargetSummary, NativeDesktopApp, NativeDesktopOpenResponse,
+    NativeDesktopStatusResponse, PlanFileResponse, RepoActionKind, RepoActionState,
+    RepoActionStatus, RepoTheme, SessionBatchMembership, SessionState, SessionSummary, SpawnTool,
+    ThoughtConfigResponse,
 };
 
 #[path = "service/attention_group.rs"]
@@ -309,9 +310,14 @@ pub async fn create_local_session(
         .supervisor
         .create_session(name, cwd, spawn_tool, initial_request)
         .await
-        .map(|(session, repo_theme)| CreateSessionResponse {
-            session,
-            repo_theme,
+        .map(|(session, repo_theme)| {
+            let launch_receipt =
+                LaunchReceipt::local(session.cwd.clone(), session.session_id.clone(), false);
+            CreateSessionResponse {
+                session: Some(session),
+                repo_theme,
+                launch_receipt: Some(launch_receipt),
+            }
         })
         .map_err(create_local_session_error)
 }
@@ -445,6 +451,11 @@ pub fn create_sessions_batch_result(
             index,
             cwd,
             ok: true,
+            launch_receipt: Some(LaunchReceipt::local(
+                session.cwd.clone(),
+                session.session_id.clone(),
+                false,
+            )),
             session: Some(session),
             repo_theme,
             error: None,
@@ -455,6 +466,7 @@ pub fn create_sessions_batch_result(
                 index,
                 cwd,
                 ok: false,
+                launch_receipt: None,
                 session: None,
                 repo_theme: None,
                 error: Some(create_session_error(&msg)),

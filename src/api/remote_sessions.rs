@@ -20,11 +20,11 @@ use crate::session::overlay::default_overlay;
 use crate::types::{
     CreateSessionRequest, CreateSessionResponse, CreateSessionsBatchRequest,
     CreateSessionsBatchResponse, DependencyHealthStatus, DirListResponse, EnvironmentAuthSummary,
-    EnvironmentSummary, ErrorResponse, LaunchPathMapping, LaunchTargetSummary,
-    SessionAgentContextResponse, SessionEnvironmentSummary, SessionGitDiffResponse,
-    SessionGroupInputRequest, SessionGroupInputResponse, SessionInputRequest, SessionInputResponse,
-    SessionListResponse, SessionPaneTailResponse, SessionSummary, SessionTimelineResponse,
-    SessionTranscriptResponse,
+    EnvironmentCapabilitySummary, EnvironmentSummary, ErrorResponse, LaunchPathMapping,
+    LaunchReceipt, LaunchTargetSummary, SessionAgentContextResponse, SessionEnvironmentSummary,
+    SessionGitDiffResponse, SessionGroupInputRequest, SessionGroupInputResponse,
+    SessionInputRequest, SessionInputResponse, SessionListResponse, SessionPaneTailResponse,
+    SessionSummary, SessionTimelineResponse, SessionTranscriptResponse,
 };
 
 const REMOTE_LIST_TIMEOUT: Duration = Duration::from_millis(900);
@@ -172,22 +172,43 @@ pub fn environment_summaries(include_remote: bool) -> Vec<EnvironmentSummary> {
         overlay
             .all_launch_targets()
             .into_iter()
-            .filter(is_swimmers_api_target)
+            .filter(|target| !is_local_target(target))
             .map(|target| environment_summary_for_target(&target)),
     );
     environments
 }
 
 fn environment_summary_for_target(target: &LaunchTargetSummary) -> EnvironmentSummary {
-    let health = remote_target_environment_health(target);
+    let kind = normalized_target_kind(target);
+    let is_swimmers_api = kind == "swimmers_api";
+    let safe_ssh_alias = safe_ssh_alias_for_target(target);
+    let health = if is_swimmers_api {
+        remote_target_environment_health(target)
+    } else {
+        non_api_target_environment_health(&kind)
+    };
     EnvironmentSummary {
         id: target.id.clone(),
         label: target.label.clone(),
-        kind: target.kind.clone(),
-        backend_mode: "remote_swimmers_api".to_string(),
-        base_url: sanitized_target_base_url(target),
-        auth: environment_auth_summary(target),
+        kind,
+        backend_mode: environment_backend_mode(target),
+        display_host: target.label.clone(),
+        capabilities: environment_capabilities(target, safe_ssh_alias.is_some()),
+        base_url: is_swimmers_api
+            .then(|| sanitized_target_base_url(target))
+            .flatten(),
+        auth: if is_swimmers_api {
+            environment_auth_summary(target)
+        } else {
+            EnvironmentAuthSummary {
+                mode: "none".to_string(),
+                token_env_present: None,
+            }
+        },
         path_mapping_count: target.path_mappings.len(),
+        ssh_alias: safe_ssh_alias.clone(),
+        attach_hint: ssh_attach_hint_for_alias(safe_ssh_alias.as_deref()),
+        bootstrap_hint: ssh_bootstrap_hint_for_alias(safe_ssh_alias.as_deref()),
         status: health.status,
         last_seen_at: health.last_seen_at,
         last_error_at: health.last_error_at,
@@ -195,6 +216,92 @@ fn environment_summary_for_target(target: &LaunchTargetSummary) -> EnvironmentSu
         freshness_ms: health.freshness_ms,
         advisory: crate::advisory::advisory_for_target(&target.id, None),
     }
+}
+
+fn is_local_target(target: &LaunchTargetSummary) -> bool {
+    target.id.trim() == "local" || normalized_target_kind(target) == "local"
+}
+
+fn normalized_target_kind(target: &LaunchTargetSummary) -> String {
+    let kind = target.kind.trim();
+    if kind.eq_ignore_ascii_case("ssh") {
+        return "ssh_only".to_string();
+    }
+    if kind.is_empty() {
+        "local".to_string()
+    } else {
+        kind.to_ascii_lowercase()
+    }
+}
+
+fn environment_backend_mode(target: &LaunchTargetSummary) -> String {
+    match normalized_target_kind(target).as_str() {
+        "swimmers_api" => "remote_swimmers_api",
+        "ssh_only" => "ssh_handoff",
+        "local" => "local",
+        _ => "advisory_only",
+    }
+    .to_string()
+}
+
+fn environment_capabilities(
+    target: &LaunchTargetSummary,
+    has_safe_ssh_alias: bool,
+) -> EnvironmentCapabilitySummary {
+    match normalized_target_kind(target).as_str() {
+        "local" => EnvironmentCapabilitySummary::local(),
+        "swimmers_api" => EnvironmentCapabilitySummary::remote_swimmers_api(
+            remote_target_config_error(target).is_none(),
+            !target.path_mappings.is_empty(),
+        ),
+        "ssh_only" => EnvironmentCapabilitySummary::ssh_handoff(has_safe_ssh_alias),
+        _ => EnvironmentCapabilitySummary::advisory_only(),
+    }
+}
+
+fn non_api_target_environment_health(kind: &str) -> RemoteTargetHealth {
+    let status = if kind == "ssh_only" {
+        DependencyHealthStatus::NotConfigured
+    } else {
+        DependencyHealthStatus::Unknown
+    };
+    RemoteTargetHealth {
+        status,
+        last_seen_at: None,
+        last_error_at: None,
+        last_error: None,
+        freshness_ms: None,
+    }
+}
+
+fn safe_ssh_alias_for_target(target: &LaunchTargetSummary) -> Option<String> {
+    if normalized_target_kind(target) != "ssh_only" {
+        return None;
+    }
+    let alias = target.id.trim();
+    let safe = !alias.is_empty()
+        && alias.bytes().all(|byte| {
+            matches!(
+                byte,
+                b'A'..=b'Z'
+                    | b'a'..=b'z'
+                    | b'0'..=b'9'
+                    | b'.'
+                    | b'_'
+                    | b'-'
+                    | b'@'
+                    | b':'
+            )
+        });
+    safe.then(|| alias.to_string())
+}
+
+fn ssh_attach_hint_for_alias(alias: Option<&str>) -> Option<String> {
+    alias.map(|alias| format!("ssh {alias}"))
+}
+
+fn ssh_bootstrap_hint_for_alias(alias: Option<&str>) -> Option<String> {
+    alias.map(|alias| format!("ssh {alias} 'swimmers serve'"))
 }
 
 fn sanitized_target_base_url(target: &LaunchTargetSummary) -> Option<String> {
@@ -343,35 +450,34 @@ fn remote_targets_health_snapshot_for_targets(
 ) -> crate::types::DependencyHealthSnapshot {
     let now = Utc::now();
     let mut skipped_current_server_targets = 0usize;
-    let targets = targets
-        .into_iter()
-        .filter(is_swimmers_api_target)
-        .filter(|target| {
-            let is_current = target_points_at_current_server(target, config);
-            if is_current {
-                skipped_current_server_targets += 1;
-            }
-            !is_current
-        })
-        .collect::<Vec<_>>();
-    if targets.is_empty() {
-        return crate::types::DependencyHealthSnapshot::not_configured(now)
-            .with_detail("configured_targets", "0")
-            .with_detail(
-                "skipped_current_server_targets",
-                skipped_current_server_targets.to_string(),
-            );
-    }
-
     let mut rollup = RemoteTargetHealthRollup::default();
-    for target in &targets {
-        rollup.observe_target(target);
+    for target in targets
+        .into_iter()
+        .filter(|target| !is_local_target(target))
+    {
+        let is_swimmers_api = is_swimmers_api_target(&target);
+        if is_swimmers_api && target_points_at_current_server(&target, config) {
+            skipped_current_server_targets += 1;
+            continue;
+        }
+        rollup.observe_config_target(&target);
+        if !is_swimmers_api {
+            continue;
+        }
+        rollup.observe_swimmers_api_target(&target);
     }
-    rollup.into_snapshot(now, targets.len(), skipped_current_server_targets)
+    rollup.into_snapshot(now, skipped_current_server_targets)
 }
 
 #[derive(Default)]
 struct RemoteTargetHealthRollup {
+    configured_targets: usize,
+    swimmers_api_targets: usize,
+    ssh_only_targets: usize,
+    advisory_only_targets: usize,
+    handoff_targets: usize,
+    attach_hint_missing: usize,
+    probed_targets: usize,
     healthy: usize,
     degraded: usize,
     unavailable: usize,
@@ -387,7 +493,23 @@ struct RemoteTargetHealthRollup {
 }
 
 impl RemoteTargetHealthRollup {
-    fn observe_target(&mut self, target: &LaunchTargetSummary) {
+    fn observe_config_target(&mut self, target: &LaunchTargetSummary) {
+        self.configured_targets += 1;
+        match normalized_target_kind(target).as_str() {
+            "swimmers_api" => self.swimmers_api_targets += 1,
+            "ssh_only" => {
+                self.ssh_only_targets += 1;
+                self.handoff_targets += 1;
+                if safe_ssh_alias_for_target(target).is_none() {
+                    self.attach_hint_missing += 1;
+                }
+            }
+            _ => self.advisory_only_targets += 1,
+        }
+    }
+
+    fn observe_swimmers_api_target(&mut self, target: &LaunchTargetSummary) {
+        self.probed_targets += 1;
         self.observe_mapping_config(target);
         self.observe_auth_config(target);
         self.observe_health(remote_target_environment_health(target));
@@ -443,16 +565,26 @@ impl RemoteTargetHealthRollup {
             self.degraded,
             self.unavailable,
             self.unknown,
-            self.missing_mappings > 0,
+            self.missing_mappings > 0 || self.attach_hint_missing > 0,
         )
     }
 
     fn into_snapshot(
         self,
         now: DateTime<Utc>,
-        configured_targets: usize,
         skipped_current_server_targets: usize,
     ) -> crate::types::DependencyHealthSnapshot {
+        if self.probed_targets == 0 {
+            let snapshot = if self.attach_hint_missing > 0 {
+                crate::types::DependencyHealthSnapshot::degraded(
+                    now,
+                    "ssh_only_attach_hint_unavailable",
+                )
+            } else {
+                crate::types::DependencyHealthSnapshot::not_configured(now)
+            };
+            return self.with_rollup_details(snapshot, skipped_current_server_targets);
+        }
         let status = self.status();
         let mut snapshot = match status {
             DependencyHealthStatus::Healthy => crate::types::DependencyHealthSnapshot::healthy(now),
@@ -474,28 +606,8 @@ impl RemoteTargetHealthRollup {
             DependencyHealthStatus::NotConfigured => {
                 crate::types::DependencyHealthSnapshot::not_configured(now)
             }
-        }
-        .with_detail("configured_targets", configured_targets.to_string())
-        .with_detail("healthy_targets", self.healthy.to_string())
-        .with_detail("degraded_targets", self.degraded.to_string())
-        .with_detail("unavailable_targets", self.unavailable.to_string())
-        .with_detail("unknown_targets", self.unknown.to_string())
-        .with_detail("auth_env_present", self.auth_present.to_string())
-        .with_detail("auth_env_missing", self.auth_missing.to_string())
-        .with_detail("path_mappings_total", self.mappings_total.to_string())
-        .with_detail(
-            "targets_without_path_mappings",
-            self.missing_mappings.to_string(),
-        )
-        .with_detail(
-            "targets_without_base_url",
-            self.missing_base_url.to_string(),
-        )
-        .with_detail(
-            "skipped_current_server_targets",
-            skipped_current_server_targets.to_string(),
-        )
-        .with_detail("probe", "session_list_cache");
+        };
+        snapshot = self.with_rollup_details(snapshot, skipped_current_server_targets);
         snapshot.last_seen_at = self.last_seen_at;
         snapshot.last_error_at = self.last_error_at.or(snapshot.last_error_at);
         if snapshot.last_error.is_none() {
@@ -508,6 +620,47 @@ impl RemoteTargetHealthRollup {
                 .map(|duration| duration.as_millis().min(u128::from(u64::MAX)) as u64)
         });
         snapshot
+    }
+
+    fn with_rollup_details(
+        &self,
+        snapshot: crate::types::DependencyHealthSnapshot,
+        skipped_current_server_targets: usize,
+    ) -> crate::types::DependencyHealthSnapshot {
+        snapshot
+            .with_detail("configured_targets", self.configured_targets.to_string())
+            .with_detail(
+                "swimmers_api_targets",
+                self.swimmers_api_targets.to_string(),
+            )
+            .with_detail("ssh_only_targets", self.ssh_only_targets.to_string())
+            .with_detail(
+                "advisory_only_targets",
+                self.advisory_only_targets.to_string(),
+            )
+            .with_detail("handoff_targets", self.handoff_targets.to_string())
+            .with_detail("attach_hint_missing", self.attach_hint_missing.to_string())
+            .with_detail("probed_targets", self.probed_targets.to_string())
+            .with_detail("healthy_targets", self.healthy.to_string())
+            .with_detail("degraded_targets", self.degraded.to_string())
+            .with_detail("unavailable_targets", self.unavailable.to_string())
+            .with_detail("unknown_targets", self.unknown.to_string())
+            .with_detail("auth_env_present", self.auth_present.to_string())
+            .with_detail("auth_env_missing", self.auth_missing.to_string())
+            .with_detail("path_mappings_total", self.mappings_total.to_string())
+            .with_detail(
+                "targets_without_path_mappings",
+                self.missing_mappings.to_string(),
+            )
+            .with_detail(
+                "targets_without_base_url",
+                self.missing_base_url.to_string(),
+            )
+            .with_detail(
+                "skipped_current_server_targets",
+                skipped_current_server_targets.to_string(),
+            )
+            .with_detail("probe", "session_list_cache")
     }
 }
 
@@ -841,20 +994,31 @@ pub async fn create_remote_session(
 ) -> Result<CreateSessionResponse, RemoteSessionError> {
     let target_id = required_target_id(body.launch_target.as_deref())?;
     let local_cwd = launch_cwd(body.cwd.as_deref())?;
-    let target = resolve_launch_target_for_cwd(&local_cwd, target_id)?;
+    let target = resolve_configured_launch_target_for_cwd(&local_cwd, target_id)?;
+    if is_ssh_only_target(&target) {
+        return Ok(ssh_handoff_create_response(&target, local_cwd));
+    }
+    ensure_swimmers_api_target(&target)?;
     let remote_cwd = map_cwd_for_target(&target, &local_cwd)?;
 
-    create_remote_session_on_target(
+    let mut response = create_remote_session_on_target(
         &target,
         CreateSessionRequest {
             name: body.name,
-            cwd: Some(remote_cwd),
+            cwd: Some(remote_cwd.clone()),
             spawn_tool: body.spawn_tool,
             launch_target: None,
             initial_request: body.initial_request,
         },
     )
-    .await
+    .await?;
+    response.launch_receipt = Some(remote_created_receipt(
+        &target,
+        Some(local_cwd),
+        Some(remote_cwd),
+        response.session.as_ref(),
+    ));
+    Ok(response)
 }
 
 pub async fn create_remote_session_on_target(
@@ -900,13 +1064,25 @@ pub async fn create_remote_session_on_target(
                 ),
             )
         })?;
-    body.session = namespace_session_summary(target, body.session);
+    if let Some(session) = body.session.take() {
+        let session = namespace_session_summary(target, session);
+        body.launch_receipt = Some(remote_created_receipt(
+            target,
+            session.environment.local_cwd.clone(),
+            session.environment.remote_cwd.clone(),
+            Some(&session),
+        ));
+        body.session = Some(session);
+    }
     Ok(body)
 }
 
 pub async fn create_remote_sessions_batch(
     body: CreateSessionsBatchRequest,
 ) -> Result<CreateSessionsBatchResponse, RemoteSessionError> {
+    if let Some(response) = maybe_handoff_or_unsupported_batch_response(&body)? {
+        return Ok(response);
+    }
     let batch = prepare_remote_sessions_batch(body)?;
     let mut response =
         create_remote_sessions_batch_on_target(&batch.target, batch.remote_body).await?;
@@ -953,6 +1129,57 @@ where
             initial_request: body.initial_request,
         },
     })
+}
+
+fn maybe_handoff_or_unsupported_batch_response(
+    body: &CreateSessionsBatchRequest,
+) -> Result<Option<CreateSessionsBatchResponse>, RemoteSessionError> {
+    let target_id = required_target_id(body.launch_target.as_deref())?;
+    let original_dirs = require_batch_dirs(body.dirs.clone())?;
+    let targets = original_dirs
+        .iter()
+        .map(|cwd| resolve_configured_launch_target_for_cwd(cwd, target_id))
+        .collect::<Result<Vec<_>, _>>()?;
+    if targets.iter().all(is_swimmers_api_target) {
+        return Ok(None);
+    }
+
+    let results = original_dirs
+        .into_iter()
+        .zip(targets)
+        .enumerate()
+        .map(|(index, (cwd, target))| {
+            if is_ssh_only_target(&target) {
+                crate::types::CreateSessionsBatchResult {
+                    index,
+                    cwd: cwd.clone(),
+                    ok: true,
+                    launch_receipt: Some(ssh_handoff_receipt(&target, cwd)),
+                    session: None,
+                    repo_theme: None,
+                    error: None,
+                }
+            } else {
+                let message = format!(
+                    "launch target '{}' has kind '{}' but only 'swimmers_api' create or 'ssh_only' handoff targets are supported",
+                    target.id, target.kind
+                );
+                crate::types::CreateSessionsBatchResult {
+                    index,
+                    cwd,
+                    ok: false,
+                    launch_receipt: Some(blocked_launch_receipt(&target, message.clone())),
+                    session: None,
+                    repo_theme: None,
+                    error: Some(ErrorResponse::with_message(
+                        "LAUNCH_TARGET_UNSUPPORTED",
+                        message,
+                    )),
+                }
+            }
+        })
+        .collect();
+    Ok(Some(CreateSessionsBatchResponse { results }))
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -1043,6 +1270,9 @@ fn restore_original_batch_cwds(
     for result in &mut response.results {
         let original_cwd = original_dirs[result.index].clone();
         result.cwd = original_cwd.clone();
+        if let Some(receipt) = result.launch_receipt.as_mut() {
+            receipt.local_cwd = Some(original_cwd.clone());
+        }
         if let Some(session) = result.session.as_mut() {
             restore_session_local_cwd(session, original_cwd);
         }
@@ -1152,7 +1382,14 @@ pub async fn create_remote_sessions_batch_on_target(
         })?;
     for result in &mut body.results {
         if let Some(session) = result.session.take() {
-            result.session = Some(namespace_session_summary(target, session));
+            let session = namespace_session_summary(target, session);
+            result.launch_receipt = Some(remote_created_receipt(
+                target,
+                session.environment.local_cwd.clone(),
+                session.environment.remote_cwd.clone(),
+                Some(&session),
+            ));
+            result.session = Some(session);
         }
     }
     Ok(body)
@@ -1548,6 +1785,85 @@ fn required_target_id(target: Option<&str>) -> Result<&str, RemoteSessionError> 
     }
 }
 
+fn remote_created_receipt(
+    target: &LaunchTargetSummary,
+    local_cwd: Option<String>,
+    remote_cwd: Option<String>,
+    session: Option<&SessionSummary>,
+) -> LaunchReceipt {
+    LaunchReceipt {
+        outcome: "created".to_string(),
+        target_id: target.id.clone(),
+        target_label: target.label.clone(),
+        target_kind: normalized_target_kind(target),
+        target_capability: "remote_swimmers_api".to_string(),
+        local_cwd,
+        remote_cwd,
+        session_id: session.map(|session| session.session_id.clone()),
+        remote_session_id: session
+            .and_then(|session| session.environment.remote_session_id.clone())
+            .or_else(|| {
+                session
+                    .and_then(|session| split_remote_session_id(&session.session_id))
+                    .map(|(_, remote_session_id)| remote_session_id.to_string())
+            }),
+        attach_hint: None,
+        bootstrap_hint: None,
+        message: Some(format!("created on {}", target.label)),
+        local_override: false,
+    }
+}
+
+fn ssh_handoff_create_response(
+    target: &LaunchTargetSummary,
+    local_cwd: String,
+) -> CreateSessionResponse {
+    CreateSessionResponse {
+        session: None,
+        repo_theme: None,
+        launch_receipt: Some(ssh_handoff_receipt(target, local_cwd)),
+    }
+}
+
+fn ssh_handoff_receipt(target: &LaunchTargetSummary, local_cwd: String) -> LaunchReceipt {
+    let alias = safe_ssh_alias_for_target(target);
+    let attach_hint = ssh_attach_hint_for_alias(alias.as_deref());
+    let bootstrap_hint = ssh_bootstrap_hint_for_alias(alias.as_deref());
+    LaunchReceipt {
+        outcome: "handoff".to_string(),
+        target_id: target.id.clone(),
+        target_label: target.label.clone(),
+        target_kind: normalized_target_kind(target),
+        target_capability: "ssh_handoff".to_string(),
+        local_cwd: Some(local_cwd),
+        remote_cwd: None,
+        session_id: None,
+        remote_session_id: None,
+        attach_hint,
+        bootstrap_hint,
+        message: Some("ssh-only target; no Swimmers session was created".to_string()),
+        local_override: false,
+    }
+}
+
+fn blocked_launch_receipt(target: &LaunchTargetSummary, message: String) -> LaunchReceipt {
+    LaunchReceipt {
+        outcome: "blocked".to_string(),
+        target_id: target.id.clone(),
+        target_label: target.label.clone(),
+        target_kind: normalized_target_kind(target),
+        target_capability: "unsupported".to_string(),
+        local_cwd: None,
+        remote_cwd: None,
+        session_id: None,
+        remote_session_id: None,
+        attach_hint: None,
+        bootstrap_hint: None,
+        message: Some(message),
+        local_override: false,
+    }
+}
+
 fn launch_cwd(cwd: Option<&str>) -> Result<String, RemoteSessionError> {
     if let Some(cwd) = cwd.map(str::trim).filter(|cwd| !cwd.is_empty()) {
         return Ok(cwd.to_string());
@@ -1560,6 +1876,15 @@ fn launch_cwd(cwd: Option<&str>) -> Result<String, RemoteSessionError> {
 }
 
 fn resolve_launch_target_for_cwd(
+    cwd: &str,
+    target_id: &str,
+) -> Result<LaunchTargetSummary, RemoteSessionError> {
+    let target = resolve_configured_launch_target_for_cwd(cwd, target_id)?;
+    ensure_swimmers_api_target(&target)?;
+    Ok(target)
+}
+
+fn resolve_configured_launch_target_for_cwd(
     cwd: &str,
     target_id: &str,
 ) -> Result<LaunchTargetSummary, RemoteSessionError> {
@@ -1580,7 +1905,6 @@ fn resolve_launch_target_for_cwd(
                 format!("launch target '{target_id}' is not configured"),
             )
         })?;
-    ensure_swimmers_api_target(&target)?;
     Ok(target)
 }
 
@@ -1612,7 +1936,11 @@ fn ensure_swimmers_api_target(target: &LaunchTargetSummary) -> Result<(), Remote
 }
 
 fn is_swimmers_api_target(target: &LaunchTargetSummary) -> bool {
-    target.kind.trim() == "swimmers_api"
+    normalized_target_kind(target) == "swimmers_api"
+}
+
+fn is_ssh_only_target(target: &LaunchTargetSummary) -> bool {
+    normalized_target_kind(target) == "ssh_only"
 }
 
 fn target_points_at_current_server(target: &LaunchTargetSummary, config: &Config) -> bool {

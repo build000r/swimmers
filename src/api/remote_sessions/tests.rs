@@ -77,8 +77,9 @@ async fn capture_create_session(
     (
         StatusCode::CREATED,
         AxumJson(CreateSessionResponse {
-            session: summary("sess_0"),
+            session: Some(summary("sess_0")),
             repo_theme: None,
+            launch_receipt: None,
         }),
     )
 }
@@ -261,8 +262,9 @@ async fn remote_smoke_create_session(
     (
         StatusCode::CREATED,
         AxumJson(CreateSessionResponse {
-            session: summary("sess_create"),
+            session: Some(summary("sess_create")),
             repo_theme: None,
+            launch_receipt: None,
         }),
     )
         .into_response()
@@ -292,6 +294,7 @@ async fn remote_smoke_create_batch(
             index,
             cwd,
             ok: true,
+            launch_receipt: None,
             session: Some(summary(&format!("sess_batch_{index}"))),
             repo_theme: None,
             error: None,
@@ -806,6 +809,7 @@ fn batch_result(index: usize, cwd: &str) -> CreateSessionsBatchResult {
         index,
         cwd: cwd.to_string(),
         ok: true,
+        launch_receipt: None,
         session: None,
         repo_theme: None,
         error: None,
@@ -993,6 +997,73 @@ fn environment_summary_redacts_token_values_and_credentialed_base_url() {
 }
 
 #[test]
+fn environment_summary_classifies_ssh_only_as_handoff_without_live_capabilities() {
+    let _guard = crate::test_support::ENV_LOCK
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
+    std::env::set_var("SWIMMERS_REMOTE_TEST_TOKEN", "secret-token");
+    let mut target = target();
+    target.id = "skillbox-devbox".to_string();
+    target.label = "Skillbox devbox".to_string();
+    target.kind = "ssh_only".to_string();
+    target.base_url =
+        Some("http://secret-token@127.0.0.1:3210/?token=secret-token#secret-token".to_string());
+    target.auth_token_env = Some("SWIMMERS_REMOTE_TEST_TOKEN".to_string());
+
+    let environment = environment_summary_for_target(&target);
+    let json = serde_json::to_string(&environment).expect("serialize environment");
+
+    assert_eq!(environment.kind, "ssh_only");
+    assert_eq!(environment.backend_mode, "ssh_handoff");
+    assert_eq!(environment.display_host, "Skillbox devbox");
+    assert_eq!(environment.status, DependencyHealthStatus::NotConfigured);
+    assert_eq!(environment.auth.mode, "none");
+    assert_eq!(environment.auth.token_env_present, None);
+    assert_eq!(environment.base_url, None);
+    assert_eq!(environment.ssh_alias.as_deref(), Some("skillbox-devbox"));
+    assert_eq!(
+        environment.attach_hint.as_deref(),
+        Some("ssh skillbox-devbox")
+    );
+    assert_eq!(
+        environment.bootstrap_hint.as_deref(),
+        Some("ssh skillbox-devbox 'swimmers serve'")
+    );
+    assert!(!environment.capabilities.observe_sessions);
+    assert!(!environment.capabilities.launch_session);
+    assert!(!environment.capabilities.send_input);
+    assert!(!environment.capabilities.group_input);
+    assert!(!environment.capabilities.remote_dir_inventory);
+    assert!(environment.capabilities.ssh_attach_hint);
+    assert!(environment.capabilities.bootstrap_hint);
+    assert!(environment.capabilities.advisory_metadata);
+    assert!(!environment.capabilities.health_probe);
+    assert!(!json.contains("secret-token"));
+    assert!(!json.contains("SWIMMERS_REMOTE_TEST_TOKEN"));
+
+    std::env::remove_var("SWIMMERS_REMOTE_TEST_TOKEN");
+}
+
+#[test]
+fn environment_summary_refuses_command_hints_for_unsafe_ssh_alias() {
+    let mut target = target();
+    target.id = "devbox;rm -rf".to_string();
+    target.label = "Unsafe SSH alias".to_string();
+    target.kind = "ssh".to_string();
+
+    let environment = environment_summary_for_target(&target);
+
+    assert_eq!(environment.kind, "ssh_only");
+    assert_eq!(environment.backend_mode, "ssh_handoff");
+    assert_eq!(environment.ssh_alias, None);
+    assert_eq!(environment.attach_hint, None);
+    assert_eq!(environment.bootstrap_hint, None);
+    assert!(!environment.capabilities.ssh_attach_hint);
+    assert!(!environment.capabilities.bootstrap_hint);
+    assert!(!environment.capabilities.observe_sessions);
+}
+
+#[test]
 fn remote_targets_health_reports_cached_degraded_target_without_secret_values() {
     let _guard = shared_remote_cache_test_guard();
     reset_remote_target_session_cache_for_tests();
@@ -1113,6 +1184,73 @@ fn remote_targets_health_snapshot_characterizes_mixed_fleets() {
         health.last_error.as_deref(),
         Some("remote target path mapping doctor warning")
     );
+}
+
+#[test]
+fn remote_targets_health_snapshot_reports_ssh_only_inventory_without_probe() {
+    let _guard = shared_remote_cache_test_guard();
+    reset_remote_target_session_cache_for_tests();
+
+    let mut remote_api = target();
+    remote_api.id = "devbox-api".to_string();
+    remote_api.label = "Devbox API".to_string();
+    record_remote_poll_success(&remote_api.id, &[summary("sess_api")]);
+
+    let mut ssh_only = target();
+    ssh_only.id = "skillbox-devbox".to_string();
+    ssh_only.label = "Skillbox devbox".to_string();
+    ssh_only.kind = "ssh_only".to_string();
+    ssh_only.base_url = None;
+    ssh_only.auth_token_env = Some("SWIMMERS_REMOTE_TEST_TOKEN".to_string());
+    ssh_only.path_mappings = Vec::new();
+
+    let health = remote_targets_health_snapshot_for_targets(
+        vec![LaunchTargetSummary::local(), remote_api, ssh_only],
+        &remote_health_test_config(),
+    );
+    let json = serde_json::to_string(&health).expect("health json");
+
+    assert_eq!(health.status, DependencyHealthStatus::Healthy);
+    assert_eq!(health.details["configured_targets"], "2");
+    assert_eq!(health.details["swimmers_api_targets"], "1");
+    assert_eq!(health.details["ssh_only_targets"], "1");
+    assert_eq!(health.details["handoff_targets"], "1");
+    assert_eq!(health.details["probed_targets"], "1");
+    assert_eq!(health.details["attach_hint_missing"], "0");
+    assert_eq!(health.details["path_mappings_total"], "2");
+    assert!(!json.contains("SWIMMERS_REMOTE_TEST_TOKEN"));
+}
+
+#[test]
+fn remote_targets_health_snapshot_warns_when_ssh_only_cannot_make_attach_hint() {
+    let _guard = shared_remote_cache_test_guard();
+    reset_remote_target_session_cache_for_tests();
+
+    let mut ssh_only = target();
+    ssh_only.id = "devbox;rm -rf".to_string();
+    ssh_only.label = "Unsafe SSH alias".to_string();
+    ssh_only.kind = "ssh_only".to_string();
+    ssh_only.base_url = Some("http://secret-token@127.0.0.1:3210/?token=secret-token".to_string());
+    ssh_only.auth_token_env = Some("SWIMMERS_REMOTE_TEST_TOKEN".to_string());
+
+    let health =
+        remote_targets_health_snapshot_for_targets(vec![ssh_only], &remote_health_test_config());
+    let json = serde_json::to_string(&health).expect("health json");
+
+    assert_eq!(health.status, DependencyHealthStatus::Degraded);
+    assert_eq!(
+        health.last_error.as_deref(),
+        Some("ssh_only_attach_hint_unavailable")
+    );
+    assert_eq!(health.details["configured_targets"], "1");
+    assert_eq!(health.details["ssh_only_targets"], "1");
+    assert_eq!(health.details["handoff_targets"], "1");
+    assert_eq!(health.details["probed_targets"], "0");
+    assert_eq!(health.details["attach_hint_missing"], "1");
+    assert_eq!(health.details["auth_env_missing"], "0");
+    assert_eq!(health.details["path_mappings_total"], "0");
+    assert!(!json.contains("SWIMMERS_REMOTE_TEST_TOKEN"));
+    assert!(!json.contains("secret-token"));
 }
 
 #[test]
@@ -1554,7 +1692,11 @@ async fn create_remote_session_posts_without_recursive_launch_target_and_namespa
     .expect("remote create");
 
     assert_eq!(
-        response.session.session_id,
+        response
+            .session
+            .as_ref()
+            .expect("created session")
+            .session_id,
         namespace_session_id("jeremy-skillbox", "sess_0")
     );
     let requests = state.requests.lock().await;
@@ -1850,7 +1992,11 @@ async fn remote_api_smoke_matrix_covers_launch_reads_scopes_and_redaction() {
     .await
     .expect("remote create with operator token");
     assert_eq!(
-        created.session.session_id,
+        created
+            .session
+            .as_ref()
+            .expect("created session")
+            .session_id,
         namespace_session_id("jeremy-skillbox", "sess_create")
     );
 

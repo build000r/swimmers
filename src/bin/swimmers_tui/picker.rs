@@ -827,6 +827,13 @@ pub(crate) fn launch_target_preview_for_path(
         return preview;
     }
 
+    if matches!(
+        target.kind.trim().to_ascii_lowercase().as_str(),
+        "ssh_only" | "ssh"
+    ) {
+        return preview;
+    }
+
     if let Some(reason) =
         swimmers::api::remote_sessions::remote_launch_target_config_blocker(target)
     {

@@ -86,6 +86,9 @@ impl<C: TuiApi> App<C> {
     }
 
     fn refresh_foreground_metadata(&mut self) {
+        if let Ok(environments) = self.runtime.block_on(self.client.fetch_environments()) {
+            self.environments = environments;
+        }
         if let Ok(health) = self.runtime.block_on(self.client.fetch_backend_health()) {
             self.backend_health = Some(health);
         }

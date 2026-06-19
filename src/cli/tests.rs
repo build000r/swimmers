@@ -120,6 +120,27 @@ fn parse_config_subcommand_without_action() {
 }
 
 #[test]
+fn parse_config_ssh_import_requires_explicit_dry_run_flag_shape() {
+    let cli = ServerCli::parse_from([
+        "swimmers",
+        "config",
+        "ssh-import",
+        "--dry-run",
+        "--ssh-config",
+        "/tmp/ssh-config",
+    ]);
+    assert_eq!(
+        cli.command,
+        Some(ServerCommand::Config {
+            action: Some(ConfigAction::SshImport {
+                dry_run: true,
+                ssh_config: Some(PathBuf::from("/tmp/ssh-config")),
+            })
+        })
+    );
+}
+
+#[test]
 fn parse_tmux_next_name_subcommand() {
     let cli = ServerCli::parse_from(["swimmers", "tmux", "next-name"]);
     assert_eq!(
@@ -553,6 +574,10 @@ fn doctor_flags_token_mode_without_token() {
 fn doctor_remote_targets_warning_reports_counts_without_env_names() {
     let snapshot = DependencyHealthSnapshot::degraded(chrono::Utc::now(), "auth_env_missing")
         .with_detail("configured_targets", "2")
+        .with_detail("swimmers_api_targets", "1")
+        .with_detail("ssh_only_targets", "1")
+        .with_detail("handoff_targets", "1")
+        .with_detail("attach_hint_missing", "1")
         .with_detail("auth_env_missing", "1")
         .with_detail("targets_without_path_mappings", "1");
 
@@ -565,8 +590,73 @@ fn doctor_remote_targets_warning_reports_counts_without_env_names() {
     assert_eq!(finding.name, "remote_targets");
     assert!(finding.detail.contains("status=degraded"));
     assert!(finding.detail.contains("configured=2"));
+    assert!(finding.detail.contains("swimmers_api=1"));
+    assert!(finding.detail.contains("ssh_only=1"));
+    assert!(finding.detail.contains("handoff=1"));
+    assert!(finding.detail.contains("attach_hint_missing=1"));
     assert!(finding.detail.contains("auth_env_missing=1"));
     assert!(!finding.detail.contains("SWIMMERS_REMOTE_TEST_TOKEN"));
+}
+
+#[test]
+fn ssh_import_proposes_untrusted_ssh_only_targets_without_connecting() {
+    let config = r#"
+Host skillbox-devbox skillbox-short
+  HostName skillbox-portfolio-devbox
+  User skillbox
+
+Host *.internal unsafe;alias !negated
+  HostName ignored.internal
+
+Match host *
+  Host ignored-after-match
+"#;
+
+    let report = ssh_import_report_from_config("/tmp/ssh-config", config);
+
+    assert_eq!(report.mode, "dry_run");
+    assert!(!report.writes_files);
+    assert!(!report.connects_to_hosts);
+    assert_eq!(report.proposals.len(), 2);
+    assert_eq!(report.proposals[0].id, "skillbox-devbox");
+    assert_eq!(report.proposals[0].kind, "ssh_only");
+    assert_eq!(report.proposals[0].trust, "untrusted");
+    assert_eq!(report.proposals[0].attach_hint, "ssh skillbox-devbox");
+    assert_eq!(
+        report.proposals[0].bootstrap_hint,
+        "ssh skillbox-devbox 'swimmers serve'"
+    );
+    assert_eq!(
+        report.proposals[0].label,
+        "skillbox@skillbox-portfolio-devbox"
+    );
+    assert_eq!(
+        report.proposals[0].host_name.as_deref(),
+        Some("skillbox-portfolio-devbox")
+    );
+    assert_eq!(report.proposals[0].user.as_deref(), Some("skillbox"));
+    assert!(report.proposals[0].overlay_snippet.contains("dev_sanity"));
+    assert!(report.proposals[0]
+        .overlay_snippet
+        .contains("kind: ssh_only"));
+    assert_eq!(report.proposals[1].id, "skillbox-short");
+}
+
+#[test]
+fn ssh_import_ignores_wildcards_negations_and_shell_unsafe_aliases() {
+    let config = r#"
+Host * !blocked devbox? unsafe;alias safe.alias user@host:22
+  HostName example.test
+"#;
+
+    let proposals = ssh_import_proposals_from_config(config);
+
+    assert_eq!(proposals.len(), 2);
+    assert_eq!(proposals[0].id, "safe.alias");
+    assert_eq!(proposals[1].id, "user@host:22");
+    assert!(proposals
+        .iter()
+        .all(|proposal| proposal.trust == "untrusted"));
 }
 
 #[test]

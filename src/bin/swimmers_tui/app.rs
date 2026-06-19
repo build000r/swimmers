@@ -110,6 +110,44 @@ fn launch_target_blocker_message(preview: &LaunchTargetPreview) -> String {
     )
 }
 
+fn launch_receipt_message(receipt: &LaunchReceipt) -> String {
+    match receipt.outcome.as_str() {
+        "handoff" => {
+            let command = receipt
+                .attach_hint
+                .as_deref()
+                .or(receipt.bootstrap_hint.as_deref())
+                .unwrap_or("configure a safe ssh alias");
+            format!("handoff {}: {}", receipt.target_label, command)
+        }
+        "created" => {
+            let session = receipt.session_id.as_deref().unwrap_or("session");
+            if let (Some(local), Some(remote)) =
+                (receipt.local_cwd.as_deref(), receipt.remote_cwd.as_deref())
+            {
+                format!(
+                    "created {session} on {}: {} -> {}",
+                    receipt.target_label,
+                    shorten_path(local, 24),
+                    shorten_path(remote, 24)
+                )
+            } else if receipt.local_override {
+                format!("created {session} on local machine (explicit local override)")
+            } else {
+                format!("created {session} on {}", receipt.target_label)
+            }
+        }
+        "blocked" => receipt
+            .message
+            .clone()
+            .unwrap_or_else(|| format!("launch blocked for {}", receipt.target_label)),
+        _ => receipt
+            .message
+            .clone()
+            .unwrap_or_else(|| format!("launch {} on {}", receipt.outcome, receipt.target_label)),
+    }
+}
+
 fn remote_inventory_target(target: Option<&str>) -> Option<String> {
     target
         .map(str::trim)
@@ -221,6 +259,7 @@ pub(crate) struct App<C: TuiApi> {
     pub(crate) artifact_opener: Arc<dyn ArtifactOpener>,
     pub(crate) commit_launcher: Arc<dyn CommitLauncher>,
     pub(crate) entities: Vec<SessionEntity>,
+    pub(crate) environments: Vec<EnvironmentSummary>,
     pub(crate) thought_log: Vec<ThoughtLogEntry>,
     pub(crate) thought_filter: ThoughtFilter,
     pub(crate) thought_group_by: ThoughtGroupBy,
@@ -306,6 +345,7 @@ impl<C: TuiApi> App<C> {
             artifact_opener,
             commit_launcher,
             entities: Vec::new(),
+            environments: Vec::new(),
             thought_log: Vec::new(),
             thought_filter: ThoughtFilter::default(),
             thought_group_by: ThoughtGroupBy::default(),
@@ -1135,13 +1175,18 @@ impl<C: TuiApi> App<C> {
     ) {
         match response {
             Ok(response) => {
-                let tmux_name = self.remember_and_upsert_pending_session(
-                    field,
-                    response.session,
-                    response.repo_theme,
-                );
+                let receipt_message = response.launch_receipt.as_ref().map(launch_receipt_message);
+                let Some(session) = response.session else {
+                    self.close_picker();
+                    self.set_message(
+                        receipt_message.unwrap_or_else(|| "launch handoff ready".to_string()),
+                    );
+                    return;
+                };
+                let tmux_name =
+                    self.remember_and_upsert_pending_session(field, session, response.repo_theme);
                 self.close_picker();
-                self.set_message(format!("created {tmux_name}"));
+                self.set_message(receipt_message.unwrap_or_else(|| format!("created {tmux_name}")));
             }
             Err(err) => self.set_message(err),
         }

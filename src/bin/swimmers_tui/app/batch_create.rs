@@ -8,6 +8,8 @@ struct BatchCreateSuccess {
 struct BatchCreatePartition {
     total: usize,
     successes: Vec<BatchCreateSuccess>,
+    handoff_count: usize,
+    first_handoff: Option<String>,
     first_error: Option<String>,
 }
 
@@ -20,14 +22,16 @@ struct AppliedBatchCreate {
 struct BatchCreateCompletion {
     total: usize,
     success_count: usize,
+    handoff_count: usize,
     last_tmux_name: Option<String>,
     last_session_id: Option<String>,
+    first_handoff: Option<String>,
     first_error: Option<String>,
 }
 
 impl BatchCreateCompletion {
     fn should_close_picker(&self) -> bool {
-        self.success_count > 0
+        self.success_count > 0 || self.handoff_count > 0
     }
 
     fn should_show_batch_thoughts(&self) -> bool {
@@ -35,8 +39,21 @@ impl BatchCreateCompletion {
     }
 
     fn message(self) -> String {
+        if self.success_count == 0 && self.handoff_count > 0 {
+            return batch_create_handoff_message(self.handoff_count, self.first_handoff);
+        }
+
         if self.success_count == 0 {
             return batch_create_failure_message(self.first_error);
+        }
+
+        if self.handoff_count > 0 {
+            return batch_create_mixed_handoff_message(
+                self.success_count,
+                self.total,
+                self.handoff_count,
+                self.first_handoff,
+            );
         }
 
         if self.success_count != self.total {
@@ -73,18 +90,46 @@ fn batch_create_success_message(success_count: usize, last_tmux_name: Option<Str
     }
 }
 
+fn batch_create_handoff_message(handoff_count: usize, first_handoff: Option<String>) -> String {
+    match first_handoff {
+        Some(message) if handoff_count == 1 => message,
+        Some(message) => format!("{handoff_count} handoff receipts; {message}"),
+        None => format!("{handoff_count} handoff receipts"),
+    }
+}
+
+fn batch_create_mixed_handoff_message(
+    success_count: usize,
+    total: usize,
+    handoff_count: usize,
+    first_handoff: Option<String>,
+) -> String {
+    let suffix = first_handoff
+        .map(|message| format!("; {message}"))
+        .unwrap_or_default();
+    format!("created {success_count}/{total}; {handoff_count} handoff{suffix}")
+}
+
 fn partition_batch_create_results(response: CreateSessionsBatchResponse) -> BatchCreatePartition {
     let total = response.results.len();
     let mut successes = Vec::new();
+    let mut handoff_count = 0;
+    let mut first_handoff = None;
     let mut first_error = None;
 
     for result in response.results {
-        match (result.ok, result.session) {
-            (true, Some(session)) => successes.push(BatchCreateSuccess {
+        match (result.ok, result.session, result.launch_receipt) {
+            (true, Some(session), _) => successes.push(BatchCreateSuccess {
                 session,
                 repo_theme: result.repo_theme,
             }),
-            (false, _) if first_error.is_none() => {
+            (true, None, Some(receipt)) => {
+                handoff_count += 1;
+                if first_handoff.is_none() {
+                    first_handoff = Some(launch_receipt_message(&receipt));
+                }
+            }
+            (false, _, _) if first_error.is_none() => {
                 first_error = Some(batch_create_error_message(&result.cwd, result.error));
             }
             _ => {}
@@ -94,6 +139,8 @@ fn partition_batch_create_results(response: CreateSessionsBatchResponse) -> Batc
     BatchCreatePartition {
         total,
         successes,
+        handoff_count,
+        first_handoff,
         first_error,
     }
 }
@@ -140,8 +187,10 @@ impl<C: TuiApi> App<C> {
         BatchCreateCompletion {
             total: partition.total,
             success_count: applied.success_count,
+            handoff_count: partition.handoff_count,
             last_tmux_name: applied.last_tmux_name,
             last_session_id: applied.last_session_id,
+            first_handoff: partition.first_handoff,
             first_error: partition.first_error,
         }
     }
@@ -181,8 +230,10 @@ mod tests {
         BatchCreateCompletion {
             total,
             success_count,
+            handoff_count: 0,
             last_tmux_name: last_tmux_name.map(str::to_string),
             last_session_id: None,
+            first_handoff: None,
             first_error: first_error.map(str::to_string),
         }
     }
@@ -232,6 +283,44 @@ mod tests {
         assert_eq!(
             completion(2, 2, Some("second"), None).message(),
             "created 2 sessions"
+        );
+    }
+
+    #[test]
+    fn batch_create_completion_message_reports_handoff_only_results() {
+        let message = BatchCreateCompletion {
+            total: 2,
+            success_count: 0,
+            handoff_count: 2,
+            last_tmux_name: None,
+            last_session_id: None,
+            first_handoff: Some("handoff Skillbox devbox: ssh skillbox-devbox".to_string()),
+            first_error: None,
+        }
+        .message();
+
+        assert_eq!(
+            message,
+            "2 handoff receipts; handoff Skillbox devbox: ssh skillbox-devbox"
+        );
+    }
+
+    #[test]
+    fn batch_create_completion_message_reports_mixed_handoff_results() {
+        let message = BatchCreateCompletion {
+            total: 3,
+            success_count: 1,
+            handoff_count: 2,
+            last_tmux_name: Some("local-one".to_string()),
+            last_session_id: None,
+            first_handoff: Some("handoff Skillbox devbox: ssh skillbox-devbox".to_string()),
+            first_error: None,
+        }
+        .message();
+
+        assert_eq!(
+            message,
+            "created 1/3; 2 handoff; handoff Skillbox devbox: ssh skillbox-devbox"
         );
     }
 

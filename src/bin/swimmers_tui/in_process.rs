@@ -486,6 +486,7 @@ impl TuiApi for InProcessApi {
         // Mirrors: src/api/sessions.rs:46 (create_session)
         let cwd = cwd.to_string();
         Box::pin(async move {
+            let explicit_local_override = explicit_local_launch_override(launch_target.as_deref());
             if remote_sessions::is_remote_launch_target(launch_target.as_deref()) {
                 return remote_sessions::create_remote_session(CreateSessionRequest {
                     name: None,
@@ -505,6 +506,12 @@ impl TuiApi for InProcessApi {
                 initial_request,
             )
             .await
+            .map(|mut response| {
+                if explicit_local_override {
+                    mark_create_session_local_override(&mut response);
+                }
+                response
+            })
             .map_err(api_service_error_message)
         })
     }
@@ -540,6 +547,7 @@ impl TuiApi for InProcessApi {
     ) -> BoxFuture<'_, Result<CreateSessionsBatchResponse, String>> {
         let state = self.state.clone();
         Box::pin(async move {
+            let explicit_local_override = explicit_local_launch_override(launch_target.as_deref());
             if remote_sessions::is_remote_launch_target(launch_target.as_deref()) {
                 return remote_sessions::create_remote_sessions_batch(CreateSessionsBatchRequest {
                     dirs,
@@ -552,6 +560,12 @@ impl TuiApi for InProcessApi {
             }
             create_local_sessions_batch(state, dirs, Some(spawn_tool), initial_request)
                 .await
+                .map(|mut response| {
+                    if explicit_local_override {
+                        mark_batch_local_override(&mut response);
+                    }
+                    response
+                })
                 .map_err(api_service_error_message)
         })
     }
@@ -567,6 +581,26 @@ impl TuiApi for InProcessApi {
                 .await
                 .map_err(|err| err.display_message("in-process API"))
         })
+    }
+}
+
+fn explicit_local_launch_override(target: Option<&str>) -> bool {
+    target
+        .map(str::trim)
+        .is_some_and(|target| target.eq_ignore_ascii_case("local"))
+}
+
+fn mark_create_session_local_override(response: &mut CreateSessionResponse) {
+    if let Some(receipt) = response.launch_receipt.as_mut() {
+        receipt.mark_local_override();
+    }
+}
+
+fn mark_batch_local_override(response: &mut CreateSessionsBatchResponse) {
+    for result in &mut response.results {
+        if let Some(receipt) = result.launch_receipt.as_mut() {
+            receipt.mark_local_override();
+        }
     }
 }
 

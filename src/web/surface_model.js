@@ -257,6 +257,89 @@ function firstNonHealthyTransport(lens) {
   return buckets.find((bucket) => bucket.kind === "transport" && bucket.key !== "healthy") || null;
 }
 
+function environmentCapabilityLabels(environment) {
+  const capabilities = environment?.capabilities || {};
+  const labels = [];
+  if (capabilities.observe_sessions) labels.push("observe");
+  if (capabilities.launch_session) labels.push("launch");
+  if (capabilities.send_input) labels.push("send");
+  if (capabilities.remote_dir_inventory) labels.push("dirs");
+  if (capabilities.ssh_attach_hint) labels.push("ssh");
+  if (capabilities.bootstrap_hint) labels.push("bootstrap");
+  if (capabilities.advisory_metadata) labels.push("external");
+  return labels;
+}
+
+function environmentReadiness(environment, sessionStats) {
+  const status = String(environment?.status || "").trim().toLowerCase();
+  const capabilities = environment?.capabilities || {};
+  if (sessionStats.attentionCount > 0) return { key: "needs_attention", label: "needs attention" };
+  if (status === "degraded" || status === "unavailable" || status === "unknown") {
+    return { key: "degraded", label: "degraded" };
+  }
+  if (String(environment?.kind || "").trim().toLowerCase() === "ssh_only") {
+    return capabilities.ssh_attach_hint || capabilities.bootstrap_hint
+      ? { key: "handoff", label: "handoff" }
+      : { key: "blocked", label: "missing handoff" };
+  }
+  if (capabilities.observe_sessions || capabilities.launch_session) {
+    return { key: "ready", label: "ready" };
+  }
+  return { key: "advisory", label: "advisory" };
+}
+
+function sessionStatsByTarget(sessions) {
+  const stats = new Map();
+  for (const session of Array.isArray(sessions) ? sessions : []) {
+    const key = session.targetKey || "local";
+    const current = stats.get(key) || { sessionCount: 0, attentionCount: 0, degradedCount: 0 };
+    current.sessionCount += 1;
+    if (session.readinessKey === "needs_attention") current.attentionCount += 1;
+    if (session.isStale || session.transportKey !== "healthy") current.degradedCount += 1;
+    stats.set(key, current);
+  }
+  return stats;
+}
+
+export function buildEnvironmentMatrix(environments, sessions) {
+  const stats = sessionStatsByTarget(sessions);
+  return (Array.isArray(environments) ? environments : [])
+    .map((environment) => {
+      const id = firstNonEmpty(environment?.id, environment?.label, "local") || "local";
+      const kind = String(environment?.kind || "local").trim().toLowerCase() || "local";
+      const rowStats = stats.get(id) || { sessionCount: 0, attentionCount: 0, degradedCount: 0 };
+      const readiness = environmentReadiness(environment, rowStats);
+      return {
+        id,
+        label: firstNonEmpty(environment?.label, id) || id,
+        kind,
+        displayHost: firstNonEmpty(environment?.display_host, environment?.label, id) || id,
+        backendMode: String(environment?.backend_mode || "").trim(),
+        status: String(environment?.status || "Unknown").trim() || "Unknown",
+        readinessKey: readiness.key,
+        readinessLabel: readiness.label,
+        sessionCount: rowStats.sessionCount,
+        attentionCount: rowStats.attentionCount,
+        degradedCount: rowStats.degradedCount,
+        pathMappingCount: Number(environment?.path_mapping_count || 0),
+        capabilityLabels: environmentCapabilityLabels(environment),
+        handoffOnly: kind === "ssh_only",
+        observeCapable: environment?.capabilities?.observe_sessions === true,
+        launchCapable: environment?.capabilities?.launch_session === true,
+        attachHint: String(environment?.attach_hint || "").trim(),
+        bootstrapHint: String(environment?.bootstrap_hint || "").trim(),
+      };
+    })
+    .sort((left, right) => (
+      Number(right.readinessKey === "needs_attention") - Number(left.readinessKey === "needs_attention")
+      || Number(right.status.toLowerCase() === "degraded") - Number(left.status.toLowerCase() === "degraded")
+      || Number(left.handoffOnly) - Number(right.handoffOnly)
+      || right.sessionCount - left.sessionCount
+      || left.displayHost.localeCompare(right.displayHost)
+      || left.id.localeCompare(right.id)
+    ));
+}
+
 export function fleetLensChips(lens, filter) {
   const active = normalizeFleetFilter(filter);
   const total = Number(lens?.total_sessions || 0);
@@ -582,6 +665,7 @@ export function buildSurfaceModel({
   const fleetFilter = availableFleetFilter(fleetLens, state.fleetFilter);
   const surfaceSessions = allSurfaceSessions.filter((session) => sessionMatchesFleetFilter(session, fleetFilter));
   const filteredFleetLens = buildFleetLensSummary(surfaceSessions);
+  const environmentMatrix = buildEnvironmentMatrix(state.environments, allSurfaceSessions);
   const attentionInbox = buildAttentionInbox(surfaceSessions);
   const selectedSessionVisible = selectedSession
     ? surfaceSessions.some((session) => session.sessionId === selectedSession.session_id)
@@ -622,6 +706,7 @@ export function buildSurfaceModel({
     allSessionCount: allSurfaceSessions.length,
     attentionInbox,
     attentionInboxCount: readinessBucketCount(filteredFleetLens, "needs_attention"),
+    environmentMatrix,
     fleetFilter,
     fleetLens,
     filteredFleetLens,
