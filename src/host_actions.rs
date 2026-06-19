@@ -1,6 +1,8 @@
 use std::collections::HashMap;
 use std::fs;
 use std::io::{self, Read, Seek, SeekFrom};
+#[cfg(unix)]
+use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command as ProcessCommand, ExitStatus, Output, Stdio};
 use std::sync::Arc;
@@ -176,6 +178,8 @@ impl Drop for RestartOutputFile {
 fn build_restart_process_command(shell_command: &str) -> ProcessCommand {
     let mut command = ProcessCommand::new("sh");
     command.arg("-c").arg(shell_command);
+    #[cfg(unix)]
+    command.process_group(0);
     command
 }
 
@@ -191,8 +195,7 @@ fn wait_restart_child(
         }
         let remaining = deadline.saturating_duration_since(Instant::now());
         if remaining.is_zero() {
-            let _ = child.kill();
-            let _ = child.wait();
+            kill_timed_out_restart_child(child);
             return Err(io::Error::new(
                 io::ErrorKind::TimedOut,
                 format!(
@@ -204,6 +207,28 @@ fn wait_restart_child(
         std::thread::sleep(remaining.min(Duration::from_millis(25)));
     }
 }
+
+fn kill_timed_out_restart_child(child: &mut std::process::Child) {
+    kill_restart_process_group(child);
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
+#[cfg(unix)]
+fn kill_restart_process_group(child: &std::process::Child) {
+    let Ok(pid) = i32::try_from(child.id()) else {
+        return;
+    };
+    if pid <= 0 {
+        return;
+    }
+    unsafe {
+        let _ = libc::kill(-pid, libc::SIGKILL);
+    }
+}
+
+#[cfg(not(unix))]
+fn kill_restart_process_group(_child: &std::process::Child) {}
 
 fn restart_timeout_detail(timeout: Duration) -> String {
     if timeout.as_millis() < 1_000 {
@@ -1102,6 +1127,76 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
+    fn read_pid_file(path: &Path) -> libc::pid_t {
+        let deadline = Instant::now() + Duration::from_secs(1);
+        loop {
+            match fs::read_to_string(path) {
+                Ok(value) => {
+                    return value.trim().parse().expect("child pid should parse");
+                }
+                Err(error)
+                    if error.kind() == io::ErrorKind::NotFound && Instant::now() < deadline =>
+                {
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                Err(error) => panic!("failed to read child pid file: {error}"),
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    fn unix_process_exists(pid: libc::pid_t) -> bool {
+        if pid <= 0 {
+            return false;
+        }
+        let rc = unsafe { libc::kill(pid, 0) };
+        if rc == 0 {
+            return true;
+        }
+        matches!(io::Error::last_os_error().raw_os_error(), Some(libc::EPERM))
+    }
+
+    #[cfg(unix)]
+    fn unix_process_is_zombie(pid: libc::pid_t) -> bool {
+        let Ok(output) = ProcessCommand::new("ps")
+            .args(["-o", "stat=", "-p", &pid.to_string()])
+            .output()
+        else {
+            return false;
+        };
+        output.status.success()
+            && String::from_utf8_lossy(&output.stdout)
+                .trim_start()
+                .starts_with('Z')
+    }
+
+    #[cfg(unix)]
+    fn unix_process_is_running(pid: libc::pid_t) -> bool {
+        unix_process_exists(pid) && !unix_process_is_zombie(pid)
+    }
+
+    #[cfg(unix)]
+    fn wait_for_process_to_stop_running(pid: libc::pid_t, timeout: Duration) -> bool {
+        let deadline = Instant::now() + timeout;
+        while unix_process_is_running(pid) {
+            if Instant::now() >= deadline {
+                return false;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        true
+    }
+
+    #[cfg(unix)]
+    fn kill_pid_if_alive(pid: libc::pid_t) {
+        if unix_process_is_running(pid) {
+            unsafe {
+                let _ = libc::kill(pid, libc::SIGKILL);
+            }
+        }
+    }
+
     #[tokio::test]
     async fn repo_action_tracker_uses_canonical_key_and_rejects_duplicate_running() {
         let temp = tempdir().expect("tempdir");
@@ -1273,6 +1368,50 @@ mod tests {
             .expect("timed-out restart should not keep the repo locked");
         let retry = wait_for_repo_action_state(&tracker, &repo, RepoActionState::Succeeded).await;
         assert_eq!(retry.detail, Some("retry done".to_string()));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn repo_action_tracker_timeout_kills_restart_descendants() {
+        let temp = tempdir().expect("tempdir");
+        let repo = temp.path().join("repo");
+        fs::create_dir_all(&repo).expect("repo dir");
+        let child_pid_path = temp.path().join("restart-child.pid");
+        let child_pid_file = child_pid_path.to_string_lossy().into_owned();
+        let restart_command = format!(
+            "sleep 60 & echo $! > {}; wait",
+            shell_single_quote(&child_pid_file)
+        );
+        let tracker = RepoActionTracker::new();
+
+        tracker
+            .start(
+                repo.clone(),
+                RepoActionKind::Restart,
+                Arc::new(RestartExecutor {
+                    commands: vec![("slow-service".to_string(), restart_command)],
+                    timeout: Duration::from_millis(75),
+                }),
+            )
+            .await
+            .expect("start timed restart action");
+
+        let failed = wait_for_repo_action_state(&tracker, &repo, RepoActionState::Failed).await;
+        assert_eq!(failed.kind, RepoActionKind::Restart);
+        let detail = failed.detail.expect("timeout detail");
+        assert!(
+            detail.contains("slow-service: restart timed out after"),
+            "unexpected detail: {detail}"
+        );
+
+        let child_pid = read_pid_file(&child_pid_path);
+        let child_stopped_running =
+            wait_for_process_to_stop_running(child_pid, Duration::from_secs(2));
+        kill_pid_if_alive(child_pid);
+        assert!(
+            child_stopped_running,
+            "timed-out restart should kill descendant process {child_pid}"
+        );
     }
 
     #[tokio::test]
