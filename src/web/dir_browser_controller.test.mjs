@@ -296,6 +296,35 @@ test("directory browser controller preserves remote target for mapped cockpit la
   });
 });
 
+test("directory browser controller lets API resolve remote cold launch without cached target metadata", async () => {
+  const calls = [];
+  const { runtime, state, el, statuses } = createRuntime({
+    apiFetch: async (...args) => {
+      calls.push(args);
+      return { json: async () => ({ session: { session_id: "devbox::sess_2" } }) };
+    },
+  });
+  state.readOnly = false;
+  state.dirBrowser.launchTargets = [{ id: "local", label: "Local machine", kind: "local" }];
+  state.dirBrowser.launchTarget = "local";
+  el.createLaunchTarget = selectElement("local");
+
+  const controller = createDirBrowserController(runtime);
+  controller.openCreateSheetForCwd("/workspace/swimmers", { launchTarget: "devbox" });
+  await controller.createSessionFromSheet();
+
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0][0], "/v1/sessions");
+  assert.deepEqual(JSON.parse(calls[0][1].body), {
+    cwd: "/workspace/swimmers",
+    spawn_tool: "grok",
+    launch_target: "devbox",
+    initial_request: null,
+  });
+  assert.equal(state.dirBrowser.singleLaunchBlocker, null);
+  assert.equal(statuses.some((status) => /unsupported target/.test(status.message)), false);
+});
+
 test("directory browser controller reloads inventory when launch target changes", async () => {
   const previousDocument = globalThis.document;
   globalThis.document = {

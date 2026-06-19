@@ -6,6 +6,7 @@ import {
   dirRowClickPlan,
   ensureDirBrowserBatchSelection as ensureDirBrowserBatchSelectionState,
   launchTargetBlockersForPaths as dirBrowserLaunchTargetBlockersForPaths,
+  launchTargetById as dirBrowserLaunchTargetById,
   launchTargetPayload as dirBrowserLaunchTargetPayload,
   launchTargetPreviewForPath as dirBrowserLaunchTargetPreviewForPath,
   launchTargetStatusTextForPreview as dirBrowserLaunchTargetStatusTextForPreview,
@@ -91,6 +92,11 @@ export function createDirBrowserController(runtime) {
     return launchTargetPayload() !== null;
   }
 
+  function launchTargetPreflightUnavailable() {
+    const target = launchTargetPayload();
+    return target !== null && !dirBrowserLaunchTargetById(state.dirBrowser, target);
+  }
+
   function launchTargetPreviewForPath(path) {
     return dirBrowserLaunchTargetPreviewForPath(path, selectedLaunchTargetSummary());
   }
@@ -102,6 +108,10 @@ export function createDirBrowserController(runtime) {
   function refreshCreateLaunchTargetBlocker() {
     const path = String(el.createCwd?.value || state.dirBrowser.path || "").trim();
     if (!path) {
+      state.dirBrowser.singleLaunchBlocker = null;
+      return null;
+    }
+    if (launchTargetPreflightUnavailable()) {
       state.dirBrowser.singleLaunchBlocker = null;
       return null;
     }
@@ -119,6 +129,10 @@ export function createDirBrowserController(runtime) {
   }
 
   function batchLaunchBlockersForPaths(paths) {
+    if (launchTargetPreflightUnavailable()) {
+      state.dirBrowser.batchLaunchBlockers = [];
+      return [];
+    }
     const blockers = dirBrowserLaunchTargetBlockersForPaths(paths, selectedLaunchTargetSummary());
     state.dirBrowser.batchLaunchBlockers = blockers;
     return blockers;
@@ -407,11 +421,15 @@ export function createDirBrowserController(runtime) {
       return;
     }
 
-    const launchPreview = launchTargetPreviewForPath(cwd);
-    state.dirBrowser.singleLaunchBlocker = launchPreview.blocked ? launchPreview : null;
-    if (launchPreview.blocked) {
-      setDirStatus(launchTargetStatusForPreview(launchPreview), true);
-      return;
+    if (launchTargetPreflightUnavailable()) {
+      state.dirBrowser.singleLaunchBlocker = null;
+    } else {
+      const launchPreview = launchTargetPreviewForPath(cwd);
+      state.dirBrowser.singleLaunchBlocker = launchPreview.blocked ? launchPreview : null;
+      if (launchPreview.blocked) {
+        setDirStatus(launchTargetStatusForPreview(launchPreview), true);
+        return;
+      }
     }
 
     const response = await apiFetch("/v1/sessions", {

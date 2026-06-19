@@ -576,9 +576,10 @@ fn require_batch_dirs_rejects_blank_dirs() {
 }
 
 #[test]
-fn map_batch_cwds_for_target_maps_each_dir() {
-    let mapped = map_batch_cwds_for_target(
-        &target(),
+fn map_batch_cwds_for_targets_maps_each_dir() {
+    let target = target();
+    let mapped = map_batch_cwds_for_targets(
+        &[target.clone(), target],
         &[
             "/workspace/repos/opensource/swimmers".to_string(),
             "/workspace/repos/tools".to_string(),
@@ -593,6 +594,89 @@ fn map_batch_cwds_for_target_maps_each_dir() {
             "/monoserver/tools".to_string(),
         ]
     );
+}
+
+#[test]
+fn prepare_remote_sessions_batch_maps_each_dir_with_cwd_scoped_target() {
+    let mut first = target();
+    first.path_mappings = vec![LaunchPathMapping {
+        local_prefix: "/workspace/repos/personal".to_string(),
+        remote_prefix: "/monoserver/personal".to_string(),
+    }];
+    let mut second = target();
+    second.path_mappings = vec![LaunchPathMapping {
+        local_prefix: "/workspace/repos/opensource".to_string(),
+        remote_prefix: "/monoserver/opensource".to_string(),
+    }];
+    let dirs = vec![
+        "/workspace/repos/personal/app".to_string(),
+        "/workspace/repos/opensource/swimmers".to_string(),
+    ];
+
+    let batch = prepare_remote_sessions_batch_with_resolver(
+        CreateSessionsBatchRequest {
+            dirs,
+            spawn_tool: Some(SpawnTool::Codex),
+            launch_target: Some("jeremy-skillbox".to_string()),
+            initial_request: Some("continue".to_string()),
+        },
+        |cwd, target_id| {
+            assert_eq!(target_id, "jeremy-skillbox");
+            if cwd.contains("/personal/") {
+                Ok(first.clone())
+            } else {
+                Ok(second.clone())
+            }
+        },
+    )
+    .expect("prepared batch");
+
+    assert_eq!(batch.target.base_url, target().base_url);
+    assert_eq!(
+        batch.remote_body.dirs,
+        vec![
+            "/monoserver/personal/app".to_string(),
+            "/monoserver/opensource/swimmers".to_string(),
+        ]
+    );
+    assert_eq!(batch.remote_body.launch_target, None);
+    assert_eq!(batch.remote_body.spawn_tool, Some(SpawnTool::Codex));
+    assert_eq!(
+        batch.remote_body.initial_request.as_deref(),
+        Some("continue")
+    );
+}
+
+#[test]
+fn prepare_remote_sessions_batch_rejects_cwd_scoped_targets_with_different_endpoints() {
+    let first = target();
+    let mut second = target();
+    second.base_url = Some("http://127.0.0.1:4321".to_string());
+    let dirs = vec![
+        "/workspace/repos/personal/app".to_string(),
+        "/workspace/repos/opensource/swimmers".to_string(),
+    ];
+
+    let err = prepare_remote_sessions_batch_with_resolver(
+        CreateSessionsBatchRequest {
+            dirs,
+            spawn_tool: Some(SpawnTool::Codex),
+            launch_target: Some("jeremy-skillbox".to_string()),
+            initial_request: None,
+        },
+        |cwd, _target_id| {
+            if cwd.contains("/personal/") {
+                Ok(first.clone())
+            } else {
+                Ok(second.clone())
+            }
+        },
+    )
+    .expect_err("mixed endpoints should fail");
+
+    assert_eq!(err.status, StatusCode::BAD_REQUEST);
+    assert_eq!(err.code, "LAUNCH_TARGET_MISMATCH");
+    assert!(err.message().contains("different remote endpoints"));
 }
 
 #[test]
@@ -612,6 +696,25 @@ fn restore_original_batch_cwds_uses_result_index() {
 
     assert_eq!(response.results[0].cwd, "/workspace/repos/second");
     assert_eq!(response.results[1].cwd, "/workspace/repos/first");
+}
+
+#[test]
+fn restore_original_batch_cwds_updates_nested_session_cwd() {
+    let original_dirs = vec!["/workspace/repos/swimmers".to_string()];
+    let mut result = batch_result(0, "/monoserver/opensource/swimmers");
+    result.session = Some(summary("sess_0"));
+    let mut response = CreateSessionsBatchResponse {
+        results: vec![result],
+    };
+
+    restore_original_batch_cwds(&mut response, &original_dirs).expect("restore cwds");
+
+    let result = response.results.first().expect("result");
+    assert_eq!(result.cwd, "/workspace/repos/swimmers");
+    assert_eq!(
+        result.session.as_ref().expect("session").cwd,
+        "/workspace/repos/swimmers"
+    );
 }
 
 #[test]

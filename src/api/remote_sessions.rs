@@ -914,6 +914,7 @@ pub async fn create_remote_sessions_batch(
     Ok(response)
 }
 
+#[derive(Debug)]
 struct PreparedRemoteSessionsBatch {
     target: LaunchTargetSummary,
     original_dirs: Vec<String>,
@@ -923,10 +924,24 @@ struct PreparedRemoteSessionsBatch {
 fn prepare_remote_sessions_batch(
     body: CreateSessionsBatchRequest,
 ) -> Result<PreparedRemoteSessionsBatch, RemoteSessionError> {
+    prepare_remote_sessions_batch_with_resolver(body, resolve_launch_target_for_cwd)
+}
+
+fn prepare_remote_sessions_batch_with_resolver<F>(
+    body: CreateSessionsBatchRequest,
+    mut resolve_target: F,
+) -> Result<PreparedRemoteSessionsBatch, RemoteSessionError>
+where
+    F: FnMut(&str, &str) -> Result<LaunchTargetSummary, RemoteSessionError>,
+{
     let target_id = required_target_id(body.launch_target.as_deref())?;
     let original_dirs = require_batch_dirs(body.dirs)?;
-    let target = resolve_launch_target_for_cwd(&original_dirs[0], target_id)?;
-    let remote_dirs = map_batch_cwds_for_target(&target, &original_dirs)?;
+    let targets = original_dirs
+        .iter()
+        .map(|cwd| resolve_target(cwd, target_id))
+        .collect::<Result<Vec<_>, _>>()?;
+    let target = batch_endpoint_target(target_id, &targets)?;
+    let remote_dirs = map_batch_cwds_for_targets(&targets, &original_dirs)?;
 
     Ok(PreparedRemoteSessionsBatch {
         target,
@@ -940,6 +955,69 @@ fn prepare_remote_sessions_batch(
     })
 }
 
+#[derive(Debug, PartialEq, Eq)]
+struct RemoteBatchEndpointKey {
+    base_url: String,
+    auth_token_env: Option<String>,
+}
+
+fn batch_endpoint_target(
+    target_id: &str,
+    targets: &[LaunchTargetSummary],
+) -> Result<LaunchTargetSummary, RemoteSessionError> {
+    let Some(first) = targets.first() else {
+        return Err(RemoteSessionError::new(
+            StatusCode::BAD_REQUEST,
+            "VALIDATION_FAILED",
+            "dirs must not be empty",
+        ));
+    };
+    let first_key = remote_batch_endpoint_key(first)?;
+    for target in targets {
+        if target.id != target_id {
+            return Err(RemoteSessionError::new(
+                StatusCode::BAD_REQUEST,
+                "LAUNCH_TARGET_UNKNOWN",
+                format!(
+                    "launch target '{target_id}' resolved to unexpected target '{}'",
+                    target.id
+                ),
+            ));
+        }
+        let key = remote_batch_endpoint_key(target)?;
+        if key != first_key {
+            return Err(RemoteSessionError::new(
+                StatusCode::BAD_REQUEST,
+                "LAUNCH_TARGET_MISMATCH",
+                format!(
+                    "batch launch target '{target_id}' resolves to different remote endpoints across selected dirs"
+                ),
+            ));
+        }
+    }
+    Ok(first.clone())
+}
+
+fn remote_batch_endpoint_key(
+    target: &LaunchTargetSummary,
+) -> Result<RemoteBatchEndpointKey, RemoteSessionError> {
+    ensure_swimmers_api_target(target)?;
+    let base_url = parse_remote_base_url(target)?
+        .as_str()
+        .trim_end_matches('/')
+        .to_string();
+    let auth_token_env = target
+        .auth_token_env
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string);
+    Ok(RemoteBatchEndpointKey {
+        base_url,
+        auth_token_env,
+    })
+}
+
 fn require_batch_dirs(dirs: Vec<String>) -> Result<Vec<String>, RemoteSessionError> {
     validate_sessions_batch_dirs(&dirs).map_err(|error| {
         RemoteSessionError::new(error.status(), error.code(), error.message().to_string())
@@ -947,12 +1025,13 @@ fn require_batch_dirs(dirs: Vec<String>) -> Result<Vec<String>, RemoteSessionErr
     Ok(dirs)
 }
 
-fn map_batch_cwds_for_target(
-    target: &LaunchTargetSummary,
+fn map_batch_cwds_for_targets(
+    targets: &[LaunchTargetSummary],
     dirs: &[String],
 ) -> Result<Vec<String>, RemoteSessionError> {
     dirs.iter()
-        .map(|cwd| map_cwd_for_target(target, cwd))
+        .zip(targets)
+        .map(|(cwd, target)| map_cwd_for_target(target, cwd))
         .collect()
 }
 
@@ -962,7 +1041,11 @@ fn restore_original_batch_cwds(
 ) -> Result<(), RemoteSessionError> {
     validate_remote_batch_result_indexes(&response.results, original_dirs.len())?;
     for result in &mut response.results {
-        result.cwd = original_dirs[result.index].clone();
+        let original_cwd = original_dirs[result.index].clone();
+        result.cwd = original_cwd.clone();
+        if let Some(session) = result.session.as_mut() {
+            session.cwd = original_cwd;
+        }
     }
 
     Ok(())
