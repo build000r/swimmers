@@ -64,6 +64,18 @@ fn toggle_voice_recording_plan_starts_when_ready_and_not_recording() {
     );
 }
 
+#[test]
+fn remote_inventory_target_omits_case_insensitive_local_target() {
+    assert_eq!(remote_inventory_target(None), None);
+    assert_eq!(remote_inventory_target(Some("  ")), None);
+    assert_eq!(remote_inventory_target(Some("local")), None);
+    assert_eq!(remote_inventory_target(Some(" LOCAL ")), None);
+    assert_eq!(
+        remote_inventory_target(Some("skillbox")),
+        Some("skillbox".to_string())
+    );
+}
+
 fn healthy_backend_health() -> BackendHealthResponse {
     BackendHealthResponse {
         status: "healthy".to_string(),

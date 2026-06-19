@@ -1,4 +1,5 @@
 use super::*;
+use swimmers::api::remote_sessions::is_remote_launch_target;
 
 #[path = "mermaid_viewer.rs"]
 mod mermaid_viewer;
@@ -151,7 +152,7 @@ fn launch_receipt_message(receipt: &LaunchReceipt) -> String {
 fn remote_inventory_target(target: Option<&str>) -> Option<String> {
     target
         .map(str::trim)
-        .filter(|target| !target.is_empty() && *target != "local")
+        .filter(|target| is_remote_launch_target(Some(*target)))
         .map(str::to_string)
 }
 

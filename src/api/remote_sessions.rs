@@ -81,7 +81,11 @@ impl RemoteSessionError {
 pub fn is_remote_launch_target(target: Option<&str>) -> bool {
     target
         .map(str::trim)
-        .is_some_and(|target| !target.is_empty() && target != "local")
+        .is_some_and(|target| !target.is_empty() && !is_local_launch_target(target))
+}
+
+pub fn is_local_launch_target(target: &str) -> bool {
+    target.trim().eq_ignore_ascii_case("local")
 }
 
 pub fn remote_launch_target_config_blocker(target: &LaunchTargetSummary) -> Option<&'static str> {

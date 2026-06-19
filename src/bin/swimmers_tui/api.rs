@@ -1,5 +1,5 @@
 use super::*;
-use swimmers::api::remote_sessions::encode_path_segment;
+use swimmers::api::remote_sessions::{encode_path_segment, is_remote_launch_target};
 use swimmers::openrouter_models::{
     cached_or_default_openrouter_candidates, refresh_openrouter_model_cache,
 };
@@ -428,7 +428,7 @@ fn dir_list_query_params(
     }
     if let Some(target) = target
         .map(str::trim)
-        .filter(|target| !target.is_empty() && *target != "local")
+        .filter(|target| is_remote_launch_target(Some(*target)))
     {
         query.push(("target", target.to_string()));
     }
@@ -1510,6 +1510,10 @@ mod response_tests {
         assert!(dir_list_query_params(None, false, None, None).is_empty());
         assert_eq!(
             dir_list_query_params(Some("/srv/repos"), false, None, Some("local")),
+            vec![("path", "/srv/repos".to_string())]
+        );
+        assert_eq!(
+            dir_list_query_params(Some("/srv/repos"), false, None, Some(" LOCAL ")),
             vec![("path", "/srv/repos".to_string())]
         );
         assert_eq!(

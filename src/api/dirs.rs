@@ -60,7 +60,7 @@ async fn list_dirs(
         .target
         .as_deref()
         .map(str::trim)
-        .filter(|target| !target.is_empty() && *target != "local")
+        .filter(|target| remote_sessions::is_remote_launch_target(Some(*target)))
     {
         return match remote_sessions::list_remote_dirs(
             target,

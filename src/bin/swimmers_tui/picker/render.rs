@@ -6,6 +6,7 @@ use super::{
     InitialRequestLayout, InitialRequestState, LaunchTargetPreview, PickerLayout, PickerSelection,
     PickerState, Rect, Renderer, VoiceUiState, INITIAL_REQUEST_HEIGHT, INITIAL_REQUEST_WIDTH,
 };
+use swimmers::api::remote_sessions::is_local_launch_target;
 use unicode_width::UnicodeWidthStr;
 
 pub(crate) fn render_picker(renderer: &mut Renderer, picker: &PickerState, field: Rect) {
@@ -588,7 +589,7 @@ pub(super) fn initial_request_context_line(
 
 fn initial_request_launch_target_suffix(initial_request: &InitialRequestState) -> String {
     match initial_request.launch_target.as_deref() {
-        Some(target) if target != "local" => format!(" -> {target}"),
+        Some(target) if !is_local_launch_target(target) => format!(" -> {target}"),
         _ => String::new(),
     }
 }

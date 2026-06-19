@@ -1026,6 +1026,14 @@ mod picker {
             initial_request_context_line(&remote_batch_request, &wide_layout, None),
             "batch: 2 included dirs -> devbox"
         );
+        let explicit_local_batch_request = InitialRequestState::new_batch(
+            vec!["/tmp/a".to_string(), "/tmp/b".to_string()],
+            Some(" LOCAL ".to_string()),
+        );
+        assert_eq!(
+            initial_request_context_line(&explicit_local_batch_request, &wide_layout, None),
+            "batch: 2 included dirs"
+        );
         assert_eq!(
             initial_request_context_line(&request, &narrow_layout, None),
             "cwd: .../swimmers"

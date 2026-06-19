@@ -154,6 +154,22 @@ const REMOTE_OBSERVER_TOKEN_ENV: &str = "SWIMMERS_REMOTE_SMOKE_OBSERVER_TOKEN";
 const REMOTE_OPERATOR_TOKEN: &str = "operator-token-sensitive-remote-smoke";
 const REMOTE_OBSERVER_TOKEN: &str = "observer-token-sensitive-remote-smoke";
 
+#[test]
+fn launch_target_predicates_treat_local_case_insensitively() {
+    for target in ["local", " local ", "LOCAL", "Local"] {
+        assert!(is_local_launch_target(target), "{target:?} should be local");
+        assert!(
+            !is_remote_launch_target(Some(target)),
+            "{target:?} should not be remote"
+        );
+    }
+
+    assert!(!is_remote_launch_target(None));
+    assert!(!is_remote_launch_target(Some("  ")));
+    assert!(!is_local_launch_target("devbox"));
+    assert!(is_remote_launch_target(Some("devbox")));
+}
+
 #[derive(Debug, Clone)]
 struct RemoteSmokeRequest {
     method: &'static str,
