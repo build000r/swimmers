@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 
 import {
+  backendHealthWarningText,
   runSessionRefresh,
   sessionRefreshErrorPlan,
   sessionRefreshRequestPlan,
@@ -91,6 +92,28 @@ test("sessionRefreshSuccessStatusPlan and sessionRefreshErrorPlan preserve statu
     connection: { label: "backend unavailable", muted: true },
     mode: { label: "offline", muted: true },
   });
+});
+
+test("backendHealthWarningText preserves dependency degradation detail", () => {
+  assert.equal(backendHealthWarningText({
+    status: "healthy",
+    persistence: { available: true, ok: true },
+    thought_bridge: { status: "healthy" },
+    dependencies: {
+      tmux_capture: { status: "unavailable", last_error: "tmux capture failed" },
+      native_scripts: { status: "degraded", last_error: "script root missing" },
+      remote_targets: { status: "not_configured", last_error: "ignored" },
+    },
+  }), "tmux capture unavailable: tmux capture failed  native scripts degraded: script root missing");
+
+  assert.equal(backendHealthWarningText({
+    status: "healthy",
+    persistence: { available: true, ok: true },
+    thought_bridge: { status: "healthy" },
+    dependencies: {
+      remote_targets: { status: "degraded", last_error: "REMOTE_SESSION_LIST_FAILED" },
+    },
+  }), "remote targets degraded: REMOTE_SESSION_LIST_FAILED");
 });
 
 test("runSessionRefresh preserves successful refresh ordering and status side effects", async () => {

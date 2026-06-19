@@ -72,6 +72,32 @@ export function conciseHealthDetail(value) {
   return text.length > 64 ? `${text.slice(0, 61)}...` : text;
 }
 
+const DEPENDENCY_WARNING_FIELDS = [
+  ["tmux_capture", "tmux capture"],
+  ["native_scripts", "native scripts"],
+  ["remote_targets", "remote targets"],
+];
+
+function dependencyWarningText(dependencies) {
+  if (!dependencies || typeof dependencies !== "object") {
+    return "";
+  }
+  const parts = [];
+  for (const [field, label] of DEPENDENCY_WARNING_FIELDS) {
+    const snapshot = dependencies[field];
+    if (!snapshot || typeof snapshot !== "object") {
+      continue;
+    }
+    const status = String(snapshot.status || "").toLowerCase();
+    if (status !== "degraded" && status !== "unavailable") {
+      continue;
+    }
+    const detail = conciseHealthDetail(snapshot.last_error);
+    parts.push(`${label} ${status}${detail ? `: ${detail}` : ""}`);
+  }
+  return parts.join("  ");
+}
+
 export function backendHealthWarningText(health) {
   if (!health || typeof health !== "object") {
     return "";
@@ -98,13 +124,7 @@ export function backendHealthWarningText(health) {
   if (status && status !== "healthy") {
     return `thought bridge ${status}`;
   }
-  const remoteTargets = health.dependencies?.remote_targets || {};
-  const remoteStatus = String(remoteTargets.status || "").toLowerCase();
-  if (remoteStatus === "degraded" || remoteStatus === "unavailable") {
-    const detail = conciseHealthDetail(remoteTargets.last_error);
-    return `remote targets ${remoteStatus}${detail ? `: ${detail}` : ""}`;
-  }
-  return "";
+  return dependencyWarningText(health.dependencies);
 }
 
 export async function runSessionRefresh(runtime) {

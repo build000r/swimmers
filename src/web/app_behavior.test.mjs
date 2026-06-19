@@ -908,6 +908,27 @@ test("terminal status strip renders remote target degradation", () => {
   assert.ok(web.el.terminalStatusStrip.textContent.includes("remote targets degraded"));
 });
 
+test("terminal status strip renders native script dependency degradation", () => {
+  resetWebState();
+  web.applyBackendHealth({
+    status: "healthy",
+    thought_bridge: { status: "healthy" },
+    persistence: { available: true, ok: true },
+    dependencies: {
+      native_scripts: {
+        status: "unavailable",
+        last_error: "script root missing",
+      },
+    },
+  });
+
+  assert.equal(
+    web.backendHealthWarningText(web.state.backendHealth),
+    "native scripts unavailable: script root missing",
+  );
+  assert.ok(web.el.terminalStatusStrip.textContent.includes("native scripts unavailable"));
+});
+
 test("terminal text fallback refreshes from live terminal frames", () => {
   resetWebState();
   web.state.selectedSessionId = "sess_0";
