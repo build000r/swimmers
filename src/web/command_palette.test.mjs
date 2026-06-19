@@ -76,6 +76,8 @@ test("command palette scoring and filtering preserve search ordering and limits"
   assert.equal(unqueried.length, 18);
   assert.equal(unqueried[0].label, "Alpha");
   assert.equal(unqueried[1].label, "Beta");
+  assert.deepEqual(filterCommandPaletteItems(items, "", 0), []);
+  assert.deepEqual(filterCommandPaletteItems(items, "", -1), []);
 });
 
 test("command palette filtering matches full-sort ranking for bounded result sets", () => {

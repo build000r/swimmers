@@ -102,8 +102,11 @@ function insertBoundedCommandPaletteItem(ranked, item, limit) {
 export function filterCommandPaletteItems(items = [], query = "", limit = 18) {
   const normalizedQuery = String(query || "").trim().toLowerCase();
   const source = Array.isArray(items) ? items : [];
-  if (!Number.isInteger(limit) || limit <= 0) {
+  if (!Number.isInteger(limit)) {
     return sortedCommandPaletteItems(source, normalizedQuery).slice(0, limit);
+  }
+  if (limit <= 0) {
+    return [];
   }
   const ranked = [];
   for (const item of source) {
