@@ -162,6 +162,7 @@ async function applySessionRefreshSelection(publishedResponse, runtime) {
 }
 
 async function runSessionRefreshSuccessSideEffects(runtime) {
+  runtime.reconcileFleetFilterForSessions?.();
   await runtime.setupHudSurface();
   runtime.renderHudSurface();
   runtime.syncTerminalTools();

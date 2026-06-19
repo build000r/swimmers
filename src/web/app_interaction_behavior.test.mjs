@@ -453,6 +453,29 @@ test("surface fleet lens actions persist active filter and grouping mode", async
   assert.equal(storage.get("swimmers.web.sessionGroupMode"), "project");
 });
 
+test("fleet filter reconciler clears persisted filters for unavailable targets", () => {
+  resetWebState();
+  web.state.fleetFilter = { kind: "target", key: "missing-devbox" };
+  storage.set("swimmers.web.fleet.filter", JSON.stringify(web.state.fleetFilter));
+  web.state.sessions = [rawSession({
+    session_id: "local",
+    environment: {
+      scope: "local",
+      target_id: "local",
+      target_label: "Local machine",
+      target_kind: "local",
+      display_host: "local",
+      canonical_cwd: "/tmp/swimmers",
+    },
+  })];
+
+  web.reconcileFleetFilterForSessions();
+
+  assert.deepEqual(web.state.fleetFilter, { kind: "", key: "" });
+  assert.equal(storage.has("swimmers.web.fleet.filter"), false);
+  assert.equal(web.state.sessions.length, 1);
+});
+
 test("command palette event handlers preserve navigation and result dispatch", () => {
   resetWebState();
   web.state.activeSheet = "palette";

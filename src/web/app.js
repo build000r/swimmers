@@ -96,7 +96,9 @@ import {
   renderTranscriptBlocks,
 } from "./workbench_render.js";
 import {
+  availableFleetFilter,
   buildSurfaceModel as buildSurfaceModelFromState,
+  buildFleetLensSummary,
   formatTime,
   summarizeThought,
   surfaceSession as buildSurfaceSession,
@@ -874,6 +876,7 @@ const sessionRefreshRuntime = {
   setModeStatus,
   resetAgentContextForSession,
   resetWorkbenchWidgetsForSession,
+  reconcileFleetFilterForSessions,
 };
 
 const mermaidArtifactController = createMermaidArtifactController({
@@ -893,6 +896,30 @@ const mermaidArtifactController = createMermaidArtifactController({
 
 function currentSession() {
   return state.sessions.find((session) => session.session_id === state.selectedSessionId) ?? null;
+}
+
+function fleetFilterEquals(left = {}, right = {}) {
+  return String(left.kind || "") === String(right.kind || "") &&
+    String(left.key || "") === String(right.key || "");
+}
+
+function reconcileFleetFilterForSessions() {
+  const surfaceSessions = state.sessions.map((session) => buildSurfaceSession(session, {
+    operatorPressure: operatorPressureSnapshot(session.session_id),
+    sessionBurnt: trogdorSessionBurnt,
+    dismissedClawgs: state.trogdorDismissedClawgs,
+    readProgress: state.trogdorReadProgress,
+  }));
+  const fleetLens = buildFleetLensSummary(surfaceSessions);
+  if (fleetLens.total_sessions <= 0) {
+    return;
+  }
+  const next = availableFleetFilter(fleetLens, state.fleetFilter);
+  if (fleetFilterEquals(state.fleetFilter, next)) {
+    return;
+  }
+  state.fleetFilter = next;
+  persistFleetFilter();
 }
 
 function sessionNeedsAttention(session) {
@@ -2194,6 +2221,7 @@ export const __swimmersWebTest = {
   sessionSocketAuthMessage,
   terminalPayloadFromSocketBytes,
   sessionRefreshDelayMs,
+  refreshSessions,
   sessionEventStreamOpen,
   feedTerminalBytes,
   flushPendingTerminalBytes,
@@ -2234,6 +2262,7 @@ export const __swimmersWebTest = {
   runCommandPaletteItem,
   handleSurfaceAction,
   rememberSendHistory,
+  reconcileFleetFilterForSessions,
   syncTerminalAccessibilityMirror,
   syncTerminalStatusStrip,
   backendHealthWarningText,
