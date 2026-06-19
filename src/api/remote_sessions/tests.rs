@@ -1395,6 +1395,52 @@ fn target_points_at_current_server_matches_wildcard_loopback_aliases() {
 }
 
 #[test]
+fn target_points_at_current_server_matches_wildcard_local_interface_ip() {
+    let mut config = Config::default();
+    config.bind = "0.0.0.0".to_string();
+    config.port = 3210;
+    let local_ip = std::net::IpAddr::V4(std::net::Ipv4Addr::new(100, 86, 253, 9));
+    let mut target = target();
+    target.base_url = Some("http://100.86.253.9:3210".to_string());
+
+    assert!(target_points_at_current_server_with_local_ips(
+        &target,
+        &config,
+        &[local_ip]
+    ));
+
+    target.base_url = Some("http://100.86.253.10:3210".to_string());
+    assert!(!target_points_at_current_server_with_local_ips(
+        &target,
+        &config,
+        &[local_ip]
+    ));
+
+    target.base_url = Some("http://100.86.253.9:3211".to_string());
+    assert!(!target_points_at_current_server_with_local_ips(
+        &target,
+        &config,
+        &[local_ip]
+    ));
+}
+
+#[test]
+fn target_points_at_current_server_matches_wildcard_local_ipv6_interface() {
+    let mut config = Config::default();
+    config.bind = "::".to_string();
+    config.port = 3210;
+    let local_ip = std::net::IpAddr::V6("fd7a:115c:a1e0::1".parse().expect("test IPv6 address"));
+    let mut target = target();
+    target.base_url = Some("http://[fd7a:115c:a1e0::1]:3210".to_string());
+
+    assert!(target_points_at_current_server_with_local_ips(
+        &target,
+        &config,
+        &[local_ip]
+    ));
+}
+
+#[test]
 fn remote_polling_test_gate_requires_explicit_enablement() {
     let _guard = crate::test_support::ENV_LOCK
         .lock()

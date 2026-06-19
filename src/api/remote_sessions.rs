@@ -1616,10 +1616,19 @@ fn is_swimmers_api_target(target: &LaunchTargetSummary) -> bool {
 }
 
 fn target_points_at_current_server(target: &LaunchTargetSummary, config: &Config) -> bool {
+    let local_ips = local_interface_ip_addresses();
+    target_points_at_current_server_with_local_ips(target, config, &local_ips)
+}
+
+fn target_points_at_current_server_with_local_ips(
+    target: &LaunchTargetSummary,
+    config: &Config,
+    local_ips: &[IpAddr],
+) -> bool {
     let Some((host, url_port)) = current_server_candidate_host_and_port(target) else {
         return false;
     };
-    url_port == config.port && host_matches_current_server(&host, &config.bind)
+    url_port == config.port && host_matches_current_server(&host, &config.bind, local_ips)
 }
 
 fn current_server_candidate_host_and_port(target: &LaunchTargetSummary) -> Option<(String, u16)> {
@@ -1629,13 +1638,14 @@ fn current_server_candidate_host_and_port(target: &LaunchTargetSummary) -> Optio
     Some((host, url.port_or_known_default().unwrap_or(80)))
 }
 
-fn host_matches_current_server(host: &str, bind: &str) -> bool {
+fn host_matches_current_server(host: &str, bind: &str, local_ips: &[IpAddr]) -> bool {
     let bind_host = crate::cli::bind_host(bind);
     let loopback_url_host = is_loopback_url_host(host);
     [
         host.eq_ignore_ascii_case(bind_host),
         crate::cli::is_loopback_bind(bind) && loopback_url_host,
         is_unspecified_bind_host(bind_host) && loopback_url_host,
+        is_unspecified_bind_host(bind_host) && host_is_local_interface_ip(host, local_ips),
     ]
     .contains(&true)
 }
@@ -1660,10 +1670,70 @@ fn unbracketed_url_host(host: &str) -> &str {
         .unwrap_or(host)
 }
 
+fn host_is_local_interface_ip(host: &str, local_ips: &[IpAddr]) -> bool {
+    parse_url_host_ip(host).is_some_and(|ip| local_ips.contains(&ip))
+}
+
+fn parse_url_host_ip(host: &str) -> Option<IpAddr> {
+    unbracketed_url_host(host).parse::<IpAddr>().ok()
+}
+
 fn is_unspecified_bind_host(host: &str) -> bool {
     host.parse::<IpAddr>()
         .map(|ip| ip.is_unspecified())
         .unwrap_or(false)
+}
+
+fn local_interface_ip_addresses() -> Vec<IpAddr> {
+    collect_local_interface_ip_addresses()
+}
+
+#[cfg(unix)]
+fn collect_local_interface_ip_addresses() -> Vec<IpAddr> {
+    let mut ifaddrs: *mut libc::ifaddrs = std::ptr::null_mut();
+    let mut ips = Vec::new();
+
+    // getifaddrs returns a linked list owned by libc until freeifaddrs.
+    unsafe {
+        if libc::getifaddrs(&mut ifaddrs) != 0 {
+            return ips;
+        }
+
+        let mut cursor = ifaddrs;
+        while !cursor.is_null() {
+            let ifaddr = &*cursor;
+            let addr = ifaddr.ifa_addr;
+            if !addr.is_null() {
+                match (*addr).sa_family as libc::c_int {
+                    libc::AF_INET => {
+                        let sockaddr = &*(addr as *const libc::sockaddr_in);
+                        ips.push(IpAddr::V4(std::net::Ipv4Addr::from(
+                            sockaddr.sin_addr.s_addr.to_ne_bytes(),
+                        )));
+                    }
+                    libc::AF_INET6 => {
+                        let sockaddr = &*(addr as *const libc::sockaddr_in6);
+                        ips.push(IpAddr::V6(std::net::Ipv6Addr::from(
+                            sockaddr.sin6_addr.s6_addr,
+                        )));
+                    }
+                    _ => {}
+                }
+            }
+            cursor = ifaddr.ifa_next;
+        }
+
+        libc::freeifaddrs(ifaddrs);
+    }
+
+    ips.sort_unstable();
+    ips.dedup();
+    ips
+}
+
+#[cfg(not(unix))]
+fn collect_local_interface_ip_addresses() -> Vec<IpAddr> {
+    Vec::new()
 }
 
 pub fn map_cwd_for_target(
