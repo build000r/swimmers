@@ -1831,6 +1831,25 @@ fn remote_dir_inventory_path_maps_local_paths_and_defaults_to_first_remote_prefi
 }
 
 #[test]
+fn remote_dir_inventory_target_prefers_cwd_scoped_duplicate_id() {
+    let mut global = target();
+    global.id = "devbox".to_string();
+    global.label = "Global Devbox".to_string();
+    global.base_url = Some("http://global.example:3210".to_string());
+
+    let mut cwd_scoped = target();
+    cwd_scoped.id = "devbox".to_string();
+    cwd_scoped.label = "Cwd Scoped Devbox".to_string();
+    cwd_scoped.base_url = Some("http://scoped.example:3210".to_string());
+
+    let selected = choose_dir_inventory_target("devbox", Some(cwd_scoped.clone()), Some(global))
+        .expect("target selected");
+
+    assert_eq!(selected.label, "Cwd Scoped Devbox");
+    assert_eq!(selected.base_url, cwd_scoped.base_url);
+}
+
+#[test]
 fn remote_dir_response_maps_remote_paths_back_to_local_cockpit() {
     let target = target();
     let response = DirListResponse {

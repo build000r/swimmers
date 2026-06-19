@@ -1241,8 +1241,8 @@ pub async fn list_remote_dirs(
     managed_only: bool,
     group: Option<&str>,
 ) -> Result<DirListResponse, RemoteSessionError> {
-    let target = resolve_dir_inventory_target(target_id)?;
     let local_path = path.map(str::trim).filter(|path| !path.is_empty());
+    let target = resolve_dir_inventory_target(target_id, local_path)?;
     let remote_path = remote_dir_inventory_path(&target, local_path)?;
     let managed = managed_only.to_string();
     let mut query = vec![
@@ -1260,6 +1260,7 @@ pub async fn list_remote_dirs(
 
 fn resolve_dir_inventory_target(
     target_id: &str,
+    local_path: Option<&str>,
 ) -> Result<LaunchTargetSummary, RemoteSessionError> {
     let target_id = target_id.trim();
     if target_id.is_empty() || target_id == "local" {
@@ -1276,15 +1277,28 @@ fn resolve_dir_inventory_target(
             "no skillbox-config overlay is available for remote directory inventory",
         ));
     };
-    let target = overlay.launch_target_by_id(target_id).ok_or_else(|| {
+    let cwd_scoped = local_path.and_then(|path| overlay.launch_target_for_cwd(path, target_id));
+    let target = choose_dir_inventory_target(
+        target_id,
+        cwd_scoped,
+        overlay.launch_target_by_id(target_id),
+    )?;
+    ensure_swimmers_api_target(&target)?;
+    Ok(target)
+}
+
+fn choose_dir_inventory_target(
+    target_id: &str,
+    cwd_scoped: Option<LaunchTargetSummary>,
+    global: Option<LaunchTargetSummary>,
+) -> Result<LaunchTargetSummary, RemoteSessionError> {
+    cwd_scoped.or(global).ok_or_else(|| {
         RemoteSessionError::new(
             StatusCode::BAD_REQUEST,
             "LAUNCH_TARGET_UNKNOWN",
             format!("launch target '{target_id}' is not configured"),
         )
-    })?;
-    ensure_swimmers_api_target(&target)?;
-    Ok(target)
+    })
 }
 
 fn remote_dir_inventory_path(
