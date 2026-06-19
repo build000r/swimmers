@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use axum::Router;
+use axum::{middleware, Router};
 use tokio::sync::RwLock;
 use tokio::task::JoinHandle;
 
@@ -20,7 +20,7 @@ use crate::thought::health::BridgeHealthState;
 use crate::thought::loop_runner::ThoughtLoopRunner;
 use crate::thought::protocol::SyncRequestSequence;
 use crate::thought::runtime_config::{DaemonDefaults, ThoughtConfig};
-use crate::{api, web};
+use crate::{api, auth, web};
 
 const STARTUP_PHASE_WARN_THRESHOLD: Duration = Duration::from_secs(2);
 const SHUTDOWN_PERSIST_TIMEOUT: Duration = Duration::from_secs(5);
@@ -377,11 +377,22 @@ fn build_app_router(
     state: Arc<AppState>,
     prom_handle: metrics_exporter_prometheus::PrometheusHandle,
 ) -> Router {
+    let metrics_router = authenticated_metrics_router(config.clone(), prom_handle);
+
     Router::new()
         .merge(web::routes())
         .merge(api::api_router(config))
-        .merge(metrics::endpoint::metrics_router(prom_handle))
+        .merge(metrics_router)
         .with_state(state)
+}
+
+fn authenticated_metrics_router(
+    config: Arc<Config>,
+    prom_handle: metrics_exporter_prometheus::PrometheusHandle,
+) -> Router<Arc<AppState>> {
+    metrics::endpoint::metrics_router(prom_handle).layer(middleware::from_fn(
+        move |request, next| auth::auth_middleware(config.clone(), request, next),
+    ))
 }
 
 pub fn listener_addr(bind: &str, port: u16) -> String {
@@ -763,11 +774,14 @@ where
 mod tests {
     use super::*;
     use std::future::pending;
+    use std::net::SocketAddr;
     use std::sync::atomic::{AtomicBool, Ordering};
 
     use chrono::Utc;
+    use metrics_exporter_prometheus::PrometheusBuilder;
     use tokio::sync::mpsc;
 
+    use crate::config::AuthMode;
     use crate::session::actor::{ActorHandle, SessionCommand};
     use crate::thought::health::BridgeTiming;
     use crate::thought::loop_runner::SessionProvider;
@@ -783,6 +797,45 @@ mod tests {
         fn drop(&mut self) {
             self.0.store(true, Ordering::SeqCst);
         }
+    }
+
+    fn metrics_auth_test_config(auth_mode: AuthMode) -> Arc<Config> {
+        Arc::new(Config {
+            auth_mode,
+            auth_token: Some("operator-token".to_string()),
+            observer_token: Some("observer-token".to_string()),
+            ..Config::default()
+        })
+    }
+
+    async fn spawn_metrics_auth_test_server(
+        config: Arc<Config>,
+    ) -> (String, tokio::task::JoinHandle<()>) {
+        let state = init_app_state_skeleton(config.clone());
+        let prom_handle = PrometheusBuilder::new().build_recorder().handle();
+        let app = build_app_router(config, state, prom_handle);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind metrics auth test server");
+        let addr = listener.local_addr().expect("metrics auth test addr");
+        let handle = tokio::spawn(async move {
+            axum::serve(
+                listener,
+                app.into_make_service_with_connect_info::<SocketAddr>(),
+            )
+            .await
+            .expect("serve metrics auth test server");
+        });
+
+        (format!("http://{addr}"), handle)
+    }
+
+    async fn get_metrics(base_url: &str, bearer_token: Option<&str>) -> reqwest::Response {
+        let mut request = reqwest::Client::new().get(format!("{base_url}/metrics"));
+        if let Some(token) = bearer_token {
+            request = request.bearer_auth(token);
+        }
+        request.send().await.expect("metrics response")
     }
 
     #[test]
@@ -841,6 +894,42 @@ mod tests {
             data_dir_from_platform_base(None),
             PathBuf::from(FALLBACK_DATA_DIR)
         );
+    }
+
+    #[tokio::test]
+    async fn metrics_endpoint_enforces_configured_auth() {
+        let (base_url, handle) =
+            spawn_metrics_auth_test_server(metrics_auth_test_config(AuthMode::Token)).await;
+
+        let unauthenticated = get_metrics(&base_url, None).await;
+        assert_eq!(unauthenticated.status(), reqwest::StatusCode::UNAUTHORIZED);
+
+        let invalid = get_metrics(&base_url, Some("wrong-token")).await;
+        assert_eq!(invalid.status(), reqwest::StatusCode::UNAUTHORIZED);
+
+        let operator = get_metrics(&base_url, Some("operator-token")).await;
+        assert_eq!(operator.status(), reqwest::StatusCode::OK);
+        assert!(
+            operator
+                .headers()
+                .get(reqwest::header::CONTENT_TYPE)
+                .and_then(|value| value.to_str().ok())
+                .is_some_and(|value| value.starts_with("text/plain")),
+            "operator metrics response should be Prometheus text"
+        );
+
+        let observer = get_metrics(&base_url, Some("observer-token")).await;
+        assert_eq!(observer.status(), reqwest::StatusCode::OK);
+
+        handle.abort();
+
+        for auth_mode in [AuthMode::LocalTrust, AuthMode::TailnetTrust] {
+            let (base_url, handle) =
+                spawn_metrics_auth_test_server(metrics_auth_test_config(auth_mode)).await;
+            let response = get_metrics(&base_url, None).await;
+            assert_eq!(response.status(), reqwest::StatusCode::OK);
+            handle.abort();
+        }
     }
 
     #[test]
