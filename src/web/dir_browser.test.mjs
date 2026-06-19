@@ -378,6 +378,20 @@ test("launch target preview maps longest prefix and blocks unmapped remote batch
   );
 });
 
+test("launch target preview keeps first equal-specificity mapping", () => {
+  const target = {
+    id: "devbox",
+    label: "Devbox",
+    kind: "swimmers_api",
+    path_mappings: [
+      { local_prefix: "/Users/tester/repos", remote_prefix: "/srv/primary" },
+      { local_prefix: "/Users/tester/./repos", remote_prefix: "/srv/duplicate" },
+    ],
+  };
+
+  assert.equal(mapPathWithLaunchTarget("/Users/tester/repos/swimmers", target), "/srv/primary/swimmers");
+});
+
 test("directory browser controller helpers preserve retry gate and batch failure copy", () => {
   assert.equal(
     shouldRetryDirListingFromBase(

@@ -490,6 +490,24 @@ fn map_path_respects_component_boundaries() {
 }
 
 #[test]
+fn map_path_keeps_first_equal_specificity_mapping() {
+    let mappings = vec![
+        LaunchPathMapping {
+            local_prefix: "/workspace/repos".to_string(),
+            remote_prefix: "/primary".to_string(),
+        },
+        LaunchPathMapping {
+            local_prefix: "/workspace/./repos".to_string(),
+            remote_prefix: "/duplicate".to_string(),
+        },
+    ];
+
+    let mapped = map_path_with_mappings("/workspace/repos/swimmers", &mappings).expect("mapped");
+
+    assert_eq!(mapped, "/primary/swimmers");
+}
+
+#[test]
 fn map_path_ignores_empty_mapping_prefixes() {
     let mappings = vec![
         LaunchPathMapping {

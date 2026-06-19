@@ -1591,7 +1591,15 @@ pub fn map_path_with_mappings(cwd: &str, mappings: &[LaunchPathMapping]) -> Opti
             }
             Some((score, remote.to_string_lossy().into_owned()))
         })
-        .max_by_key(|(score, _)| *score)
+        .fold(
+            None,
+            |best: Option<(usize, String)>, candidate| match best {
+                Some((best_score, best_path)) if best_score >= candidate.0 => {
+                    Some((best_score, best_path))
+                }
+                _ => Some(candidate),
+            },
+        )
         .map(|(_, path)| path)
 }
 
