@@ -509,6 +509,9 @@ export function buildSurfaceModel({
   const surfaceSessions = allSurfaceSessions.filter((session) => sessionMatchesFleetFilter(session, fleetFilter));
   const filteredFleetLens = buildFleetLensSummary(surfaceSessions);
   const attentionInbox = buildAttentionInbox(surfaceSessions);
+  const selectedSessionVisible = selectedSession
+    ? surfaceSessions.some((session) => session.sessionId === selectedSession.session_id)
+    : false;
   const terminalReady = Boolean(state.terminal && state.ws && state.ws.readyState === websocketOpen);
   return {
     cols: state.currentCols,
@@ -552,7 +555,7 @@ export function buildSurfaceModel({
     selectedSessionId: state.selectedSessionId,
     publishedSessionId: normalizeSessionId(state.publishedSelection?.session_id),
     publishedAtLabel: formatTime(state.publishedSelection?.published_at),
-    currentSession: selectedSession
+    currentSession: selectedSessionVisible
       ? surfaceSession(selectedSession, surfaceOptions(selectedSession, { detail: true }))
       : null,
   };

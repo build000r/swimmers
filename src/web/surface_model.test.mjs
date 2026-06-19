@@ -394,6 +394,51 @@ test("buildSurfaceModel applies fleet lens filters without losing bucket counts"
   assert.equal(model.fleetChips[1].active, true);
 });
 
+test("buildSurfaceModel suppresses selected details outside the active fleet filter", () => {
+  const local = rawSession({
+    session_id: "local",
+    tmux_name: "local",
+    cwd: "/Users/b/repos/opensource/swimmers",
+    environment: {
+      scope: "local",
+      target_id: "local",
+      target_label: "Local machine",
+      target_kind: "local",
+      display_host: "local",
+      canonical_cwd: "/Users/b/repos/opensource/swimmers",
+    },
+  });
+  const remote = rawSession({
+    session_id: "remote",
+    tmux_name: "remote",
+    cwd: "/srv/skillbox/repos/swimmers",
+    environment: {
+      scope: "remote",
+      target_id: "skillbox",
+      target_label: "Skillbox devbox",
+      target_kind: "swimmers_api",
+      display_host: "Skillbox devbox",
+      canonical_cwd: "/Users/b/repos/opensource/swimmers",
+    },
+  });
+
+  const model = buildSurfaceModel({
+    state: baseState({
+      sessions: [local, remote],
+      selectedSessionId: "local",
+      fleetFilter: { kind: "target", key: "skillbox" },
+    }),
+    boot: { focus_layout: false, franken_term_available: true },
+    currentSession: () => local,
+    websocketOpen: 7,
+  });
+
+  assert.deepEqual(model.fleetFilter, { kind: "target", key: "skillbox" });
+  assert.deepEqual(model.sessions.map((session) => session.sessionId), ["remote"]);
+  assert.equal(model.selectedSessionId, "local");
+  assert.equal(model.currentSession, null);
+});
+
 test("buildSurfaceModel drops saved fleet filters when the bucket is unavailable", () => {
   const local = rawSession({
     session_id: "local",

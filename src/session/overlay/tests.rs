@@ -58,6 +58,25 @@ fn implicit_launch_default_uses_longest_matching_path_mapping() {
 }
 
 #[test]
+fn implicit_launch_default_keeps_first_equal_specificity_mapping() {
+    let config = OverlayLaunchConfig {
+        default_target: "local".to_string(),
+        default_target_explicit: false,
+        targets: vec![
+            LaunchTargetSummary::local(),
+            mapped_launch_target("primary", "/tmp/repos", "/srv/primary"),
+            mapped_launch_target("duplicate", "/tmp/./repos", "/srv/duplicate"),
+        ],
+        group_defaults: BTreeMap::new(),
+    };
+
+    assert_eq!(
+        config.default_for_group_or_path(None, Path::new("/tmp/repos/swimmers")),
+        "primary"
+    );
+}
+
+#[test]
 fn explicit_launch_default_wins_over_path_mapping() {
     let config = OverlayLaunchConfig {
         default_target: "local".to_string(),

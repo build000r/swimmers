@@ -1018,7 +1018,15 @@ fn best_mapped_launch_target(path: &Path, targets: &[LaunchTargetSummary]) -> Op
                 launch_mapping_score(path, mapping).map(|score| (score, target.id.clone()))
             })
         })
-        .max_by_key(|(score, _)| *score)
+        .fold(
+            None,
+            |best: Option<(usize, String)>, candidate| match best {
+                Some((best_score, best_id)) if best_score >= candidate.0 => {
+                    Some((best_score, best_id))
+                }
+                _ => Some(candidate),
+            },
+        )
         .map(|(_, id)| id)
 }
 
