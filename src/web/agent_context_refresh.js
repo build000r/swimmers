@@ -54,8 +54,12 @@ export async function runAgentContextRefresh(options = {}, runtime) {
     return;
   }
 
+  const sessionChanged = runtime.state.agentContextSessionId !== startPlan.sessionId;
   runtime.state.agentContextRequestSeq = startPlan.requestSeq;
   runtime.state.agentContextSessionId = startPlan.sessionId;
+  if (sessionChanged) {
+    runtime.state.agentContextPayload = null;
+  }
   runtime.state.agentContextError = "";
   runtime.state.agentContextLoading = startPlan.loading;
   runtime.renderTerminalWorkbench();

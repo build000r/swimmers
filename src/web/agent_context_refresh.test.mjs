@@ -192,6 +192,46 @@ test("runAgentContextRefresh preserves successful payload and loading transition
   ]);
 });
 
+test("runAgentContextRefresh clears previous-session payload before loading render", async () => {
+  const renderStates = [];
+  const { runtime } = buildRuntime({
+    session: { session_id: "sess_1" },
+    payload: { available: true, session_id: "sess_1", user_task: "new task" },
+    state: {
+      selectedSessionId: "sess_1",
+      agentContextSessionId: "sess_0",
+      agentContextPayload: { available: true, session_id: "sess_0", user_task: "old task" },
+      agentContextLastLoadedAt: 111,
+    },
+    onRender: (state) => renderStates.push({
+      sessionId: state.agentContextSessionId,
+      loading: state.agentContextLoading,
+      payload: state.agentContextPayload
+        ? {
+            session_id: state.agentContextPayload.session_id,
+            user_task: state.agentContextPayload.user_task,
+          }
+        : null,
+    }),
+  });
+
+  await runAgentContextRefresh({ force: true }, runtime);
+
+  assert.deepEqual(renderStates[0], {
+    sessionId: "sess_1",
+    loading: true,
+    payload: null,
+  });
+  assert.deepEqual(renderStates[1], {
+    sessionId: "sess_1",
+    loading: false,
+    payload: {
+      session_id: "sess_1",
+      user_task: "new task",
+    },
+  });
+});
+
 test("runAgentContextRefresh preserves throttle no-op behavior", async () => {
   const payload = { available: true, session_id: "sess_0" };
   const { calls, runtime } = buildRuntime({
@@ -214,6 +254,7 @@ test("runAgentContextRefresh preserves throttle no-op behavior", async () => {
 test("runAgentContextRefresh preserves stale selected-session guard", async () => {
   const { calls, runtime } = buildRuntime({
     state: {
+      agentContextSessionId: "sess_0",
       agentContextPayload: { available: true, old: true },
       agentContextLastLoadedAt: 111,
     },
