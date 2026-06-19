@@ -1464,7 +1464,10 @@ fn app_js_retries_saved_out_of_base_dir_from_default_base() {
     assert!(dir_browser_controller.contains("retriedFromBase: true"));
     assert!(dir_browser_controller.contains("preferredLaunchTarget: options.preferredLaunchTarget"));
     assert!(dir_browser_controller.contains("outside the allowed base directory"));
-    assert!(input_support.contains("rawStoredDirPath.trim() === \"/\" ? \"\" : rawStoredDirPath"));
+    assert!(input_support.contains("const trimmedStoredDirPath = rawStoredDirPath.trim();"));
+    assert!(input_support.contains(
+        "const storedDirPath = trimmedStoredDirPath === \"/\" ? \"\" : trimmedStoredDirPath;"
+    ));
 }
 
 #[test]

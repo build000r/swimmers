@@ -798,6 +798,26 @@ test("buildSurfaceModel applies saved current-repo preset across local and remot
       sessions: [local, remote, other],
       selectedSessionId: "local",
       fleetPresetId: "current-repo",
+      environments: [
+        {
+          id: "local",
+          label: "Local machine",
+          kind: "local",
+          display_host: "local",
+          backend_mode: "local",
+          status: "Healthy",
+          capabilities: { observe_sessions: true, launch_session: true, send_input: true },
+        },
+        {
+          id: "portfolio-devbox",
+          label: "Portfolio Devbox",
+          kind: "swimmers_api",
+          display_host: "Portfolio Devbox",
+          backend_mode: "remote_swimmers_api",
+          status: "Healthy",
+          capabilities: { observe_sessions: true, launch_session: true, send_input: true },
+        },
+      ],
     }),
     boot: { focus_layout: false, franken_term_available: true },
     currentSession: () => local,
@@ -806,6 +826,13 @@ test("buildSurfaceModel applies saved current-repo preset across local and remot
 
   assert.equal(model.fleetPresetId, "current-repo");
   assert.deepEqual(model.sessions.map((session) => session.sessionId), ["local", "remote"]);
+  assert.deepEqual(
+    new Map(model.environmentMatrix.map((row) => [row.id, row.sessionCount])),
+    new Map([
+      ["local", 1],
+      ["portfolio-devbox", 1],
+    ]),
+  );
   assert.equal(model.fleetPresetChips.find((chip) => chip.presetId === "current-repo")?.active, true);
 });
 
@@ -862,6 +889,26 @@ test("buildSurfaceModel exposes custom overlay fleet presets", () => {
           canonical_cwd: "/Users/tester/repos/opensource/swimmers",
         },
       })],
+      environments: [
+        {
+          id: "portfolio-devbox",
+          label: "Portfolio Devbox",
+          kind: "swimmers_api",
+          display_host: "Portfolio Devbox",
+          backend_mode: "remote_swimmers_api",
+          status: "Healthy",
+          capabilities: { observe_sessions: true, launch_session: true, send_input: true },
+        },
+        {
+          id: "other-devbox",
+          label: "Other Devbox",
+          kind: "swimmers_api",
+          display_host: "Other Devbox",
+          backend_mode: "remote_swimmers_api",
+          status: "Healthy",
+          capabilities: { observe_sessions: true, launch_session: true, send_input: true },
+        },
+      ],
     }),
     boot: { focus_layout: false, franken_term_available: true },
     websocketOpen: 7,
@@ -869,10 +916,87 @@ test("buildSurfaceModel exposes custom overlay fleet presets", () => {
 
   assert.equal(model.fleetPresetId, "swimmers-on-devbox");
   assert.deepEqual(model.sessions.map((session) => session.sessionId), ["remote"]);
+  assert.deepEqual(model.environmentMatrix.map((row) => row.id), ["portfolio-devbox"]);
+  assert.equal(model.environmentMatrix[0].sessionCount, 1);
   assert.equal(
     model.fleetPresetChips.find((chip) => chip.presetId === "swimmers-on-devbox")?.label,
     "Swimmers on devbox",
   );
+});
+
+test("buildSurfaceModel applies capability fleet presets to sessions and environments", () => {
+  const remote = rawSession({
+    session_id: "remote",
+    tmux_name: "remote",
+    cwd: "/srv/skillbox/repos/swimmers",
+    environment: {
+      scope: "remote",
+      target_id: "portfolio-devbox",
+      target_label: "Portfolio Devbox",
+      target_kind: "swimmers_api",
+      display_host: "Portfolio Devbox",
+      local_cwd: "/Users/tester/repos/opensource/swimmers",
+      remote_cwd: "/srv/skillbox/repos/swimmers",
+      canonical_cwd: "/Users/tester/repos/opensource/swimmers",
+    },
+  });
+
+  const dirsModel = buildSurfaceModel({
+    state: baseState({
+      sessions: [remote],
+      selectedSessionId: "remote",
+      fleetPresetId: "remote-dirs",
+      fleetPresets: [{
+        id: "remote-dirs",
+        label: "Remote dirs",
+        source: "overlay",
+        matchers: [{ type: "capability", key: "remote_dir_inventory" }],
+      }],
+      environments: [{
+        id: "portfolio-devbox",
+        label: "Portfolio Devbox",
+        kind: "swimmers_api",
+        display_host: "Portfolio Devbox",
+        backend_mode: "remote_swimmers_api",
+        status: "Healthy",
+        capabilities: { remote_dir_inventory: true, health_probe: true },
+      }],
+    }),
+    boot: { focus_layout: false, franken_term_available: true },
+    websocketOpen: 7,
+  });
+
+  assert.deepEqual(dirsModel.sessions.map((session) => session.sessionId), ["remote"]);
+  assert.deepEqual(dirsModel.environmentMatrix.map((row) => row.id), ["portfolio-devbox"]);
+
+  const bootstrapModel = buildSurfaceModel({
+    state: baseState({
+      sessions: [],
+      selectedSessionId: null,
+      fleetPresetId: "bootstrap",
+      fleetPresets: [{
+        id: "bootstrap",
+        label: "Bootstrap",
+        source: "overlay",
+        matchers: [{ type: "capability", key: "bootstrap_hint" }],
+      }],
+      environments: [{
+        id: "skillbox-devbox",
+        label: "Skillbox devbox",
+        kind: "ssh_only",
+        display_host: "Skillbox devbox",
+        backend_mode: "ssh_handoff",
+        status: "NotConfigured",
+        capabilities: { bootstrap_hint: true, ssh_attach_hint: true, advisory_metadata: true },
+      }],
+    }),
+    boot: { focus_layout: false, franken_term_available: true },
+    websocketOpen: 7,
+  });
+
+  assert.deepEqual(bootstrapModel.sessions, []);
+  assert.deepEqual(bootstrapModel.environmentMatrix.map((row) => row.id), ["skillbox-devbox"]);
+  assert.match(bootstrapModel.fleetEmptyMessage, /No sessions match Bootstrap/);
 });
 
 test("buildSurfaceModel builds display-only project groups across local and remote sessions", () => {

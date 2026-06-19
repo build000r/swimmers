@@ -1,10 +1,13 @@
 use super::*;
 use swimmers::color::hsl_to_rgb;
-use swimmers::fleet_lens::{advisory_key, build_fleet_lens_summary, fleet_preset_matches_session};
+use swimmers::fleet_lens::{
+    advisory_key, build_fleet_lens_summary, capability_enabled, fleet_preset_matches_session,
+    session_capability_summary,
+};
 use swimmers::session_labels::{session_canonical_cwd_key, session_cwd_label, session_repo_key};
 use swimmers::types::{
-    ActionCueKind, AdvisoryMetadataSummary, DependencyHealthStatus, EnvironmentSummary,
-    FleetLensBucket, FleetLensBucketKind, SessionEnvironmentScope,
+    ActionCueKind, AdvisoryMetadataSummary, DependencyHealthStatus, EnvironmentCapabilitySummary,
+    EnvironmentSummary, FleetLensBucket, FleetLensBucketKind, SessionEnvironmentScope,
 };
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
@@ -34,6 +37,7 @@ pub(crate) struct ThoughtLogEntry {
     pub(crate) target_key: String,
     pub(crate) target_label: String,
     pub(crate) target_kind: String,
+    pub(crate) capabilities: Option<EnvironmentCapabilitySummary>,
     pub(crate) state_key: String,
     pub(crate) readiness_key: String,
     pub(crate) transport_key: String,
@@ -67,6 +71,7 @@ impl ThoughtLogEntry {
             target_key: thought_filter_target_key(session),
             target_label: session_target_label(session),
             target_kind: session.environment.target_kind.clone(),
+            capabilities: session_capability_summary(session),
             state_key: thought_filter_state_key(session.state).to_string(),
             readiness_key: thought_filter_readiness_key(session).to_string(),
             transport_key: thought_filter_transport_key(session.transport_health).to_string(),
@@ -1027,7 +1032,10 @@ fn thought_entry_matches_preset_matcher(
         FleetLensPresetMatcher::CurrentRepo => true,
         FleetLensPresetMatcher::Readiness { key } => entry.readiness_key == *key,
         FleetLensPresetMatcher::Transport { key } => entry.transport_key == *key,
-        FleetLensPresetMatcher::Capability { .. } => false,
+        FleetLensPresetMatcher::Capability { key } => entry
+            .capabilities
+            .as_ref()
+            .is_some_and(|capabilities| capability_enabled(capabilities, key)),
         FleetLensPresetMatcher::Degraded => {
             entry.is_stale || entry.transport_health != TransportHealth::Healthy
         }

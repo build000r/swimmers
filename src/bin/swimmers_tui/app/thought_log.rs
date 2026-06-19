@@ -1,4 +1,5 @@
 use super::*;
+use swimmers::fleet_lens::session_capability_summary;
 use swimmers::session_labels::{session_canonical_cwd_key, session_cwd_label, session_repo_key};
 
 impl<C: TuiApi> App<C> {
@@ -258,6 +259,7 @@ impl<C: TuiApi> App<C> {
             entry.target_key = thought_filter_target_key(session);
             entry.target_label = session_target_label(session);
             entry.target_kind = session.environment.target_kind.clone();
+            entry.capabilities = session_capability_summary(session);
             entry.state_key = thought_filter_state_key(session.state).to_string();
             entry.readiness_key = thought_filter_readiness_key(session).to_string();
             entry.transport_key =

@@ -331,7 +331,9 @@ fn session_matches_bucket(session: &SessionSummary, kind: FleetLensBucketKind, k
     }
 }
 
-fn session_capability_summary(session: &SessionSummary) -> Option<EnvironmentCapabilitySummary> {
+pub fn session_capability_summary(
+    session: &SessionSummary,
+) -> Option<EnvironmentCapabilitySummary> {
     match session.environment.scope {
         SessionEnvironmentScope::Local => Some(EnvironmentCapabilitySummary::local()),
         SessionEnvironmentScope::Remote => match session.environment.target_kind.as_str() {
@@ -346,7 +348,7 @@ fn session_capability_summary(session: &SessionSummary) -> Option<EnvironmentCap
     }
 }
 
-fn capability_enabled(capabilities: &EnvironmentCapabilitySummary, key: &str) -> bool {
+pub fn capability_enabled(capabilities: &EnvironmentCapabilitySummary, key: &str) -> bool {
     match key.trim().to_ascii_lowercase().as_str() {
         "observe" | "observe_sessions" => capabilities.observe_sessions,
         "launch" | "launch_session" => capabilities.launch_session,

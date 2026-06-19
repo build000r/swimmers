@@ -950,6 +950,82 @@ fn saved_fleet_lens_current_repo_matches_local_and_remote_sessions() {
 }
 
 #[test]
+fn saved_fleet_lens_capability_matches_thought_entries_and_entities() {
+    let api = MockApi::new();
+    let layout = test_layout(240, 32);
+    let mut app = make_app(api);
+    let target = LaunchTargetSummary {
+        id: "skillbox".to_string(),
+        label: "Skillbox devbox".to_string(),
+        kind: "swimmers_api".to_string(),
+        base_url: None,
+        auth_token_env: None,
+        bootstrap_hint: None,
+        path_mappings: Vec::new(),
+    };
+
+    let mapped_id = remote_sessions::namespace_session_id("skillbox", "sess-mapped");
+    let mut mapped = session_summary_with_thought(
+        &mapped_id,
+        "9",
+        "/srv/skillbox/repos/swimmers",
+        "remote dirs are mapped",
+        "2026-03-08T14:00:06Z",
+    );
+    mapped.environment = swimmers::types::SessionEnvironmentSummary::remote(
+        &target,
+        "sess-mapped",
+        "/srv/skillbox/repos/swimmers".to_string(),
+        Some(TEST_REPO_SWIMMERS.to_string()),
+        "remote_swimmers_api",
+    );
+
+    let unmapped_id = remote_sessions::namespace_session_id("skillbox", "sess-unmapped");
+    let mut unmapped = session_summary_with_thought(
+        &unmapped_id,
+        "10",
+        "/srv/skillbox/repos/unknown",
+        "remote dirs are not mapped",
+        "2026-03-08T14:00:07Z",
+    );
+    unmapped.environment = swimmers::types::SessionEnvironmentSummary::remote(
+        &target,
+        "sess-unmapped",
+        "",
+        None,
+        "remote_swimmers_api",
+    );
+
+    app.capture_thought_updates(
+        &[mapped.clone(), unmapped.clone()],
+        layout.thought_entry_capacity(),
+    );
+    app.entities = vec![
+        SessionEntity::new(mapped, layout.overview_field),
+        SessionEntity::new(unmapped, layout.overview_field),
+    ];
+
+    assert!(app.set_thought_filter_preset(FleetLensPreset {
+        id: "remote-dirs".to_string(),
+        label: "Remote dirs".to_string(),
+        source: "overlay".to_string(),
+        matchers: vec![FleetLensPresetMatcher::Capability {
+            key: "remote_dir_inventory".to_string(),
+        }],
+    }));
+
+    assert_eq!(app.active_thought_filter_text(), "filter: lens=Remote dirs");
+    assert_eq!(visible_entity_ids(&app), vec![mapped_id.clone()]);
+    assert_eq!(
+        app.visible_thought_entries(layout.thought_entry_capacity())
+            .into_iter()
+            .map(|entry| entry.session_id.clone())
+            .collect::<Vec<_>>(),
+        vec![mapped_id]
+    );
+}
+
+#[test]
 fn saved_fleet_lens_cycle_applies_builtin_presets() {
     let api = MockApi::new();
     let layout = test_layout(240, 32);

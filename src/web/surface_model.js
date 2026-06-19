@@ -205,20 +205,41 @@ function sessionMatchesPreset(session, preset) {
   return preset.matchers.every((matcher) => sessionMatchesPresetMatcher(session, matcher));
 }
 
+function sessionHasMappedCwd(session) {
+  return Boolean(String(session?.launchCwd || session?.canonicalCwd || session?.fullCwd || "").trim());
+}
+
 function sessionCapabilityEnabled(session, key) {
   const capability = String(key || "").trim().toLowerCase();
   const local = session.targetKey === "local";
   const remoteApi = session.targetKind === "swimmers_api";
+  const remoteReady = remoteApi && session.transportKey === "healthy";
   switch (capability) {
     case "observe":
     case "observe_sessions":
-      return local || (remoteApi && session.transportKey === "healthy");
+      return local || remoteReady;
     case "launch":
     case "launch_session":
-      return local || (remoteApi && session.transportKey === "healthy");
+      return local || remoteReady;
     case "send":
     case "send_input":
-      return local || (remoteApi && session.transportKey === "healthy");
+      return local || remoteReady;
+    case "group":
+    case "group_input":
+      return local || remoteReady;
+    case "dirs":
+    case "remote_dir_inventory":
+      return local || (remoteReady && sessionHasMappedCwd(session));
+    case "native_attach":
+      return local;
+    case "ssh":
+    case "ssh_attach_hint":
+    case "bootstrap":
+    case "bootstrap_hint":
+      return false;
+    case "health":
+    case "health_probe":
+      return local || remoteApi;
     case "external":
     case "advisory":
     case "advisory_metadata":
@@ -473,7 +494,7 @@ export function buildEnvironmentMatrix(environments, sessions) {
   const stats = sessionStatsByTarget(sessions);
   return (Array.isArray(environments) ? environments : [])
     .map((environment) => {
-      const id = firstNonEmpty(environment?.id, environment?.label, "local") || "local";
+      const id = environmentRowId(environment);
       const kind = String(environment?.kind || "local").trim().toLowerCase() || "local";
       const rowStats = stats.get(id) || { sessionCount: 0, attentionCount: 0, degradedCount: 0 };
       const readiness = environmentReadiness(environment, rowStats);
@@ -507,6 +528,10 @@ export function buildEnvironmentMatrix(environments, sessions) {
       || left.displayHost.localeCompare(right.displayHost)
       || left.id.localeCompare(right.id)
     ));
+}
+
+function environmentRowId(environment) {
+  return firstNonEmpty(environment?.id, environment?.label, "local") || "local";
 }
 
 function environmentMatchesPresetMatcher(environment, matcher) {
@@ -925,11 +950,15 @@ export function buildSurfaceModel({
     ? allSurfaceSessions.filter((session) => sessionMatchesPreset(session, activePreset))
     : allSurfaceSessions.filter((session) => sessionMatchesFleetFilter(session, fleetFilter));
   const filteredFleetLens = buildFleetLensSummary(surfaceSessions);
-  const allEnvironmentMatrix = buildEnvironmentMatrix(state.environments, allSurfaceSessions);
+  const environmentSessions = activePreset ? surfaceSessions : allSurfaceSessions;
+  const allEnvironmentMatrix = buildEnvironmentMatrix(state.environments, environmentSessions);
   const environmentById = new Map((Array.isArray(state.environments) ? state.environments : [])
-    .map((environment) => [String(environment?.id || "").trim(), environment]));
+    .map((environment) => [environmentRowId(environment), environment]));
+  const presetTargetIds = new Set(surfaceSessions.map((session) => session.targetKey).filter(Boolean));
   const environmentMatrix = activePreset
-    ? allEnvironmentMatrix.filter((row) => environmentMatchesPreset(environmentById.get(row.id), activePreset))
+    ? allEnvironmentMatrix.filter((row) => (
+      presetTargetIds.has(row.id) || environmentMatchesPreset(environmentById.get(row.id), activePreset)
+    ))
     : allEnvironmentMatrix;
   const attentionInbox = buildAttentionInbox(surfaceSessions);
   const selectedSessionVisible = selectedSession
