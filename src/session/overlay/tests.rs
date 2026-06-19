@@ -315,6 +315,35 @@ fn load_client_overlays_returns_empty_when_clients_dir_has_no_overlay_files() {
 }
 
 #[test]
+fn client_overlay_paths_are_sorted_by_client_dir() {
+    let root = PathBuf::from("/tmp/swimmers-overlay-sort");
+    let mut paths = vec![
+        (root.join("zeta"), root.join("zeta").join("overlay.yaml")),
+        (root.join("alpha"), root.join("alpha").join("overlay.yaml")),
+        (
+            root.join("middle"),
+            root.join("middle").join("overlay.yaml"),
+        ),
+    ];
+
+    sort_client_overlay_paths(&mut paths);
+
+    assert_eq!(
+        paths
+            .iter()
+            .map(|(client_dir, _)| {
+                client_dir
+                    .file_name()
+                    .expect("client dir name")
+                    .to_string_lossy()
+                    .into_owned()
+            })
+            .collect::<Vec<_>>(),
+        vec!["alpha", "middle", "zeta"]
+    );
+}
+
+#[test]
 fn parse_agent_launch_injects_local_and_filters_unknown_defaults() {
     let mut group_defaults = BTreeMap::new();
     group_defaults.insert("known".to_string(), "remote".to_string());
@@ -916,6 +945,54 @@ fn list_all_plans_sorts_by_mtime_desc() {
     assert_eq!(plans[0].kind, "released");
     assert_eq!(plans[1].kind, "draft");
     assert!(plans.iter().all(|p| p.client_label == "personal"));
+}
+
+#[test]
+fn list_all_plans_breaks_equal_mtime_ties_deterministically() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let alpha_root = tmp.path().join("alpha").join("plans").join("released");
+    let beta_root = tmp.path().join("beta").join("plans").join("released");
+    std::fs::create_dir_all(alpha_root.join("zeta_plan")).unwrap();
+    std::fs::create_dir_all(beta_root.join("alpha_plan")).unwrap();
+    let alpha_schema = alpha_root.join("zeta_plan").join("schema.mmd");
+    let beta_schema = beta_root.join("alpha_plan").join("schema.mmd");
+    std::fs::write(&alpha_schema, "alpha").unwrap();
+    std::fs::write(&beta_schema, "beta").unwrap();
+    let same_time = SystemTime::now();
+    set_mtime(&alpha_schema, same_time);
+    set_mtime(&beta_schema, same_time);
+
+    let overlay = SkillboxOverlay {
+        clients: vec![
+            ClientOverlay {
+                label: "beta".to_string(),
+                cwd_patterns: Vec::new(),
+                cwd_match_count: 0,
+                plan_root: Some(beta_root),
+                plan_draft: None,
+                dir_config: None,
+            },
+            ClientOverlay {
+                label: "alpha".to_string(),
+                cwd_patterns: Vec::new(),
+                cwd_match_count: 0,
+                plan_root: Some(alpha_root),
+                plan_draft: None,
+                dir_config: None,
+            },
+        ],
+        loaded_at: Utc::now(),
+    };
+
+    let plans = overlay.list_all_plans();
+
+    assert_eq!(
+        plans
+            .iter()
+            .map(|plan| (plan.client_label.as_str(), plan.slug.as_str()))
+            .collect::<Vec<_>>(),
+        vec![("alpha", "zeta_plan"), ("beta", "alpha_plan")]
+    );
 }
 
 #[test]

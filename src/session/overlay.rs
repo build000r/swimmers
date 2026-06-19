@@ -265,13 +265,22 @@ impl SkillboxOverlay {
             }
         }
         entries.sort_by(|a, b| match (a.updated_at, b.updated_at) {
-            (Some(lhs), Some(rhs)) => rhs.cmp(&lhs),
+            (Some(lhs), Some(rhs)) => rhs
+                .cmp(&lhs)
+                .then_with(|| compare_overlay_plan_entries(a, b)),
             (Some(_), None) => std::cmp::Ordering::Less,
             (None, Some(_)) => std::cmp::Ordering::Greater,
-            (None, None) => a.slug.cmp(&b.slug),
+            (None, None) => compare_overlay_plan_entries(a, b),
         });
         entries
     }
+}
+
+fn compare_overlay_plan_entries(a: &OverlayPlanEntry, b: &OverlayPlanEntry) -> std::cmp::Ordering {
+    a.client_label
+        .cmp(&b.client_label)
+        .then_with(|| a.kind.cmp(b.kind))
+        .then_with(|| a.slug.cmp(&b.slug))
 }
 
 fn is_swimmers_api_launch_target(target: &LaunchTargetSummary) -> bool {
@@ -352,6 +361,7 @@ fn client_overlay_paths(clients_dir: &Path) -> Option<Vec<(PathBuf, PathBuf)>> {
             paths.push((client_dir, overlay_path));
         }
     }
+    sort_client_overlay_paths(&mut paths);
     Some(paths)
 }
 
@@ -361,6 +371,16 @@ fn overlay_file_in_client_dir(client_dir: &Path) -> Option<PathBuf> {
     }
     let overlay_path = client_dir.join("overlay.yaml");
     overlay_path.is_file().then_some(overlay_path)
+}
+
+fn sort_client_overlay_paths(paths: &mut [(PathBuf, PathBuf)]) {
+    paths.sort_by(
+        |(left_client, left_overlay), (right_client, right_overlay)| {
+            left_client
+                .cmp(right_client)
+                .then_with(|| left_overlay.cmp(right_overlay))
+        },
+    );
 }
 
 fn client_display_label(client: &ClientOverlay) -> String {
