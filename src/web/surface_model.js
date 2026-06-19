@@ -427,7 +427,7 @@ export function surfaceSession(session, {
   const environment = session?.environment || {};
   const remoteEnvironment = String(environment.scope || "local").trim().toLowerCase() === "remote";
   const launchCwd = remoteEnvironment ? String(environment.local_cwd || "") : String(session?.cwd || "");
-  const launchTarget = remoteEnvironment && launchCwd ? String(environment.target_id || "") : "";
+  const launchTarget = remoteEnvironment && launchCwd ? firstNonEmpty(environment.target_id) : "";
   const readiness = sessionReadiness(session);
   const stateKey = String(session.state || "unknown").toLowerCase();
   const transportKey = String(session.transport_health || "unknown").toLowerCase();

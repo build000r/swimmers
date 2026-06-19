@@ -138,7 +138,7 @@ test("surfaceSession separates raw cwd from mapped canonical cwd and host label"
     cwd: "/srv/skillbox/repos/swimmers",
     environment: {
       scope: " remote ",
-      target_id: "skillbox",
+      target_id: " skillbox ",
       target_label: "Skillbox devbox",
       target_kind: "swimmers_api",
       display_host: "Skillbox devbox",
