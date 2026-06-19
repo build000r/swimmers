@@ -64,7 +64,8 @@ use repo_search::{
 use service_directory::canonical_path_string;
 use service_directory::{
     annotate_dir_entry_groups, effective_dir_config_for_base, has_visible_child_dirs,
-    list_effective_group_entries, modified_secs, service_dir_path,
+    list_effective_group_entries, modified_secs, resolve_target_path_with_group_roots,
+    service_dir_path,
 };
 pub use service_directory::{
     list_effective_group_entries_sync, list_group_entries, list_group_entries_sync,
@@ -807,6 +808,28 @@ fn collect_visible_pending_entries(
     (pending, unique_services)
 }
 
+fn filter_managed_only_pending_entries(
+    pending: &mut Vec<PendingEntry>,
+    unique_services: &mut BTreeSet<String>,
+    managed_only: bool,
+    dir_config: Option<&OverlayDirConfig>,
+) {
+    if !managed_only || !dir_config.is_some_and(|config| !config.services.is_empty()) {
+        return;
+    }
+
+    pending.retain(|entry| !entry.services.is_empty());
+    *unique_services = unique_services_for_pending(pending);
+}
+
+fn unique_services_for_pending(pending: &[PendingEntry]) -> BTreeSet<String> {
+    let mut unique_services = BTreeSet::new();
+    for entry in pending {
+        extend_unique_services(&mut unique_services, &entry.services);
+    }
+    unique_services
+}
+
 fn extend_unique_services(unique_services: &mut BTreeSet<String>, services: &[String]) {
     unique_services.extend(services.iter().cloned());
 }
@@ -907,8 +930,10 @@ pub async fn list_dirs(
         .map(PathBuf::from)
         .unwrap_or_else(|| base.clone());
 
-    let (canonical_base, canonical) = resolve_target_path(base, target)?;
+    let canonical_base = base.canonicalize().unwrap_or(base.clone());
     let dir_config = effective_dir_config_for_base(&canonical_base);
+    let (canonical_base, canonical) =
+        resolve_target_path_with_group_roots(base, target, dir_config.as_ref())?;
     if let Some(response) = list_managed_root_response(
         state,
         canonical_base.as_path(),
@@ -1080,8 +1105,14 @@ async fn list_regular_dir_response(
         services: config.services.clone(),
     });
 
-    let (pending, unique_services) =
+    let (mut pending, mut unique_services) =
         collect_visible_pending_entries(read_dir, service_context.as_ref());
+    filter_managed_only_pending_entries(
+        &mut pending,
+        &mut unique_services,
+        managed_only,
+        dir_config,
+    );
     let pending_phase_ms = request_started.elapsed().as_millis() as u64;
     let pending_count = pending.len();
     let probe_started = Instant::now();

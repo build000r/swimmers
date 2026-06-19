@@ -168,6 +168,38 @@ async fn list_managed_service_entries_dedupes_dirs_skips_missing_and_keeps_metad
     assert!(entry.groups.is_empty());
 }
 
+#[test]
+fn filter_managed_only_pending_entries_drops_unmapped_nested_children() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let base = dir.path().join("repos");
+    let nested = base.join("services");
+    let managed = nested.join("managed");
+    let unmanaged = nested.join("unmanaged");
+    std::fs::create_dir_all(&managed).expect("managed");
+    std::fs::create_dir_all(&unmanaged).expect("unmanaged");
+    let service = overlay_service("svc-managed", "services/managed", None);
+    let context = OverlayServiceContext {
+        base_path: base.clone(),
+        services: vec![service.clone()],
+    };
+
+    let (mut pending, mut unique_services) = collect_visible_pending_entries(
+        std::fs::read_dir(&nested).expect("nested dir"),
+        Some(&context),
+    );
+    let mut names: Vec<&str> = pending.iter().map(|entry| entry.name.as_str()).collect();
+    names.sort_unstable();
+    assert_eq!(names, vec!["managed", "unmanaged"]);
+
+    let config = managed_service_config(&base, vec![service]);
+    filter_managed_only_pending_entries(&mut pending, &mut unique_services, true, Some(&config));
+
+    let names: Vec<&str> = pending.iter().map(|entry| entry.name.as_str()).collect();
+    let services: Vec<&str> = unique_services.iter().map(String::as_str).collect();
+    assert_eq!(names, vec!["managed"]);
+    assert_eq!(services, vec!["svc-managed"]);
+}
+
 fn repo_search_response_paths(response: &DirRepoSearchResponse) -> Vec<String> {
     response
         .entries

@@ -326,6 +326,14 @@ pub fn resolve_target_path(
     base: PathBuf,
     target: PathBuf,
 ) -> Result<(PathBuf, PathBuf), ApiServiceError> {
+    resolve_target_path_with_group_roots(base, target, None)
+}
+
+pub fn resolve_target_path_with_group_roots(
+    base: PathBuf,
+    target: PathBuf,
+    config: Option<&OverlayDirConfig>,
+) -> Result<(PathBuf, PathBuf), ApiServiceError> {
     let canonical = target.canonicalize().map_err(|_| {
         ApiServiceError::new(
             StatusCode::NOT_FOUND,
@@ -335,7 +343,7 @@ pub fn resolve_target_path(
     })?;
 
     let canonical_base = base.canonicalize().unwrap_or(base);
-    if !canonical.starts_with(&canonical_base) {
+    if !target_path_allowed(&canonical_base, &canonical, config) {
         return Err(ApiServiceError::new(
             StatusCode::FORBIDDEN,
             "DIR_OUTSIDE_BASE",
@@ -344,6 +352,35 @@ pub fn resolve_target_path(
     }
 
     Ok((canonical_base, canonical))
+}
+
+fn target_path_allowed(
+    canonical_base: &Path,
+    canonical: &Path,
+    config: Option<&OverlayDirConfig>,
+) -> bool {
+    canonical.starts_with(canonical_base)
+        || config
+            .map(|config| {
+                config
+                    .groups
+                    .iter()
+                    .any(|group| overlay_group_allows_navigation_path(group, canonical))
+            })
+            .unwrap_or(false)
+}
+
+fn overlay_group_allows_navigation_path(group: &OverlayDirGroup, canonical: &Path) -> bool {
+    group
+        .paths
+        .iter()
+        .map(|path| canonical_path(path))
+        .any(|path| canonical.starts_with(path))
+        || group
+            .dirs
+            .iter()
+            .map(|dir| canonical_path(dir))
+            .any(|dir| canonical.starts_with(dir))
 }
 
 /// List entries from a virtual directory group, combining children from all
@@ -1058,6 +1095,66 @@ mod tests {
         .expect("workspace repo path allowed");
 
         assert_eq!(resolved, repo.canonicalize().expect("canonical repo"));
+    }
+
+    #[test]
+    fn resolve_target_path_with_group_roots_allows_group_descendants_outside_base() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let base = dir.path().join("repos");
+        let repo = dir.path().join("outside").join("swimmers");
+        let child = repo.join("src");
+        std::fs::create_dir_all(&base).expect("base");
+        std::fs::create_dir_all(&child).expect("child");
+        let config = OverlayDirConfig {
+            label: "test".into(),
+            base_path: base.clone(),
+            services: Vec::new(),
+            groups: vec![OverlayDirGroup {
+                name: "orchestration".into(),
+                paths: vec![repo.clone()],
+                dirs: Vec::new(),
+            }],
+            launch: OverlayLaunchConfig::local_only(),
+        };
+
+        let strict = resolve_target_path(base.clone(), child.clone())
+            .expect_err("plain base resolver should remain strict");
+        assert_eq!(strict.status, StatusCode::FORBIDDEN);
+        assert_eq!(strict.code, "DIR_OUTSIDE_BASE");
+
+        let (_, resolved) =
+            resolve_target_path_with_group_roots(base, child.clone(), Some(&config))
+                .expect("group descendant path should be browsable");
+
+        assert_eq!(resolved, child.canonicalize().expect("canonical child"));
+    }
+
+    #[test]
+    fn resolve_target_path_with_group_roots_allows_source_dir_descendants_outside_base() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let base = dir.path().join("repos");
+        let source = dir.path().join("workspaces");
+        let repo = source.join("swimmers");
+        let child = repo.join("src");
+        std::fs::create_dir_all(&base).expect("base");
+        std::fs::create_dir_all(&child).expect("child");
+        let config = OverlayDirConfig {
+            label: "test".into(),
+            base_path: base.clone(),
+            services: Vec::new(),
+            groups: vec![OverlayDirGroup {
+                name: "workspace".into(),
+                paths: Vec::new(),
+                dirs: vec![source],
+            }],
+            launch: OverlayLaunchConfig::local_only(),
+        };
+
+        let (_, resolved) =
+            resolve_target_path_with_group_roots(base, child.clone(), Some(&config))
+                .expect("group source descendant path should be browsable");
+
+        assert_eq!(resolved, child.canonicalize().expect("canonical child"));
     }
 
     #[test]
