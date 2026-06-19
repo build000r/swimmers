@@ -308,7 +308,7 @@ export function launchTargetPreviewForPath(path, target) {
   const targetId = String(target?.id || "local").trim() || "local";
   const targetLabel = String(target?.label || targetId || "Local machine");
   const localCwd = String(path || "").trim();
-  if (targetId === "local" || String(target?.kind || "local") === "local") {
+  if (targetId === "local") {
     return { targetId, targetLabel, localCwd, remoteCwd: null, blocked: false, reason: "" };
   }
   if (String(target?.kind || "") !== "swimmers_api") {

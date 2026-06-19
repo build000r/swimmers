@@ -414,6 +414,34 @@ test("launch target preview ignores incomplete path mappings like the backend", 
   });
 });
 
+test("launch target preview blocks non-local ids without swimmers api kind", () => {
+  const remoteLikeLocal = {
+    id: "devbox",
+    label: "Devbox",
+    kind: "local",
+    path_mappings: [{ local_prefix: "/Users/tester/repos", remote_prefix: "/srv/repos" }],
+  };
+  assert.deepEqual(launchTargetPreviewForPath("/Users/tester/repos/swimmers", remoteLikeLocal), {
+    targetId: "devbox",
+    targetLabel: "Devbox",
+    localCwd: "/Users/tester/repos/swimmers",
+    remoteCwd: null,
+    blocked: true,
+    reason: "unsupported target",
+  });
+
+  const el = { createLaunchTarget: element("missing") };
+  const staleTarget = selectedLaunchTargetSummary(el, { launchTarget: "local", launchTargets: [] });
+  assert.deepEqual(launchTargetPreviewForPath("/Users/tester/repos/swimmers", staleTarget), {
+    targetId: "missing",
+    targetLabel: "missing",
+    localCwd: "/Users/tester/repos/swimmers",
+    remoteCwd: null,
+    blocked: true,
+    reason: "unsupported target",
+  });
+});
+
 test("directory browser controller helpers preserve retry gate and batch failure copy", () => {
   assert.equal(
     shouldRetryDirListingFromBase(
