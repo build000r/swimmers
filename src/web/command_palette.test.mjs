@@ -165,7 +165,7 @@ test("command palette event helpers preserve keyboard and result index decisions
   });
   assert.deepEqual(commandPaletteSearchKeyPlan({ key: "ArrowDown" }, 0, 0), {
     type: "set_index",
-    index: -1,
+    index: 0,
     preventDefault: true,
   });
   assert.deepEqual(commandPaletteSearchKeyPlan({ key: "ArrowUp" }, 0, 3), {

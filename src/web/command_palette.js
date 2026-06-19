@@ -154,7 +154,7 @@ export function commandPaletteSearchKeyPlan(event, activeIndex = 0, itemCount = 
   const index = Number.isFinite(activeIndex) ? Math.trunc(activeIndex) : 0;
   const count = Number.isFinite(itemCount) ? Math.trunc(itemCount) : 0;
   if (event?.key === "ArrowDown") {
-    return { type: "set_index", index: Math.min(count - 1, index + 1), preventDefault: true };
+    return { type: "set_index", index: Math.min(Math.max(0, count - 1), index + 1), preventDefault: true };
   }
   if (event?.key === "ArrowUp") {
     return { type: "set_index", index: Math.max(0, index - 1), preventDefault: true };
