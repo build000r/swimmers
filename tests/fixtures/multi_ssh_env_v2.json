@@ -1,21 +1,38 @@
 {
   "version": 1,
   "fixture_id": "multi_ssh_env_v2",
+  "source_backing": [
+    "docs/VISION.md strategic non-goals",
+    "docs/MULTI_ENV_COCKPIT_PROOF.md configured cockpit contract",
+    "src/api/remote_sessions.rs configured swimmers_api targets",
+    "src/fleet_lens.rs built-in and overlay fleet presets",
+    "src/bin/swimmers_tui/app/thought_log.rs saved fleet lens cycling",
+    "src/web/surface_model.js web fleet preset filtering"
+  ],
   "scope": {
-    "truth_source": "explicitly configured Swimmers environment targets",
+    "truth_source": "explicitly configured Swimmers environment targets plus passive advisory metadata",
+    "supported_target_kinds": [
+      "local",
+      "swimmers_api",
+      "ssh_only"
+    ],
     "not_supported": [
       "arbitrary SSH fleet discovery",
-      "implicit SSH execution",
+      "implicit SSH command execution",
+      "cluster scheduling",
       "cross-host tmux session merging",
-      "treating c0 or NTM advisory metadata as orchestration authority"
+      "treating c0 or NTM advisory metadata as orchestration authority",
+      "FrankenTerm as the Swimmers control plane"
     ]
   },
   "targets": [
     {
       "id": "local",
       "kind": "local",
-      "backend_mode": "local",
-      "display_host": "local",
+      "backend_mode": "embedded_or_loopback",
+      "display_host": "operator-mac",
+      "health_status": "healthy",
+      "auth": "local_trust_loopback_only",
       "capabilities": {
         "observe_sessions": true,
         "launch_session": true,
@@ -27,14 +44,24 @@
         "bootstrap_hint": false,
         "advisory_metadata": true,
         "health_probe": true
-      }
+      },
+      "path_mappings": [
+        {
+          "local": "/home/operator/repos/opensource",
+          "remote": "/home/operator/repos/opensource"
+        }
+      ]
     },
     {
       "id": "devbox",
       "kind": "swimmers_api",
       "backend_mode": "remote_swimmers_api",
       "display_host": "devbox-tailnet",
+      "health_status": "healthy",
       "base_url": "http://devbox.tailnet.example:3210/",
+      "auth": "tailnet_trust_or_token_env",
+      "auth_token_env": "SWIMMERS_DEVBOX_TOKEN_NAME_ONLY",
+      "credential_rule": "tokens come from env and are not serialized as values in inventory, receipts, docs, logs, or UI labels",
       "capabilities": {
         "observe_sessions": true,
         "launch_session": true,
@@ -47,13 +74,55 @@
         "advisory_metadata": true,
         "health_probe": true
       },
-      "credential_rule": "tokens come from env and are not serialized as values or env names in environment inventory"
+      "path_mappings": [
+        {
+          "local": "/home/operator/repos/opensource",
+          "remote": "/srv/devbox/repos/opensource"
+        },
+        {
+          "local": "/home/operator/repos",
+          "remote": "/srv/devbox/repos"
+        }
+      ]
+    },
+    {
+      "id": "devbox-down",
+      "kind": "swimmers_api",
+      "backend_mode": "remote_swimmers_api",
+      "display_host": "devbox-tailnet-down",
+      "health_status": "degraded_cached",
+      "stale_seconds": 420,
+      "base_url": "http://devbox-down.tailnet.example:3210/",
+      "credential_rule": "degraded cached sessions remain visible but cannot outrank fresh local attention work",
+      "capabilities": {
+        "observe_sessions": true,
+        "launch_session": false,
+        "send_input": false,
+        "group_input": false,
+        "remote_dir_inventory": false,
+        "native_attach": false,
+        "ssh_attach_hint": false,
+        "bootstrap_hint": true,
+        "advisory_metadata": true,
+        "health_probe": true
+      },
+      "path_mappings": [
+        {
+          "local": "/home/operator/repos/opensource",
+          "remote": "/srv/devbox/repos/opensource"
+        }
+      ]
     },
     {
       "id": "skillbox-devbox",
       "kind": "ssh_only",
       "backend_mode": "ssh_handoff",
       "display_host": "Skillbox devbox",
+      "health_status": "not_configured",
+      "ssh_alias": "skillbox-devbox",
+      "attach_hint": "ssh skillbox-devbox",
+      "bootstrap_hint": "ssh skillbox-devbox 'swimmers serve'",
+      "credential_rule": "ssh-only targets are inventory and handoff rows until a trusted swimmers_api backend is configured",
       "capabilities": {
         "observe_sessions": false,
         "launch_session": false,
@@ -65,23 +134,231 @@
         "bootstrap_hint": true,
         "advisory_metadata": true,
         "health_probe": false
-      },
-      "ssh_alias": "skillbox-devbox",
-      "attach_hint": "ssh skillbox-devbox",
-      "bootstrap_hint": "ssh skillbox-devbox 'swimmers serve'",
-      "status": "NotConfigured"
+      }
     }
   ],
-  "ssh_import": {
-    "mode": "dry_run",
-    "writes_files": false,
-    "connects_to_hosts": false,
-    "trust": "untrusted_until_reviewed",
-    "ignored_aliases": [
-      "wildcard Host patterns",
-      "negated Host patterns",
-      "aliases requiring shell quoting"
-    ],
-    "proposal_kind": "ssh_only"
-  }
+  "cwd_cases": [
+    {
+      "id": "local_mapped_repo",
+      "target_id": "local",
+      "local_cwd": "/home/operator/repos/opensource/swimmers",
+      "remote_cwd": "/home/operator/repos/opensource/swimmers",
+      "repo_key": "/home/operator/repos/opensource/swimmers",
+      "mapping_status": "local"
+    },
+    {
+      "id": "remote_mapped_repo",
+      "target_id": "devbox",
+      "local_cwd": "/home/operator/repos/opensource/swimmers",
+      "remote_cwd": "/srv/devbox/repos/opensource/swimmers",
+      "repo_key": "/home/operator/repos/opensource/swimmers",
+      "mapping_status": "mapped",
+      "expected_launch_preview": "remote launch is allowed and created sessions are namespaced as devbox::session_id"
+    },
+    {
+      "id": "remote_unmapped_scratch",
+      "target_id": "devbox",
+      "local_cwd": "/home/operator/tmp/scratch",
+      "remote_cwd": null,
+      "repo_key": null,
+      "mapping_status": "unmapped",
+      "expected_launch_preview": "remote launch is blocked with stable path-mapping guidance"
+    },
+    {
+      "id": "degraded_api_cached_repo",
+      "target_id": "devbox-down",
+      "local_cwd": "/home/operator/repos/opensource/swimmers",
+      "remote_cwd": "/srv/devbox/repos/opensource/swimmers",
+      "repo_key": "/home/operator/repos/opensource/swimmers",
+      "mapping_status": "mapped",
+      "health_status": "degraded_cached",
+      "expected_attention_behavior": "degraded sessions are visible but demoted below fresh local waiting work"
+    },
+    {
+      "id": "ssh_only_handoff_repo",
+      "target_id": "skillbox-devbox",
+      "local_cwd": "/home/operator/repos/opensource/swimmers",
+      "remote_cwd": "/srv/skillbox/repos/swimmers",
+      "repo_key": "/home/operator/repos/opensource/swimmers",
+      "mapping_status": "handoff_only",
+      "expected_launch_preview": "copyable SSH attach/bootstrap hints are shown, but no live Swimmers session aggregation is implied"
+    }
+  ],
+  "session_cases": [
+    {
+      "id": "local_waiting",
+      "target_id": "local",
+      "session_id": "sess_local_waiting",
+      "namespaced_session_id": "sess_local_waiting",
+      "cwd": "/home/operator/repos/opensource/swimmers",
+      "repo_key": "/home/operator/repos/opensource/swimmers",
+      "state": "waiting",
+      "readiness": "needs_attention",
+      "expected_group": "operator-mac / swimmers"
+    },
+    {
+      "id": "remote_waiting_same_repo",
+      "target_id": "devbox",
+      "session_id": "sess_remote_waiting",
+      "namespaced_session_id": "devbox::sess_remote_waiting",
+      "cwd": "/srv/devbox/repos/opensource/swimmers",
+      "mapped_local_cwd": "/home/operator/repos/opensource/swimmers",
+      "repo_key": "/home/operator/repos/opensource/swimmers",
+      "state": "waiting",
+      "readiness": "needs_attention",
+      "expected_group": "devbox-tailnet / swimmers"
+    },
+    {
+      "id": "remote_degraded_cached",
+      "target_id": "devbox-down",
+      "session_id": "sess_remote_cached",
+      "namespaced_session_id": "devbox-down::sess_remote_cached",
+      "cwd": "/srv/devbox/repos/opensource/swimmers",
+      "mapped_local_cwd": "/home/operator/repos/opensource/swimmers",
+      "repo_key": "/home/operator/repos/opensource/swimmers",
+      "state": "busy",
+      "readiness": "degraded",
+      "degraded": true,
+      "stale": true
+    },
+    {
+      "id": "remote_running_stale_c0",
+      "target_id": "devbox",
+      "session_id": "sess_remote_running",
+      "namespaced_session_id": "devbox::sess_remote_running",
+      "cwd": "/srv/devbox/repos/opensource/swimmers",
+      "repo_key": "/home/operator/repos/opensource/swimmers",
+      "state": "busy",
+      "advisory_metadata": [
+        {
+          "source": "c0",
+          "label": "once-group",
+          "value": "pwd:/srv/devbox/repos/opensource/swimmers",
+          "status": "external",
+          "stale": true
+        },
+        {
+          "source": "ntm",
+          "label": "lane",
+          "value": "remote-build",
+          "status": "external",
+          "stale": true
+        }
+      ]
+    }
+  ],
+  "saved_lens_cases": [
+    {
+      "id": "all",
+      "source": "builtin",
+      "expected_targets": [
+        "local",
+        "devbox",
+        "devbox-down",
+        "skillbox-devbox"
+      ]
+    },
+    {
+      "id": "current-repo",
+      "source": "builtin",
+      "expected_sessions": [
+        "sess_local_waiting",
+        "devbox::sess_remote_waiting"
+      ],
+      "expected_rule": "matches canonical repo keys across local and remote cwd mappings"
+    },
+    {
+      "id": "ssh-handoff",
+      "source": "builtin",
+      "expected_targets": [
+        "skillbox-devbox"
+      ],
+      "expected_rule": "shows ssh_only environment rows even when there are no live sessions"
+    },
+    {
+      "id": "degraded",
+      "source": "builtin",
+      "expected_sessions": [
+        "devbox-down::sess_remote_cached"
+      ]
+    },
+    {
+      "id": "needs-attention",
+      "source": "builtin",
+      "expected_sessions": [
+        "sess_local_waiting",
+        "devbox::sess_remote_waiting"
+      ]
+    },
+    {
+      "id": "swimmers-on-devbox",
+      "source": "overlay",
+      "expected_sessions": [
+        "devbox::sess_remote_waiting",
+        "devbox::sess_remote_running"
+      ],
+      "expected_rule": "overlay preset matches repo key and devbox target id without persisting tokens or raw output"
+    }
+  ],
+  "launcher_receipts": [
+    {
+      "id": "local_launch",
+      "target_id": "local",
+      "cwd": "/home/operator/repos/opensource/swimmers",
+      "allowed": true,
+      "receipt_fields": [
+        "target_id",
+        "target_kind",
+        "requested_cwd",
+        "resolved_cwd"
+      ]
+    },
+    {
+      "id": "remote_mapped_launch",
+      "target_id": "devbox",
+      "cwd": "/home/operator/repos/opensource/swimmers",
+      "resolved_cwd": "/srv/devbox/repos/opensource/swimmers",
+      "allowed": true,
+      "receipt_fields": [
+        "target_id",
+        "target_kind",
+        "requested_cwd",
+        "resolved_cwd",
+        "path_mapping"
+      ]
+    },
+    {
+      "id": "remote_unmapped_blocked",
+      "target_id": "devbox",
+      "cwd": "/home/operator/tmp/scratch",
+      "allowed": false,
+      "reason": "missing_path_mapping"
+    },
+    {
+      "id": "ssh_only_handoff",
+      "target_id": "skillbox-devbox",
+      "allowed": false,
+      "reason": "ssh_only_handoff",
+      "receipt_fields": [
+        "target_id",
+        "target_kind",
+        "attach_hint",
+        "bootstrap_hint"
+      ]
+    }
+  ],
+  "proof_commands": {
+    "fixture_manifest": "python3 -m json.tool tests/fixtures/multi_ssh_env_v2.json >/dev/null",
+    "capability_matrix": "python3 scripts/test-multi-ssh-env-v2.sh --fixture-only",
+    "environment_inventory_redaction": "cargo test --lib api::remote_sessions::tests::environment_summary_redacts_token_values_and_credentialed_base_url -- --test-threads=1",
+    "health_and_mapping_doctor": "cargo test --lib api::remote_sessions::tests::remote_targets_health_reports_auth_and_mapping_doctor_without_env_names -- --test-threads=1",
+    "launcher_receipts": "cargo test --bin swimmers-tui launch_target_preview_uses_longest_mapping_and_blocks_unmapped_remote_cwds -- --test-threads=1",
+    "unmapped_cwd_guardrail": "cargo test --lib api::remote_sessions::tests::unmapped_launch_target_cwd_returns_stable_guidance -- --test-threads=1",
+    "advisory_freshness": "cargo test --bin swimmers-tui thought_panel_marks_advisory_metadata_as_external_and_stale -- --test-threads=1",
+    "saved_lens_tui": "cargo test --bin swimmers-tui saved_fleet_lens -- --test-threads=1",
+    "saved_lens_web": "node --test src/web/surface_model.test.mjs src/web/app_interaction_behavior.test.mjs",
+    "surface_action_contract": "node --test src/web/surface_action_plans.test.mjs src/web/contracts.test.mjs"
+  },
+  "one_command_smoke": "make multi-ssh-env-smoke",
+  "default_smoke_is_live_ssh_free": true
 }
