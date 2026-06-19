@@ -15,9 +15,38 @@ use crate::types::{opcodes, ControlEvent, SessionSummary};
 use crate::types::{KnownControlEventPayload, SessionTitlePayload};
 use axum::body::to_bytes;
 use axum::response::IntoResponse;
+use std::ffi::OsString;
 use std::path::PathBuf;
 use tempfile::tempdir;
 use tokio::sync::{broadcast, mpsc};
+
+struct EnvRestore {
+    key: &'static str,
+    previous: Option<OsString>,
+}
+
+impl EnvRestore {
+    fn set(key: &'static str, value: impl AsRef<std::ffi::OsStr>) -> Self {
+        let previous = std::env::var_os(key);
+        std::env::set_var(key, value);
+        Self { key, previous }
+    }
+
+    fn remove(key: &'static str) -> Self {
+        let previous = std::env::var_os(key);
+        std::env::remove_var(key);
+        Self { key, previous }
+    }
+}
+
+impl Drop for EnvRestore {
+    fn drop(&mut self) {
+        match &self.previous {
+            Some(value) => std::env::set_var(self.key, value),
+            None => std::env::remove_var(self.key),
+        }
+    }
+}
 
 async fn html_string(response: impl IntoResponse) -> String {
     let response = response.into_response();
@@ -1136,6 +1165,48 @@ fn franken_term_font_path_resolves_availability_states() {
         FrankenTermFontPath::Available(path) => assert_eq!(path, expected),
         other => panic!("unexpected font path state: {other:?}"),
     }
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn franken_term_env_pkg_dir_canonicalizes_symlink_before_font_lookup() {
+    let _guard = crate::test_support::ENV_LOCK
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
+    let dir = tempdir().expect("tempdir");
+    let real_root = dir.path().join("real-frankentui");
+    let real_pkg = real_root.join("pkg");
+    let real_font = real_root.join("fonts").join("pragmasevka-nf-subset.woff2");
+    std::fs::create_dir_all(&real_pkg).expect("real pkg");
+    std::fs::create_dir_all(real_font.parent().expect("font parent")).expect("font dir");
+    std::fs::write(
+        real_pkg.join("FrankenTerm.js"),
+        "export default async () => {}",
+    )
+    .expect("js asset");
+    std::fs::write(real_pkg.join("FrankenTerm_bg.wasm"), b"wasm").expect("wasm asset");
+    std::fs::write(&real_font, b"font-bytes").expect("font asset");
+    let symlink_root = dir.path().join("linked");
+    std::fs::create_dir_all(&symlink_root).expect("symlink root");
+    let symlink_pkg = symlink_root.join("pkg");
+    std::os::unix::fs::symlink(&real_pkg, &symlink_pkg).expect("pkg symlink");
+
+    let _primary = EnvRestore::set("SWIMMERS_FRANKENTUI_PKG_DIR", &symlink_pkg);
+    let _fallback = EnvRestore::remove("FRANKENTUI_PKG_DIR");
+
+    let resolved = resolve_frankentui_pkg_dir().expect("resolved pkg");
+    assert_eq!(resolved, real_pkg.canonicalize().expect("canonical pkg"));
+    match franken_term_font_path(Some(resolved)) {
+        FrankenTermFontPath::Available(path) => {
+            assert_eq!(path, real_font.canonicalize().expect("canonical font"))
+        }
+        other => panic!("unexpected font path state: {other:?}"),
+    }
+
+    let info = franken_term_asset_info().await.expect("asset info");
+    let font = info.font.expect("font info");
+    assert_eq!(font.route, FRANKENTERM_FONT_ROUTE);
+    assert_eq!(font.size_bytes, b"font-bytes".len() as u64);
 }
 
 #[tokio::test]

@@ -1181,8 +1181,8 @@ pub(super) fn resolve_frankentui_pkg_dir() -> Option<PathBuf> {
             .filter(|value| !value.trim().is_empty())
         {
             let candidate = PathBuf::from(path);
-            if valid_frankentui_pkg_dir(&candidate) {
-                return Some(candidate);
+            if let Some(pkg_dir) = canonical_frankentui_pkg_dir(&candidate) {
+                return Some(pkg_dir);
             }
         }
     }
@@ -1190,7 +1190,11 @@ pub(super) fn resolve_frankentui_pkg_dir() -> Option<PathBuf> {
     DEFAULT_FRANKENTUI_PKG_CANDIDATES
         .iter()
         .map(PathBuf::from)
-        .find(|candidate| valid_frankentui_pkg_dir(candidate))
+        .find_map(|candidate| canonical_frankentui_pkg_dir(&candidate))
+}
+
+fn canonical_frankentui_pkg_dir(path: &Path) -> Option<PathBuf> {
+    valid_frankentui_pkg_dir(path).then(|| path.canonicalize().ok())?
 }
 
 pub(super) fn valid_frankentui_pkg_dir(path: &Path) -> bool {
