@@ -15,6 +15,11 @@ import {
   trogdorReadButtonLabel,
   trogdorSurfaceSignature,
 } from "./trogdor_render.js";
+import {
+  availableFleetFilter,
+  buildFleetLensSummary,
+  sessionMatchesFleetFilter,
+} from "./surface_model.js";
 
 function defaultClampInt(value, fallback, min, max) {
   const numeric = Number.isFinite(value) ? Math.trunc(value) : fallback;
@@ -68,7 +73,9 @@ export function createTrogdorSurfaceController(runtime = {}) {
       return;
     }
 
-    const sessions = state.sessions.map((session) => surfaceSession(session));
+    const allSessions = state.sessions.map((session) => surfaceSession(session));
+    const filter = availableFleetFilter(buildFleetLensSummary(allSessions), state.fleetFilter);
+    const sessions = allSessions.filter((session) => sessionMatchesFleetFilter(session, filter));
     const groups = buildTrogdorDomGroups(sessions);
     const hovered = trogdorReadableHoveredSurfaceSession(sessions, state.hoveredTrogdorSessionId, {
       sessionCanRead: trogdorSessionCanRead,

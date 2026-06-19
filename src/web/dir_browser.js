@@ -289,11 +289,16 @@ export function mapPathWithLaunchTarget(path, target) {
   const mappings = Array.isArray(target?.path_mappings) ? target.path_mappings : [];
   let best = null;
   for (const mapping of mappings) {
-    const relative = relativeLaunchPath(path, mapping?.local_prefix);
+    const localPrefix = String(mapping?.local_prefix || "").trim();
+    const remotePrefix = String(mapping?.remote_prefix || "").trim();
+    if (!localPrefix || !remotePrefix) {
+      continue;
+    }
+    const relative = relativeLaunchPath(path, localPrefix);
     if (relative === null) continue;
-    const score = normalizeLaunchPath(mapping?.local_prefix).split("/").filter(Boolean).length;
+    const score = normalizeLaunchPath(localPrefix).split("/").filter(Boolean).length;
     if (!best || score > best.score) {
-      best = { score, path: joinLaunchPath(mapping?.remote_prefix, relative) };
+      best = { score, path: joinLaunchPath(remotePrefix, relative) };
     }
   }
   return best?.path || null;

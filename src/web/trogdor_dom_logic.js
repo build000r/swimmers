@@ -196,6 +196,7 @@ export function trogdorDomPressure(session) {
   if (cueMask & TROGDOR_ACTION_CUE_AWAITING_USER) score += 55;
   if (cueMask & TROGDOR_ACTION_CUE_COMMIT_READY) score += 45;
   if (cueMask & TROGDOR_ACTION_CUE_VALIDATION_MISSING) score += 40;
+  if (cueMask & TROGDOR_ACTION_CUE_DIRTY_CHECK_MISSING) score += 40;
   if (stateLabel === "attention") score += 45;
   if (stateLabel === "busy") score += 12;
   if (stateLabel === "error") score += 55;
@@ -224,6 +225,7 @@ export function trogdorAgentGlyph(session) {
   if (cueMask & TROGDOR_ACTION_CUE_AWAITING_USER) return "!";
   if ((cueMask & TROGDOR_ACTION_CUE_COMMIT_READY) || session?.commitCandidate) return "$";
   if (cueMask & TROGDOR_ACTION_CUE_VALIDATION_MISSING) return "v";
+  if (cueMask & TROGDOR_ACTION_CUE_DIRTY_CHECK_MISSING) return "d";
   if (String(session?.state || "").toLowerCase() === "error") return "x";
   if (trogdorSessionIsSleepingOrDeepSleep(session)) return "z";
   return "a";

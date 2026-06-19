@@ -392,6 +392,28 @@ test("launch target preview keeps first equal-specificity mapping", () => {
   assert.equal(mapPathWithLaunchTarget("/Users/tester/repos/swimmers", target), "/srv/primary/swimmers");
 });
 
+test("launch target preview ignores incomplete path mappings like the backend", () => {
+  const target = {
+    id: "devbox",
+    label: "Devbox",
+    kind: "swimmers_api",
+    path_mappings: [
+      { local_prefix: "", remote_prefix: "/remote" },
+      { local_prefix: "/Users/tester/repos", remote_prefix: "   " },
+    ],
+  };
+
+  assert.equal(mapPathWithLaunchTarget("/Users/tester/repos/swimmers", target), null);
+  assert.deepEqual(launchTargetPreviewForPath("/Users/tester/repos/swimmers", target), {
+    targetId: "devbox",
+    targetLabel: "Devbox",
+    localCwd: "/Users/tester/repos/swimmers",
+    remoteCwd: null,
+    blocked: true,
+    reason: "unmapped cwd",
+  });
+});
+
 test("directory browser controller helpers preserve retry gate and batch failure copy", () => {
   assert.equal(
     shouldRetryDirListingFromBase(

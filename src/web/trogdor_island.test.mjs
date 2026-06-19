@@ -124,6 +124,12 @@ function surfaceSession(session) {
     cwdLabel: "opensource/swimmers",
     repoKey: session.cwd,
     repoLabel: "swimmers",
+    targetKey: session.targetKey || "local",
+    targetLabel: session.targetLabel || "local",
+    stateKey: String(session.state || "unknown").toLowerCase(),
+    readinessKey: session.readinessKey || "needs_attention",
+    transportKey: session.transportKey || "healthy",
+    transportLabel: session.transportLabel || "healthy",
     thoughtLabel: session.thought,
     actionCues: session.action_cues,
     operatorPressure: { score: 82, reason: "awaiting user", glyph: "!" },
@@ -248,6 +254,34 @@ test("Trogdor atlas island delegates visible render output through existing help
   assert.match(html, /data-action="refresh"/);
   assert.ok(html.indexOf("trogdor-topbar") < html.indexOf("trogdor-world"));
   assert.ok(html.indexOf("trogdor-world") < html.indexOf("trogdor-bottombar"));
+});
+
+test("Trogdor atlas island applies the active fleet target filter", () => {
+  const { runtime, state, surface } = islandRuntime({
+    state: {
+      sessions: [
+        rawSession({ session_id: "local", tmux_name: "Local", targetKey: "local", targetLabel: "local" }),
+        rawSession({
+          session_id: "remote",
+          tmux_name: "Remote",
+          targetKey: "skillbox",
+          targetLabel: "Skillbox devbox",
+          cwd: "/srv/skillbox/repos/swimmers",
+        }),
+      ],
+      fleetFilter: { kind: "target", key: "skillbox" },
+      hoveredTrogdorSessionId: "remote",
+    },
+  });
+  const island = createTrogdorAtlasIsland(runtime);
+
+  island.renderTrogdorSurface();
+
+  assert.match(surface.innerHTML, /data-session-id="remote"/);
+  assert.doesNotMatch(surface.innerHTML, /data-session-id="local"/);
+  assert.match(surface.innerHTML, /Skillbox devbox/);
+  assert.equal(state.trogdorSurfaceSignature.includes("remote"), true);
+  assert.equal(state.trogdorSurfaceSignature.includes("local"), false);
 });
 
 test("Trogdor atlas island keeps pointer, focus, and action dispatch separate from terminal capture", async () => {

@@ -890,6 +890,15 @@ test("Trogdor pressure, reason, glyph, and tone prefer operator pressure when pr
   assert.equal(trogdorAgentGlyph(dirtyCheck), "d");
   assert.equal(trogdorAgentTone(dirtyCheck), "warning");
 
+  const inferredDirtyCheck = session({
+    actionCues: [{ kind: "dirty_check_missing" }],
+    state: "idle",
+  });
+  assert.equal(trogdorDomPressure(inferredDirtyCheck), 40);
+  assert.equal(trogdorDomReason(inferredDirtyCheck), "dirty check missing");
+  assert.equal(trogdorAgentGlyph(inferredDirtyCheck), "d");
+  assert.equal(trogdorAgentTone(inferredDirtyCheck), "warning");
+
   const inferred = session({ actionCues: [{ kind: "commit_ready" }], state: "busy", commitCandidate: true });
   assert.equal(trogdorDomPressure(inferred), 82);
   assert.equal(trogdorDomReason(inferred), "commit ready");

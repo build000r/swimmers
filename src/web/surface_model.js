@@ -175,7 +175,7 @@ function appendAdvisoryCount(label, bucket) {
   return count > 0 ? `${label} · ext ${count}` : label;
 }
 
-function availableFleetFilter(lens, filter) {
+export function availableFleetFilter(lens, filter) {
   const active = normalizeFleetFilter(filter);
   if (!active.kind) {
     return active;
