@@ -547,7 +547,13 @@ function renderLegacyDirBrowserView(view, { el }) {
         openLink.textContent = "open url";
         groupsCell.appendChild(openLink);
       }
-      const groupActions = renderDirGroupActions(entry, entryPath, view.groups, view.activeGroup, view.readOnly);
+      const groupActions = renderDirGroupActions(
+        entry,
+        entryPath,
+        view.groups,
+        view.activeGroup,
+        view.groupActionsReadOnly ?? view.readOnly,
+      );
       if (groupActions) {
         groupsCell.appendChild(groupActions);
       }
@@ -563,6 +569,7 @@ export function renderDirEntries(
     el,
     dirBrowser,
     readOnly = false,
+    groupActionsReadOnly = readOnly,
     storage = localStorage,
     pathStorageKey,
     managedOnlyStorageKey,
@@ -600,6 +607,7 @@ export function renderDirEntries(
     activeGroup,
     selectedPaths: selected,
     readOnly,
+    groupActionsReadOnly,
     managed,
     overlayLabel: String(response?.overlay_label || "managed").trim().toLowerCase(),
     search: normalizedDirSearch(dirBrowser),

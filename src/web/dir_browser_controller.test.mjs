@@ -140,6 +140,7 @@ test("directory browser controller delegates dynamic view rendering while preser
   assert.equal(views[0].readOnly, true);
   assert.equal(views[0].search, "dirty");
   assert.equal(views[0].selectedPaths, state.dirBrowser.batchSelected);
+  assert.equal(views[0].groupActionsReadOnly, true);
   assert.deepEqual(Array.from(state.dirBrowser.batchSelected), ["/srv/repos/swimmers"]);
   assert.deepEqual(state.dirBrowser.entries.map((entry) => entry.name), ["swimmers", "clean"]);
   assert.deepEqual(state.dirBrowser.groups, ["core", "clients"]);
@@ -374,7 +375,7 @@ test("directory browser controller reverts target when target-change reload fail
   });
 });
 
-test("directory browser controller sends selected target with group edits", async () => {
+test("directory browser controller sends local target with group edits", async () => {
   const previousDocument = globalThis.document;
   globalThis.document = {
     createElement(tagName) {
@@ -402,8 +403,8 @@ test("directory browser controller sends selected target with group edits", asyn
     state.readOnly = false;
     state.dirBrowser.path = "/workspace";
     state.dirBrowser.launchTargets = [{ id: "local", label: "Local machine", kind: "local" }, devboxTarget()];
-    state.dirBrowser.launchTarget = "devbox";
-    el.createLaunchTarget = selectElement("devbox");
+    state.dirBrowser.launchTarget = "local";
+    el.createLaunchTarget = selectElement("local");
 
     const controller = createDirBrowserController(runtime);
     await controller.updateDirEntryGroupMembership("/workspace/swimmers", "add", "backend");
@@ -411,13 +412,36 @@ test("directory browser controller sends selected target with group edits", asyn
     assert.equal(calls[0][0], "/v1/dirs/group-memberships");
     assert.deepEqual(JSON.parse(calls[0][1].body), {
       path: "/workspace/swimmers",
-      target: "devbox",
+      target: null,
       add: ["backend"],
       remove: [],
     });
   } finally {
     globalThis.document = previousDocument;
   }
+});
+
+test("directory browser controller blocks remote group edits before fetch", async () => {
+  const calls = [];
+  const { runtime, state, el, statuses } = createRuntime({
+    apiFetch: async (...args) => {
+      calls.push(args);
+      return {};
+    },
+  });
+  state.readOnly = false;
+  state.dirBrowser.launchTargets = [{ id: "local", label: "Local machine", kind: "local" }, devboxTarget()];
+  state.dirBrowser.launchTarget = "devbox";
+  el.createLaunchTarget = selectElement("devbox");
+
+  const controller = createDirBrowserController(runtime);
+  await controller.updateDirEntryGroupMembership("/workspace/swimmers", "add", "backend");
+
+  assert.equal(calls.length, 0);
+  assert.deepEqual(statuses.at(-1), {
+    message: "Remote directory group edits are read-only from this server.",
+    isError: true,
+  });
 });
 
 test("directory browser controller blocks unmapped remote single creates before fetch", async () => {

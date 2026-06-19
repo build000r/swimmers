@@ -118,6 +118,7 @@ function createDirBrowserEntryElement(createElement, entry, view, selected) {
   const entryPath = dirEntryResolvedPath(path, entry);
   const selectable = dirEntryBatchSelectable(entry, entryPath);
   const readOnly = Boolean(view.readOnly);
+  const groupActionsReadOnly = Boolean(view.groupActionsReadOnly ?? view.readOnly);
   const running = Boolean(entry?.is_running);
   const dirty = Boolean(entry?.repo_dirty);
   const memberships = dirEntryGroups(entry);
@@ -231,7 +232,7 @@ function createDirBrowserEntryElement(createElement, entry, view, selected) {
             className: "dir-row-group-actions",
             key: "group-actions",
           },
-          ...groupActions.map((action) => groupActionButton(createElement, entry, entryPath, action, readOnly)),
+          ...groupActions.map((action) => groupActionButton(createElement, entry, entryPath, action, groupActionsReadOnly)),
         )
         : null,
     ),

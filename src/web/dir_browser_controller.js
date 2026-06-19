@@ -87,6 +87,10 @@ export function createDirBrowserController(runtime) {
     return dirBrowserLaunchTargetPayload(el, state.dirBrowser);
   }
 
+  function remoteDirectoryWritesReadOnly() {
+    return launchTargetPayload() !== null;
+  }
+
   function launchTargetPreviewForPath(path) {
     return dirBrowserLaunchTargetPreviewForPath(path, selectedLaunchTargetSummary());
   }
@@ -181,6 +185,7 @@ export function createDirBrowserController(runtime) {
       el,
       dirBrowser: state.dirBrowser,
       readOnly: state.readOnly,
+      groupActionsReadOnly: state.readOnly || remoteDirectoryWritesReadOnly(),
       storage,
       pathStorageKey,
       managedOnlyStorageKey,
@@ -252,6 +257,10 @@ export function createDirBrowserController(runtime) {
     const targetGroup = String(groupName || "").trim();
     const sourceGroup = String(removeGroup || "").trim();
     if (!targetPath || !targetGroup || state.readOnly) {
+      return;
+    }
+    if (remoteDirectoryWritesReadOnly()) {
+      setDirStatus("Remote directory group edits are read-only from this server.", true);
       return;
     }
 

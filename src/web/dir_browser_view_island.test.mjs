@@ -186,6 +186,22 @@ test("directory browser view island preserves read-only disabled controls and em
   assert.throws(() => createDirBrowserListContents(null, {}), /createElement function/);
 });
 
+test("directory browser view island can make group actions read-only without disabling selection", () => {
+  const rows = createDirBrowserListContents(createElement, {
+    path: "/srv/repos",
+    groups: ["core"],
+    selectedPaths: [],
+    readOnly: false,
+    groupActionsReadOnly: true,
+    entries: [{ name: "swimmers", full_path: "/srv/repos/swimmers", groups: [] }],
+  });
+  const checkbox = rows[0].props.children[0].props.children[0];
+  const groupActions = rows[0].props.children[4].props.children[1];
+
+  assert.equal(checkbox.props.disabled, false);
+  assert.equal(groupActions.props.children[0].props.disabled, true);
+});
+
 test("directory browser view island mounts, rerenders, and guards stable nodes", () => {
   const { documentRef, replace } = fakeDocument();
   const calls = [];

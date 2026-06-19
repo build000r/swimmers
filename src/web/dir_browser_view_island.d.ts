@@ -16,6 +16,7 @@ export interface DirBrowserViewState {
   activeGroup?: string | null;
   selectedPaths?: Set<string> | readonly string[] | null;
   readOnly?: boolean;
+  groupActionsReadOnly?: boolean;
   managed?: boolean;
   overlayLabel?: string | null;
   search?: string | null;
