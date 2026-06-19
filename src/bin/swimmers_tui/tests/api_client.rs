@@ -596,6 +596,135 @@ async fn api_client_fetch_session_snapshot_uses_single_sessions_envelope() {
 }
 
 #[tokio::test]
+async fn api_client_fetch_environment_metadata_uses_environment_endpoint() {
+    use axum::routing::get;
+    use axum::{Json, Router};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+
+    let session_hits = Arc::new(AtomicUsize::new(0));
+    let environment_hits = Arc::new(AtomicUsize::new(0));
+    let session_hits_route = Arc::clone(&session_hits);
+    let environment_hits_route = Arc::clone(&environment_hits);
+    let app = Router::new()
+        .route(
+            "/v1/sessions",
+            get(move || {
+                let session_hits = Arc::clone(&session_hits_route);
+                async move {
+                    session_hits.fetch_add(1, Ordering::SeqCst);
+                    Json(SessionListResponse {
+                        sessions: Vec::new(),
+                        version: 1,
+                        repo_themes: HashMap::new(),
+                        environments: Vec::new(),
+                        fleet_lens: Default::default(),
+                        fleet_presets: Vec::new(),
+                    })
+                }
+            }),
+        )
+        .route(
+            "/v1/environments",
+            get(move || {
+                let environment_hits = Arc::clone(&environment_hits_route);
+                async move {
+                    environment_hits.fetch_add(1, Ordering::SeqCst);
+                    let mut environment = EnvironmentSummary::local();
+                    environment.id = "remote-devbox".to_string();
+                    environment.kind = "ssh".to_string();
+                    Json(EnvironmentListResponse {
+                        environments: vec![environment],
+                        fleet_presets: vec![FleetLensPreset {
+                            id: "remote-devbox".to_string(),
+                            label: "Remote devbox".to_string(),
+                            source: "test".to_string(),
+                            matchers: vec![FleetLensPresetMatcher::TargetId {
+                                id: "remote-devbox".to_string(),
+                            }],
+                        }],
+                    })
+                }
+            }),
+        );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind test server");
+    let addr = listener.local_addr().expect("server addr");
+    let handle = tokio::spawn(async move {
+        axum::serve(listener, app).await.expect("serve test api");
+    });
+    let client = test_api_client(format!("http://{addr}"), None);
+
+    let metadata = client
+        .fetch_environment_metadata()
+        .await
+        .expect("environment metadata");
+
+    handle.abort();
+    assert_eq!(environment_hits.load(Ordering::SeqCst), 1);
+    assert_eq!(session_hits.load(Ordering::SeqCst), 0);
+    assert_eq!(metadata.environments[0].id, "remote-devbox");
+    assert_eq!(metadata.fleet_presets[0].id, "remote-devbox");
+}
+
+#[tokio::test]
+async fn api_client_fetch_environment_metadata_falls_back_to_sessions_envelope_on_404() {
+    use axum::routing::get;
+    use axum::{Json, Router};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+
+    let session_hits = Arc::new(AtomicUsize::new(0));
+    let session_hits_route = Arc::clone(&session_hits);
+    let app = Router::new().route(
+        "/v1/sessions",
+        get(move || {
+            let session_hits = Arc::clone(&session_hits_route);
+            async move {
+                session_hits.fetch_add(1, Ordering::SeqCst);
+                let mut environment = EnvironmentSummary::local();
+                environment.id = "legacy-devbox".to_string();
+                environment.kind = "ssh".to_string();
+                Json(SessionListResponse {
+                    sessions: vec![session_summary("sess-1", "7", TEST_REPO_SWIMMERS)],
+                    version: 1,
+                    repo_themes: HashMap::new(),
+                    environments: vec![environment],
+                    fleet_lens: Default::default(),
+                    fleet_presets: vec![FleetLensPreset {
+                        id: "legacy-devbox".to_string(),
+                        label: "Legacy devbox".to_string(),
+                        source: "legacy".to_string(),
+                        matchers: vec![FleetLensPresetMatcher::TargetId {
+                            id: "legacy-devbox".to_string(),
+                        }],
+                    }],
+                })
+            }
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind test server");
+    let addr = listener.local_addr().expect("server addr");
+    let handle = tokio::spawn(async move {
+        axum::serve(listener, app).await.expect("serve test api");
+    });
+    let client = test_api_client(format!("http://{addr}"), None);
+
+    let metadata = client
+        .fetch_environment_metadata()
+        .await
+        .expect("environment metadata fallback");
+
+    handle.abort();
+    assert_eq!(session_hits.load(Ordering::SeqCst), 1);
+    assert_eq!(metadata.environments[0].id, "legacy-devbox");
+    assert_eq!(metadata.fleet_presets[0].id, "legacy-devbox");
+}
+
+#[tokio::test]
 async fn startup_preflight_waits_for_slow_local_sessions() {
     let (base_url, handle) = spawn_delayed_api_server(Some(Duration::from_millis(150)), None).await;
     let client = test_api_client(base_url, None);
