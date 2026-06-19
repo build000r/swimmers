@@ -360,6 +360,55 @@ fn parse_agent_launch_injects_local_and_filters_unknown_defaults() {
 }
 
 #[test]
+fn parse_agent_launch_trims_target_identity_and_filters_blank_ids() {
+    let mut group_defaults = BTreeMap::new();
+    group_defaults.insert("known".to_string(), " remote ".to_string());
+    group_defaults.insert("blank".to_string(), "   ".to_string());
+
+    let launch = parse_agent_launch(Some(DevSanityAgentLaunch {
+        default_target: Some(" remote ".to_string()),
+        targets: vec![
+            DevSanityLaunchTarget {
+                id: Some(" remote ".to_string()),
+                label: Some(" Remote Box ".to_string()),
+                kind: Some(" swimmers_api ".to_string()),
+                base_url: Some("http://remote.test:3210".to_string()),
+                auth_token_env: None,
+                path_mappings: Vec::new(),
+            },
+            DevSanityLaunchTarget {
+                id: Some("   ".to_string()),
+                label: Some("Blank".to_string()),
+                kind: Some("swimmers_api".to_string()),
+                base_url: Some("http://blank.test:3210".to_string()),
+                auth_token_env: None,
+                path_mappings: Vec::new(),
+            },
+        ],
+        group_defaults,
+    }));
+
+    assert_eq!(launch.default_target, "remote");
+    assert_eq!(launch.default_for_group(Some("known")), "remote");
+    assert!(!launch.group_defaults.contains_key("blank"));
+    assert_eq!(
+        launch
+            .targets
+            .iter()
+            .map(|target| (
+                target.id.as_str(),
+                target.label.as_str(),
+                target.kind.as_str()
+            ))
+            .collect::<Vec<_>>(),
+        vec![
+            ("local", "Local machine", "local"),
+            ("remote", "Remote Box", "swimmers_api")
+        ]
+    );
+}
+
+#[test]
 fn parse_agent_launch_ignores_blank_or_empty_expanded_path_mappings() {
     let key = "SWIMMERS_OVERLAY_EMPTY_MAPPING_TEST";
     let prior = std::env::var(key).ok();

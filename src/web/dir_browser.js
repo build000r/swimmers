@@ -332,13 +332,36 @@ export function launchTargetPreviewForPath(path, target) {
   if (targetId === "local") {
     return { targetId, targetLabel, localCwd, remoteCwd: null, blocked: false, reason: "" };
   }
-  if (String(target?.kind || "").trim() !== "swimmers_api") {
-    return { targetId, targetLabel, localCwd, remoteCwd: null, blocked: true, reason: "unsupported target" };
+  const configBlocker = launchTargetConfigBlocker(target);
+  if (configBlocker) {
+    return { targetId, targetLabel, localCwd, remoteCwd: null, blocked: true, reason: configBlocker };
   }
   const remoteCwd = mapPathWithLaunchTarget(localCwd, target);
   return remoteCwd
     ? { targetId, targetLabel, localCwd, remoteCwd, blocked: false, reason: "" }
     : { targetId, targetLabel, localCwd, remoteCwd: null, blocked: true, reason: "unmapped cwd" };
+}
+
+function launchTargetConfigBlocker(target) {
+  if (String(target?.kind || "").trim() !== "swimmers_api") {
+    return "unsupported target";
+  }
+  const baseUrl = String(target?.base_url || "").trim();
+  if (!baseUrl) {
+    return "missing base_url";
+  }
+  try {
+    const parsed = new URL(baseUrl);
+    if (!parsed.hostname || !["http:", "https:"].includes(parsed.protocol)) {
+      return "invalid base_url";
+    }
+    if (parsed.username || parsed.password || parsed.search || parsed.hash) {
+      return "invalid base_url";
+    }
+  } catch {
+    return "invalid base_url";
+  }
+  return "";
 }
 
 export function launchTargetPreviewText(path, target) {

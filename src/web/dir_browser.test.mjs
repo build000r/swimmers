@@ -294,7 +294,7 @@ test("dirRowClickPlan preserves row path trimming, child detection, and ignores"
 });
 
 test("normalizeLaunchTargets keeps local override available", () => {
-  const devbox = { id: "devbox", label: "Devbox", kind: "swimmers_api", path_mappings: [] };
+  const devbox = { id: "devbox", label: "Devbox", kind: "swimmers_api", base_url: "http://127.0.0.1:3210", path_mappings: [] };
 
   assert.deepEqual(normalizeLaunchTargets([]), [{
     id: "local",
@@ -314,6 +314,7 @@ test("launch target normalization trims ids and keeps remote selection usable", 
     id: " devbox ",
     label: " Devbox ",
     kind: " swimmers_api ",
+    base_url: " http://127.0.0.1:3210 ",
     path_mappings: [{ local_prefix: "/Users/tester/repos", remote_prefix: "/srv/repos" }],
   }]);
   const el = { createLaunchTarget: element(" devbox ") };
@@ -350,6 +351,7 @@ test("launch target and batch bar helpers preserve payload and label semantics",
       id: "remote-a",
       label: "Remote A",
       kind: "swimmers_api",
+      base_url: "http://127.0.0.1:3210",
       path_mappings: [{ local_prefix: "/srv/repos", remote_prefix: "/workspace/repos" }],
     }],
     batchSelected: new Set(["/srv/repos/swimmers", "/srv/repos/other"]),
@@ -372,6 +374,7 @@ test("launch target preview maps longest prefix and blocks unmapped remote batch
     id: "devbox",
     label: "Devbox",
     kind: "swimmers_api",
+    base_url: "http://127.0.0.1:3210",
     path_mappings: [
       { local_prefix: "/Users/tester/repos", remote_prefix: "/srv/repos" },
       { local_prefix: "/Users/tester/repos/opensource", remote_prefix: "/srv/opensource" },
@@ -408,6 +411,7 @@ test("launch target preview keeps first equal-specificity mapping", () => {
     id: "devbox",
     label: "Devbox",
     kind: "swimmers_api",
+    base_url: "http://127.0.0.1:3210",
     path_mappings: [
       { local_prefix: "/Users/tester/repos", remote_prefix: "/srv/primary" },
       { local_prefix: "/Users/tester/./repos", remote_prefix: "/srv/duplicate" },
@@ -422,6 +426,7 @@ test("launch target preview ignores incomplete path mappings like the backend", 
     id: "devbox",
     label: "Devbox",
     kind: "swimmers_api",
+    base_url: "http://127.0.0.1:3210",
     path_mappings: [
       { local_prefix: "", remote_prefix: "/remote" },
       { local_prefix: "/Users/tester/repos", remote_prefix: "   " },
@@ -465,6 +470,41 @@ test("launch target preview blocks non-local ids without swimmers api kind", () 
     blocked: true,
     reason: "unsupported target",
   });
+});
+
+test("launch target preview blocks swimmers api targets without a safe base url", () => {
+  const baseTarget = {
+    id: "devbox",
+    label: "Devbox",
+    kind: "swimmers_api",
+    path_mappings: [{ local_prefix: "/Users/tester/repos", remote_prefix: "/srv/repos" }],
+  };
+
+  assert.deepEqual(launchTargetPreviewForPath("/Users/tester/repos/swimmers", baseTarget), {
+    targetId: "devbox",
+    targetLabel: "Devbox",
+    localCwd: "/Users/tester/repos/swimmers",
+    remoteCwd: null,
+    blocked: true,
+    reason: "missing base_url",
+  });
+
+  for (const base_url of [
+    "not a url",
+    "ssh://remote.test:3210",
+    "http://user@127.0.0.1:3210",
+    "http://127.0.0.1:3210/?x=1",
+    "http://127.0.0.1:3210/#fragment",
+  ]) {
+    assert.deepEqual(launchTargetPreviewForPath("/Users/tester/repos/swimmers", { ...baseTarget, base_url }), {
+      targetId: "devbox",
+      targetLabel: "Devbox",
+      localCwd: "/Users/tester/repos/swimmers",
+      remoteCwd: null,
+      blocked: true,
+      reason: "invalid base_url",
+    });
+  }
 });
 
 test("directory browser controller helpers preserve retry gate and batch failure copy", () => {

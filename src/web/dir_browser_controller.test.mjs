@@ -73,6 +73,7 @@ function devboxTarget() {
     id: "devbox",
     label: "Devbox",
     kind: "swimmers_api",
+    base_url: "http://127.0.0.1:3210",
     path_mappings: [{ local_prefix: "/workspace", remote_prefix: "/srv/workspace" }],
   };
 }

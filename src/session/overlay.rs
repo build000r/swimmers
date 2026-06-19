@@ -951,15 +951,28 @@ fn parse_agent_launch(section: Option<DevSanityAgentLaunch>) -> OverlayLaunchCon
 }
 
 fn parse_launch_target(target: DevSanityLaunchTarget) -> Option<LaunchTargetSummary> {
-    let id = target.id?;
+    let id = nonempty_launch_metadata(target.id?)?;
+    let label = target
+        .label
+        .and_then(nonempty_launch_metadata)
+        .unwrap_or_else(|| id.clone());
+    let kind = target
+        .kind
+        .and_then(nonempty_launch_metadata)
+        .unwrap_or_else(|| "local".to_string());
     Some(LaunchTargetSummary {
-        label: target.label.unwrap_or_else(|| id.clone()),
-        kind: target.kind.unwrap_or_else(|| "local".to_string()),
+        label,
+        kind,
         id,
         base_url: target.base_url,
         auth_token_env: target.auth_token_env,
         path_mappings: parse_launch_path_mappings(target.path_mappings),
     })
+}
+
+fn nonempty_launch_metadata(raw: String) -> Option<String> {
+    let trimmed = raw.trim();
+    (!trimmed.is_empty()).then(|| trimmed.to_string())
 }
 
 fn parse_launch_path_mappings(mappings: Vec<DevSanityLaunchPathMapping>) -> Vec<LaunchPathMapping> {
@@ -991,6 +1004,7 @@ fn ensure_local_launch_target(targets: &mut Vec<LaunchTargetSummary>) {
 
 fn valid_default_target(default_target: Option<String>, targets: &[LaunchTargetSummary]) -> String {
     default_target
+        .and_then(nonempty_launch_metadata)
         .filter(|target| target_exists(targets, target))
         .unwrap_or_else(|| "local".to_string())
 }
@@ -1001,11 +1015,15 @@ fn valid_group_defaults(
 ) -> BTreeMap<String, String> {
     group_defaults
         .into_iter()
-        .filter(|(_, target)| target_exists(targets, target))
+        .filter_map(|(group, target)| {
+            let target = nonempty_launch_metadata(target)?;
+            target_exists(targets, &target).then_some((group, target))
+        })
         .collect()
 }
 
 fn target_exists(targets: &[LaunchTargetSummary], id: &str) -> bool {
+    let id = id.trim();
     targets.iter().any(|target| target.id == id)
 }
 
