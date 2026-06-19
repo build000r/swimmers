@@ -931,8 +931,9 @@ export function initialStateBootPlan(context = {}) {
   const selectedFromUrl = param("session");
   const selectedFromStorage = context.selectedFromStorage ?? null;
   const followFromUrl = param("follow") === "published";
-  const rawStoredDirPath = context.rawStoredDirPath ?? "";
-  const storedDirPath = rawStoredDirPath.trim() === "/" ? "" : rawStoredDirPath;
+  const rawStoredDirPath = String(context.rawStoredDirPath ?? "");
+  const trimmedStoredDirPath = rawStoredDirPath.trim();
+  const storedDirPath = trimmedStoredDirPath === "/" ? "" : trimmedStoredDirPath;
   const followPublishedSelection = Boolean(context.bootFollowPublishedSelection || followFromUrl);
   return {
     queryToken,

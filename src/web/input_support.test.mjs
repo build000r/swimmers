@@ -1379,7 +1379,7 @@ test("initialStateBootPlan preserves token, session, directory, and desktop defa
     searchParams: new URLSearchParams("token=query-token&session=url-session"),
     storedToken: "stored-token",
     selectedFromStorage: "stored-session",
-    rawStoredDirPath: "/repo/swimmers",
+    rawStoredDirPath: " /repo/swimmers ",
     rawStoredManagedOnly: "true",
     rawStoredFleetFilter: JSON.stringify({ kind: "TARGET", key: "skillbox" }),
     rawStoredSessionGroupMode: "project",
