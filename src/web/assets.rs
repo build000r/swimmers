@@ -334,9 +334,8 @@ fn push_unique_vite_asset_route(routes: &mut Vec<String>, file: &str) -> Result<
 }
 
 fn vite_asset_route(file: &str) -> Option<String> {
-    let route_path = sanitize_vite_asset_path(file)?
-        .to_string_lossy()
-        .replace('\\', "/");
+    let relative_path = sanitize_vite_asset_path(file)?;
+    let route_path = relative_path.to_string_lossy();
     Some(format!("{VITE_ASSET_ROUTE_PREFIX}{route_path}"))
 }
 
@@ -790,7 +789,10 @@ pub(super) async fn serve_vite_dist_asset(dist_dir: &Path, route_path: &str) -> 
 
 fn sanitize_vite_asset_path(route_path: &str) -> Option<PathBuf> {
     let route_path = route_path.trim_start_matches('/');
-    if !route_path.starts_with("assets/") || route_path.ends_with(".map") {
+    if !route_path.starts_with("assets/")
+        || route_path.ends_with(".map")
+        || route_path.contains('\\')
+    {
         return None;
     }
 

@@ -570,6 +570,7 @@ async fn vite_dist_asset_route_serves_built_js_css_and_chunks_with_cache_policy(
     for route in [
         "../secrets.js",
         "assets/../secrets.js",
+        r"assets\app-12345678.js",
         "assets/app-12345678.js.map",
         ".vite/manifest.json",
     ] {
@@ -587,6 +588,26 @@ async fn vite_dist_asset_route_serves_built_js_css_and_chunks_with_cache_policy(
         .as_str()
         .expect("message")
         .contains(dir.path().to_str().expect("temp path")));
+}
+
+#[test]
+fn vite_manifest_tags_reject_backslash_asset_paths() {
+    let manifest = serde_json::from_str::<std::collections::BTreeMap<String, ViteManifestEntry>>(
+        r#"{
+  "src/web/app.js": {
+    "file": "assets/nested\\app-12345678.js",
+    "src": "src/web/app.js",
+    "isEntry": true
+  }
+}"#,
+    )
+    .expect("manifest");
+
+    let err = frontend_asset_tags_from_manifest(&manifest).expect_err("backslash paths fail");
+    assert!(
+        err.contains("unsupported file path"),
+        "unexpected manifest error: {err}"
+    );
 }
 
 #[test]
