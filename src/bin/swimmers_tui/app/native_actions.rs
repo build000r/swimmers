@@ -134,9 +134,7 @@ pub(super) fn remote_native_handoff_message(session: &SessionSummary) -> Option<
         Some(session.cwd.as_str()),
     ]);
     let target_id = session.environment.target_id.trim();
-    let target_suffix = if target_id.is_empty()
-        || target_id == target
-    {
+    let target_suffix = if target_id.is_empty() || target_id == target {
         String::new()
     } else {
         format!(" ({target_id})")
