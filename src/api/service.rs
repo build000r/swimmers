@@ -891,7 +891,7 @@ pub async fn list_dirs(
     let memberships = load_dir_group_memberships(state).await;
 
     if let Some(group_name) = group {
-        return list_group_dir_response(base, group_name, &memberships).await;
+        return list_group_dir_response(state, base, group_name, &memberships).await;
     }
 
     let request_started = Instant::now();
@@ -928,6 +928,7 @@ pub async fn list_dirs(
 }
 
 async fn list_group_dir_response(
+    state: &Arc<AppState>,
     base: PathBuf,
     group_name: &str,
     memberships: &DirGroupMemberships,
@@ -946,6 +947,7 @@ async fn list_group_dir_response(
     };
     let mut entries = list_effective_group_entries(group, memberships).await;
     if let Some(config) = dir_config.as_ref() {
+        decorate_group_entries(state, &mut entries, config).await;
         annotate_dir_entry_groups(&mut entries, &canonical_base, config, memberships);
     }
     Ok(DirListResponse {
@@ -960,6 +962,56 @@ async fn list_group_dir_response(
             canonical_base.as_path(),
         ),
     })
+}
+
+async fn decorate_group_entries(
+    state: &Arc<AppState>,
+    entries: &mut [DirEntry],
+    config: &OverlayDirConfig,
+) {
+    let service_context = OverlayServiceContext {
+        base_path: config.base_path.clone(),
+        services: config.services.clone(),
+    };
+    let mut pending_indices = Vec::new();
+    let mut pending = Vec::new();
+    let mut unique_services = BTreeSet::new();
+
+    for (index, entry) in entries.iter().enumerate() {
+        let Some(entry_path) = entry.full_path.as_deref().map(PathBuf::from) else {
+            continue;
+        };
+        let services = services_for_directory(&entry_path, &service_context);
+        extend_unique_services(&mut unique_services, &services);
+        pending_indices.push(index);
+        pending.push(PendingEntry {
+            name: entry.name.clone(),
+            entry_path: entry_path.clone(),
+            has_children: entry.has_children,
+            modified_at: modified_secs(&entry_path),
+            services,
+        });
+    }
+
+    let probes = probe_pending_entries(state, &pending).await;
+    let services: Vec<String> = unique_services.into_iter().collect();
+    let health_map = overlay_service_health_map(&config.services, &services).await;
+    let svc_meta = service_metadata_map(&config.services);
+
+    for ((index, pending_entry), (repo_dirty, repo_action)) in pending_indices
+        .into_iter()
+        .zip(pending.into_iter())
+        .zip(probes.into_iter())
+    {
+        let (is_running, has_restart, open_url) =
+            service_entry_metadata(&pending_entry.services, &health_map, &svc_meta);
+        let entry = &mut entries[index];
+        entry.is_running = is_running;
+        entry.repo_dirty = repo_dirty;
+        entry.repo_action = repo_action;
+        entry.has_restart = has_restart;
+        entry.open_url = open_url;
+    }
 }
 
 async fn list_managed_root_response(

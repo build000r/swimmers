@@ -67,6 +67,30 @@ fn service_mapped_launch_target(
     }
 }
 
+struct SleepingRepoActionExecutor;
+
+impl crate::host_actions::RepoActionExecutor for SleepingRepoActionExecutor {
+    fn execute(
+        &self,
+        _repo_root: std::path::PathBuf,
+        _kind: RepoActionKind,
+    ) -> std::io::Result<Option<String>> {
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        Ok(None)
+    }
+}
+
+fn init_dirty_git_repo(path: &Path) {
+    std::fs::create_dir_all(path).expect("repo dir");
+    let status = std::process::Command::new("git")
+        .args(["init", "-q"])
+        .current_dir(path)
+        .status()
+        .expect("git init");
+    assert!(status.success(), "git init should succeed");
+    std::fs::write(path.join("README.md"), "dirty\n").expect("write readme");
+}
+
 #[test]
 fn default_launch_target_for_uses_mapping_only_without_explicit_default() {
     let dir = tempfile::tempdir().expect("tempdir");
@@ -667,6 +691,69 @@ fn assert_api_service_error(err: ApiServiceError, status: StatusCode, code: &str
     assert_eq!(err.status, status);
     assert_eq!(err.code, code);
     assert_eq!(err.message, message);
+}
+
+#[tokio::test]
+async fn decorate_group_entries_reports_repo_dirty_running_action_and_service_metadata() {
+    let _lock = crate::test_support::ENV_LOCK
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
+    crate::host_actions::clear_inspect_git_repo_cache_for_tests();
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let base = dir.path().join("repos");
+    let repo = base.join("swimmers");
+    init_dirty_git_repo(&repo);
+    let config = OverlayDirConfig {
+        label: "test".into(),
+        base_path: base.clone(),
+        services: vec![OverlayServiceEntry {
+            name: "swimmers-web".into(),
+            dir: "swimmers".into(),
+            health_url: None,
+            restart: Some("make restart".into()),
+            open_url: Some("http://127.0.0.1:3210".into()),
+        }],
+        groups: vec![OverlayDirGroup {
+            name: "active".into(),
+            paths: vec![repo.clone()],
+            dirs: Vec::new(),
+        }],
+        launch: crate::session::overlay::OverlayLaunchConfig::local_only(),
+    };
+    let state = test_state();
+    state
+        .repo_actions
+        .start(
+            repo.clone(),
+            RepoActionKind::Commit,
+            Arc::new(SleepingRepoActionExecutor),
+        )
+        .await
+        .expect("start repo action");
+
+    let group = config.groups.first().expect("group");
+    let mut entries = list_effective_group_entries(group, &DirGroupMemberships::default()).await;
+    decorate_group_entries(&state, &mut entries, &config).await;
+    annotate_dir_entry_groups(
+        &mut entries,
+        &base.canonicalize().expect("canonical base"),
+        &config,
+        &DirGroupMemberships::default(),
+    );
+
+    let entry = entries
+        .iter()
+        .find(|entry| entry.name == "swimmers")
+        .expect("group entry");
+    assert_eq!(entry.repo_dirty, Some(true));
+    let repo_action = entry.repo_action.as_ref().expect("repo action");
+    assert_eq!(repo_action.kind, RepoActionKind::Commit);
+    assert_eq!(repo_action.state, RepoActionState::Running);
+    assert_eq!(entry.is_running, Some(true));
+    assert_eq!(entry.has_restart, Some(true));
+    assert_eq!(entry.open_url.as_deref(), Some("http://127.0.0.1:3210"));
+    assert_eq!(entry.groups, vec!["active".to_string()]);
 }
 
 #[test]

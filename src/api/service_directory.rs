@@ -651,6 +651,38 @@ pub(super) fn modified_secs(path: &Path) -> u64 {
 mod tests {
     use super::*;
 
+    fn test_app_state() -> std::sync::Arc<crate::api::AppState> {
+        let config = std::sync::Arc::new(crate::config::Config::default());
+        let supervisor = crate::session::supervisor::SessionSupervisor::new(config.clone());
+        std::sync::Arc::new(crate::api::AppState {
+            supervisor,
+            config,
+            thought_config: std::sync::Arc::new(tokio::sync::RwLock::new(
+                crate::thought::runtime_config::ThoughtConfig::default(),
+            )),
+            native_desktop_app: std::sync::Arc::new(tokio::sync::RwLock::new(
+                crate::types::NativeDesktopApp::Iterm,
+            )),
+            ghostty_open_mode: std::sync::Arc::new(tokio::sync::RwLock::new(
+                crate::types::GhosttyOpenMode::Swap,
+            )),
+            sync_request_sequence: std::sync::Arc::new(
+                crate::thought::protocol::SyncRequestSequence::new(),
+            ),
+            daemon_defaults: crate::api::once_lock_with(None),
+            file_store: crate::api::once_lock_with(None),
+            bridge_health: std::sync::Arc::new(
+                crate::thought::health::BridgeHealthState::new_with_tick(
+                    std::time::Duration::from_secs(15),
+                ),
+            ),
+            published_selection: std::sync::Arc::new(tokio::sync::RwLock::new(
+                crate::api::PublishedSelectionState::default(),
+            )),
+            repo_actions: crate::host_actions::RepoActionTracker::default(),
+        })
+    }
+
     fn write_workspace_yaml(path: &Path, repo: &Path) {
         std::fs::write(
             path,
@@ -990,6 +1022,7 @@ mod tests {
         write_workspace_yaml(&workspaces.join("orchestration.yaml"), &repo);
 
         let response = super::super::list_group_dir_response(
+            &test_app_state(),
             base.clone(),
             "orchestration",
             &DirGroupMemberships::default(),
