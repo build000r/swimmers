@@ -1151,6 +1151,24 @@ fn target_points_at_current_server_matches_loopback_aliases() {
 }
 
 #[test]
+fn target_points_at_current_server_ignores_prefixed_base_paths() {
+    let mut config = Config::default();
+    config.bind = "127.0.0.1".to_string();
+    config.port = 3210;
+    let mut target = target();
+    target.base_url = Some("http://localhost:3210/swimmers-api".to_string());
+
+    assert!(!target_points_at_current_server(&target, &config));
+    assert_eq!(
+        remote_poll_targets(vec![target], &config)
+            .into_iter()
+            .map(|target| target.id)
+            .collect::<Vec<_>>(),
+        vec!["jeremy-skillbox".to_string()]
+    );
+}
+
+#[test]
 fn target_points_at_current_server_matches_wildcard_loopback_aliases() {
     let mut config = Config::default();
     config.bind = "0.0.0.0".to_string();

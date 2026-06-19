@@ -1515,20 +1515,32 @@ fn is_swimmers_api_target(target: &LaunchTargetSummary) -> bool {
 }
 
 fn target_points_at_current_server(target: &LaunchTargetSummary, config: &Config) -> bool {
-    let Ok(url) = parse_remote_base_url(target) else {
+    let Some((host, url_port)) = current_server_candidate_host_and_port(target) else {
         return false;
     };
-    let Some(host) = url.host_str() else {
-        return false;
-    };
-    let url_port = url.port_or_known_default().unwrap_or(80);
-    if url_port != config.port {
-        return false;
-    }
-    let bind_host = crate::cli::bind_host(&config.bind);
-    host.eq_ignore_ascii_case(bind_host)
-        || (crate::cli::is_loopback_bind(&config.bind) && is_loopback_url_host(host))
-        || (is_unspecified_bind_host(bind_host) && is_loopback_url_host(host))
+    url_port == config.port && host_matches_current_server(&host, &config.bind)
+}
+
+fn current_server_candidate_host_and_port(target: &LaunchTargetSummary) -> Option<(String, u16)> {
+    let url = parse_remote_base_url(target).ok()?;
+    is_root_base_url_path(url.path()).then_some(())?;
+    let host = url.host_str()?.to_string();
+    Some((host, url.port_or_known_default().unwrap_or(80)))
+}
+
+fn host_matches_current_server(host: &str, bind: &str) -> bool {
+    let bind_host = crate::cli::bind_host(bind);
+    let loopback_url_host = is_loopback_url_host(host);
+    [
+        host.eq_ignore_ascii_case(bind_host),
+        crate::cli::is_loopback_bind(bind) && loopback_url_host,
+        is_unspecified_bind_host(bind_host) && loopback_url_host,
+    ]
+    .contains(&true)
+}
+
+fn is_root_base_url_path(path: &str) -> bool {
+    matches!(path, "" | "/")
 }
 
 fn is_loopback_url_host(host: &str) -> bool {
