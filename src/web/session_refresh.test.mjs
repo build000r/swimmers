@@ -120,15 +120,30 @@ test("runSessionRefresh preserves successful refresh ordering and status side ef
     },
     apiMaybeFetch: async (path) => {
       calls.push(["apiMaybeFetch", path]);
-      return { path };
+      return {
+        path,
+        json: async () => (
+          path === "/v1/operator-pressure"
+            ? {
+                sessions: [{
+                  session_id: "agent-1",
+                  repo_key: 7,
+                  repo_label: null,
+                  pressure: { score: "8", reason_kind: "awaiting_user" },
+                  batch_send_session_ids: ["agent-1", null, "agent-2"],
+                }],
+              }
+            : { persistence: { available: true, ok: true } }
+        ),
+      };
     },
     responseJson: async (response, normalizer) => {
       calls.push(["responseJson", response.path]);
       return normalizer(await response.json());
     },
-    responseJsonOrNull: async (response) => {
+    responseJsonOrNull: async (response, normalizer = (value) => value) => {
       calls.push(["responseJsonOrNull", response.path]);
-      return response.path;
+      return normalizer(await response.json());
     },
     applyOperatorPressure: (payload) => calls.push(["applyOperatorPressure", payload]),
     applyBackendHealth: (payload) => calls.push(["applyBackendHealth", payload]),
@@ -160,8 +175,33 @@ test("runSessionRefresh preserves successful refresh ordering and status side ef
     ["responseJson", "/v1/sessions"],
     ["responseJsonOrNull", "/v1/operator-pressure"],
     ["responseJsonOrNull", "/health"],
-    ["applyOperatorPressure", "/v1/operator-pressure"],
-    ["applyBackendHealth", "/health"],
+    ["applyOperatorPressure", {
+      sessions: [{
+        session_id: "agent-1",
+        repo_key: "7",
+        repo_label: "",
+        pressure: {
+          score: 8,
+          reason: "",
+          reason_kind: "awaiting_user",
+          glyph: "a",
+          tone: "quiet",
+          needs_input: false,
+          launch_ready: false,
+          commit_ready: false,
+          action_cue_count: 0,
+        },
+        batch_send_session_ids: ["agent-1", "agent-2"],
+      }],
+      repos: [],
+      inbox: [],
+      summary: {
+        max_score: 0,
+        action_cues: 0,
+        batch_send_groups: 0,
+      },
+    }],
+    ["applyBackendHealth", { persistence: { available: true, ok: true } }],
     ["syncTrogdorCueTransitions"],
     ["persistSelectedSession", "agent-1"],
     ["setupHudSurface"],

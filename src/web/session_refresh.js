@@ -1,4 +1,5 @@
 import {
+  normalizeOperatorPressureResponse,
   normalizePublishedSelectionResponse,
   normalizeSessionListResponse,
 } from "./contracts.js";
@@ -119,7 +120,10 @@ export async function runSessionRefresh(runtime) {
       publishedRequest,
     ]);
     const payload = await runtime.responseJson(response, normalizeSessionListResponse);
-    const pressurePayload = await runtime.responseJsonOrNull(pressureResponse);
+    const pressurePayload = await runtime.responseJsonOrNull(
+      pressureResponse,
+      normalizeOperatorPressureResponse,
+    );
     const healthPayload = await runtime.responseJsonOrNull(healthResponse);
     runtime.state.sessions = Array.isArray(payload.sessions) ? payload.sessions : [];
     runtime.state.environments = Array.isArray(payload.environments) ? payload.environments : [];
