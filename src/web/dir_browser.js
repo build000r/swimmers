@@ -232,8 +232,29 @@ function localLaunchTarget() {
   return { id: "local", label: "Local machine", kind: "local", path_mappings: [] };
 }
 
+function normalizeLaunchTarget(target) {
+  const id = String(target?.id || "").trim();
+  if (!id) {
+    return null;
+  }
+  if (id === "local") {
+    return localLaunchTarget();
+  }
+  const label = String(target?.label || id).trim() || id;
+  const kind = String(target?.kind || "").trim();
+  return {
+    ...target,
+    id,
+    label,
+    kind,
+    path_mappings: Array.isArray(target?.path_mappings) ? target.path_mappings : [],
+  };
+}
+
 export function normalizeLaunchTargets(targets) {
-  const normalized = Array.isArray(targets) ? targets.filter(Boolean) : [];
+  const normalized = (Array.isArray(targets) ? targets : [])
+    .map((target) => normalizeLaunchTarget(target))
+    .filter(Boolean);
   const hasLocal = normalized.some((target) => String(target?.id || "") === "local");
   return hasLocal ? normalized : [localLaunchTarget(), ...normalized];
 }
@@ -241,7 +262,7 @@ export function normalizeLaunchTargets(targets) {
 export function launchTargetById(dirBrowser, targetId) {
   const normalizedId = String(targetId || "local").trim() || "local";
   const targets = Array.isArray(dirBrowser?.launchTargets) ? dirBrowser.launchTargets : [];
-  return targets.find((target) => String(target?.id || "") === normalizedId)
+  return targets.find((target) => String(target?.id || "").trim() === normalizedId)
     || (normalizedId === "local" ? localLaunchTarget() : null);
 }
 
@@ -306,12 +327,12 @@ export function mapPathWithLaunchTarget(path, target) {
 
 export function launchTargetPreviewForPath(path, target) {
   const targetId = String(target?.id || "local").trim() || "local";
-  const targetLabel = String(target?.label || targetId || "Local machine");
+  const targetLabel = String(target?.label || targetId || "Local machine").trim() || targetId;
   const localCwd = String(path || "").trim();
   if (targetId === "local") {
     return { targetId, targetLabel, localCwd, remoteCwd: null, blocked: false, reason: "" };
   }
-  if (String(target?.kind || "") !== "swimmers_api") {
+  if (String(target?.kind || "").trim() !== "swimmers_api") {
     return { targetId, targetLabel, localCwd, remoteCwd: null, blocked: true, reason: "unsupported target" };
   }
   const remoteCwd = mapPathWithLaunchTarget(localCwd, target);

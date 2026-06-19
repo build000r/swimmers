@@ -309,6 +309,31 @@ test("normalizeLaunchTargets keeps local override available", () => {
   );
 });
 
+test("launch target normalization trims ids and keeps remote selection usable", () => {
+  const targets = normalizeLaunchTargets([{
+    id: " devbox ",
+    label: " Devbox ",
+    kind: " swimmers_api ",
+    path_mappings: [{ local_prefix: "/Users/tester/repos", remote_prefix: "/srv/repos" }],
+  }]);
+  const el = { createLaunchTarget: element(" devbox ") };
+  const dirBrowser = { launchTarget: "local", launchTargets: targets };
+
+  assert.deepEqual(
+    targets.map((target) => [target.id, target.label, target.kind]),
+    [
+      ["local", "Local machine", "local"],
+      ["devbox", "Devbox", "swimmers_api"],
+    ],
+  );
+  assert.equal(selectedLaunchTarget(el, dirBrowser), "devbox");
+  assert.equal(selectedLaunchTargetSummary(el, dirBrowser).id, "devbox");
+  assert.equal(
+    launchTargetPreviewForPath("/Users/tester/repos/swimmers", selectedLaunchTargetSummary(el, dirBrowser)).remoteCwd,
+    "/srv/repos/swimmers",
+  );
+});
+
 test("launch target and batch bar helpers preserve payload and label semantics", () => {
   const el = {
     createLaunchTarget: element("remote-a"),
