@@ -204,6 +204,29 @@ test("surface renders grouped session rail with host-disambiguated project label
   assert.ok(actionIds.includes("toggle_session_grouping"));
 });
 
+test("surface tolerates partial fleet chip labels", () => {
+  const frame = buildSurfaceFrame(baseModel({
+    cols: 240,
+    fleetChips: [{ kind: "target", key: "skillbox", active: true }],
+  }));
+  const text = frameText(frame);
+  const fleetZone = frame.zones.find((zone) => zone.actionId === "fleet_filter");
+
+  assert.match(text, /filter/);
+  assert.deepEqual(
+    {
+      actionId: fleetZone?.actionId,
+      kind: fleetZone?.kind,
+      key: fleetZone?.key,
+    },
+    {
+      actionId: "fleet_filter",
+      kind: "target",
+      key: "skillbox",
+    },
+  );
+});
+
 test("surface shows an overview prompt when no session is selected", () => {
   const frame = buildSurfaceFrame(
     baseModel({

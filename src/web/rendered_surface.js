@@ -125,7 +125,7 @@ function drawHeader(frame, layout, model) {
       actionId: "refresh",
     }),
     ...(Array.isArray(model?.fleetChips) ? model.fleetChips.map((chip) => chipSpec(
-      chip.label,
+      safeLabel(chip.label, "filter"),
       chip.active ? COLORS.success : COLORS.text,
       chip.active ? COLORS.chipActiveBg : COLORS.chipBg,
       {
