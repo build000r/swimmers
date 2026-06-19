@@ -827,8 +827,10 @@ pub(crate) fn launch_target_preview_for_path(
         return preview;
     }
 
-    if target.kind != "swimmers_api" {
-        preview.blocked_reason = Some("unsupported target");
+    if let Some(reason) =
+        swimmers::api::remote_sessions::remote_launch_target_config_blocker(target)
+    {
+        preview.blocked_reason = Some(reason);
         return preview;
     }
 

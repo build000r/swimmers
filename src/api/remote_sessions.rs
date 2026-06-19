@@ -84,6 +84,25 @@ pub fn is_remote_launch_target(target: Option<&str>) -> bool {
         .is_some_and(|target| !target.is_empty() && target != "local")
 }
 
+pub fn remote_launch_target_config_blocker(target: &LaunchTargetSummary) -> Option<&'static str> {
+    if !is_swimmers_api_target(target) {
+        return Some("unsupported target");
+    }
+    if target
+        .base_url
+        .as_deref()
+        .map(str::trim)
+        .filter(|url| !url.is_empty())
+        .is_none()
+    {
+        return Some("missing base_url");
+    }
+    if parse_remote_base_url(target).is_err() {
+        return Some("invalid base_url");
+    }
+    None
+}
+
 pub fn split_remote_session_id(session_id: &str) -> Option<(&str, &str)> {
     let (target_id, remote_session_id) = session_id.split_once(REMOTE_SESSION_SEPARATOR)?;
     (!target_id.is_empty() && !remote_session_id.is_empty())

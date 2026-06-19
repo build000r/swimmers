@@ -337,6 +337,24 @@ mod picker {
         let unsupported =
             launch_target_preview_for_path("/Users/tester/repos/swimmers", &remote_like_local);
         assert_eq!(unsupported.blocked_reason, Some("unsupported target"));
+
+        let mut missing_base_url = mapped_response_target("missing-base");
+        missing_base_url.base_url = None;
+        let blocked = launch_target_preview_for_path(
+            "/Users/tester/repos/opensource/swimmers",
+            &missing_base_url,
+        );
+        assert_eq!(blocked.remote_cwd, None);
+        assert_eq!(blocked.blocked_reason, Some("missing base_url"));
+
+        let mut invalid_base_url = mapped_response_target("credentialed-base");
+        invalid_base_url.base_url = Some("http://user@127.0.0.1:3210".to_string());
+        let blocked = launch_target_preview_for_path(
+            "/Users/tester/repos/opensource/swimmers",
+            &invalid_base_url,
+        );
+        assert_eq!(blocked.remote_cwd, None);
+        assert_eq!(blocked.blocked_reason, Some("invalid base_url"));
     }
 
     #[test]
