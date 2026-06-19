@@ -7,7 +7,9 @@ use std::sync::Arc;
 use tokio::sync::oneshot;
 
 use crate::api::envelope::error_body;
-use crate::api::service::{create_local_sessions_batch, list_sessions_for_client};
+use crate::api::service::{
+    create_local_session, create_local_sessions_batch, list_sessions_for_client,
+};
 use crate::api::{fetch_live_summary, remote_sessions, AppState};
 use crate::auth::{AuthInfo, AuthScope};
 use crate::config::SessionDeleteMode;
@@ -15,10 +17,9 @@ use crate::fleet_lens::build_fleet_lens_summary;
 use crate::session::actor::{ActorHandle, InputDeliveryResult, SessionCommand};
 use crate::session::supervisor::TmuxAdoptError;
 use crate::types::{
-    AdoptSessionRequest, AdoptSessionResponse, CreateSessionRequest, CreateSessionResponse,
-    CreateSessionsBatchRequest, CreateSessionsBatchResponse, SessionInputRequest,
-    SessionInputResponse, SessionListResponse, SessionState, TerminalSnapshot,
-    MAX_SESSION_INPUT_BYTES,
+    AdoptSessionRequest, AdoptSessionResponse, CreateSessionRequest, CreateSessionsBatchRequest,
+    CreateSessionsBatchResponse, SessionInputRequest, SessionInputResponse, SessionListResponse,
+    SessionState, TerminalSnapshot, MAX_SESSION_INPUT_BYTES,
 };
 
 const SNAPSHOT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
@@ -76,38 +77,21 @@ async fn create_local_session_response(
     state: &Arc<AppState>,
     body: CreateSessionRequest,
 ) -> axum::response::Response {
-    match state
-        .supervisor
-        .create_session(body.name, body.cwd, body.spawn_tool, body.initial_request)
-        .await
+    match create_local_session(
+        state,
+        body.name,
+        body.cwd,
+        body.spawn_tool,
+        body.initial_request,
+    )
+    .await
     {
-        Ok((session, repo_theme)) => (
-            StatusCode::CREATED,
-            Json(CreateSessionResponse {
-                session,
-                repo_theme,
-            }),
-        )
-            .into_response(),
-        Err(err) => create_local_session_error_response(err),
-    }
-}
-
-fn create_local_session_error_response(error: anyhow::Error) -> axum::response::Response {
-    let msg = error.to_string();
-    // The supervisor returns anyhow errors. We detect specific failure modes by
-    // inspecting the error message.
-    if msg.contains("already exists") || msg.contains("duplicate session") {
-        error_response(StatusCode::CONFLICT, "SESSION_ALREADY_EXISTS", Some(msg))
-    } else if msg.contains("cwd does not exist") {
-        validation_error(msg)
-    } else {
-        tracing::error!("create_session failed: {error}");
-        error_response(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "INTERNAL_ERROR",
-            Some(msg),
-        )
+        Ok(response) => (StatusCode::CREATED, Json(response)).into_response(),
+        Err(error) => error_response(
+            error.status(),
+            error.code(),
+            Some(error.message().to_string()),
+        ),
     }
 }
 

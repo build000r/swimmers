@@ -7,7 +7,7 @@ use tokio::sync::oneshot;
 
 use swimmers::api::remote_sessions;
 use swimmers::api::service::{
-    create_local_sessions_batch, list_dirs as list_dirs_service,
+    create_local_session, create_local_sessions_batch, list_dirs as list_dirs_service,
     list_repo_search_entries as list_repo_search_entries_service, list_sessions_for_client,
     native_status_for_host as native_status_for_host_service, open_native_attention_group_for_host,
     open_native_session_for_host, request_plan_file,
@@ -53,10 +53,6 @@ impl InProcessApi {
             .build()
             .expect("failed to build reqwest client for in-process API");
         Self { state, http }
-    }
-
-    fn fetch_local_sessions(&self) -> BoxFuture<'_, Result<Vec<SessionSummary>, String>> {
-        Box::pin(async move { Ok(list_sessions_for_client(&self.state, false).await) })
     }
 }
 
@@ -178,12 +174,6 @@ fn native_attention_group_request(
 impl TuiApi for InProcessApi {
     fn fetch_sessions(&self) -> BoxFuture<'_, Result<Vec<SessionSummary>, String>> {
         Box::pin(async move { Ok(list_sessions_for_client(&self.state, true).await) })
-    }
-
-    fn fetch_sessions_for_initial_frame(
-        &self,
-    ) -> BoxFuture<'_, Result<Vec<SessionSummary>, String>> {
-        self.fetch_local_sessions()
     }
 
     fn fetch_backend_health(&self) -> BoxFuture<'_, Result<BackendHealthResponse, String>> {
@@ -507,16 +497,15 @@ impl TuiApi for InProcessApi {
                 .await
                 .map_err(|err| err.display_message("in-process API"));
             }
-            let (session, repo_theme) = self
-                .state
-                .supervisor
-                .create_session(None, Some(cwd), Some(spawn_tool), initial_request)
-                .await
-                .map_err(|err| err.to_string())?;
-            Ok(CreateSessionResponse {
-                session,
-                repo_theme,
-            })
+            create_local_session(
+                &self.state,
+                None,
+                Some(cwd),
+                Some(spawn_tool),
+                initial_request,
+            )
+            .await
+            .map_err(api_service_error_message)
         })
     }
 
@@ -743,6 +732,31 @@ mod tests {
         // HTTP adapters wrap the same shared list in SessionListResponse and
         // enforce auth; the embedded TUI adapter intentionally returns the
         // route-independent Vec<SessionSummary> directly.
+    }
+
+    #[tokio::test]
+    async fn fetch_sessions_for_initial_frame_uses_full_session_contract() {
+        let state = test_state();
+        let _write_rx =
+            insert_summary_test_handle(&state, summary("sess-1", SessionState::Idle)).await;
+        let api = InProcessApi::new(state);
+
+        let initial = api
+            .fetch_sessions_for_initial_frame()
+            .await
+            .expect("initial sessions");
+        let regular = api.fetch_sessions().await.expect("regular sessions");
+
+        assert_eq!(
+            initial
+                .iter()
+                .map(|session| session.session_id.as_str())
+                .collect::<Vec<_>>(),
+            regular
+                .iter()
+                .map(|session| session.session_id.as_str())
+                .collect::<Vec<_>>()
+        );
     }
 
     #[tokio::test]
@@ -1041,6 +1055,22 @@ printf '{"effective":[],"recommendations":[]}\n'
         assert_eq!(skills.cwd, "/tmp/project");
         assert_eq!(skills.source, "sbp");
         assert!(skills.available);
+    }
+
+    #[tokio::test]
+    async fn create_session_reports_missing_cwd_as_service_error_string() {
+        let missing = tempfile::tempdir().expect("tempdir").path().join("missing");
+        let api = InProcessApi::new(test_state());
+
+        let err = api
+            .create_session(&missing.to_string_lossy(), SpawnTool::Codex, None, None)
+            .await
+            .expect_err("missing cwd should fail");
+
+        assert!(
+            err.starts_with("VALIDATION_FAILED: session cwd does not exist"),
+            "unexpected error: {err}"
+        );
     }
 
     #[tokio::test]

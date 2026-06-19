@@ -28,11 +28,11 @@ use crate::thought::probe::{run_thought_config_probe, ThoughtConfigProbeResult};
 use crate::thought::runtime_config::ThoughtConfig;
 use crate::thought_ui::thought_config_ui_metadata;
 use crate::types::{
-    CreateSessionsBatchResponse, CreateSessionsBatchResult, DirEntry, DirGroupMemberships,
-    DirListResponse, DirRepoActionResponse, DirRestartResponse, ErrorResponse, LaunchTargetSummary,
-    NativeDesktopApp, NativeDesktopOpenResponse, NativeDesktopStatusResponse, PlanFileResponse,
-    RepoActionKind, RepoActionState, RepoActionStatus, RepoTheme, SessionBatchMembership,
-    SessionState, SessionSummary, SpawnTool, ThoughtConfigResponse,
+    CreateSessionResponse, CreateSessionsBatchResponse, CreateSessionsBatchResult, DirEntry,
+    DirGroupMemberships, DirListResponse, DirRepoActionResponse, DirRestartResponse, ErrorResponse,
+    LaunchTargetSummary, NativeDesktopApp, NativeDesktopOpenResponse, NativeDesktopStatusResponse,
+    PlanFileResponse, RepoActionKind, RepoActionState, RepoActionStatus, RepoTheme,
+    SessionBatchMembership, SessionState, SessionSummary, SpawnTool, ThoughtConfigResponse,
 };
 
 #[path = "service/attention_group.rs"]
@@ -296,6 +296,37 @@ pub fn validate_sessions_batch_dirs(dirs: &[String]) -> Result<(), ApiServiceErr
         ));
     }
     Ok(())
+}
+
+pub async fn create_local_session(
+    state: &Arc<AppState>,
+    name: Option<String>,
+    cwd: Option<String>,
+    spawn_tool: Option<SpawnTool>,
+    initial_request: Option<String>,
+) -> Result<CreateSessionResponse, ApiServiceError> {
+    state
+        .supervisor
+        .create_session(name, cwd, spawn_tool, initial_request)
+        .await
+        .map(|(session, repo_theme)| CreateSessionResponse {
+            session,
+            repo_theme,
+        })
+        .map_err(create_local_session_error)
+}
+
+fn create_local_session_error(error: anyhow::Error) -> ApiServiceError {
+    let message = error.to_string();
+    if message.contains("already exists") || message.contains("duplicate session") {
+        return ApiServiceError::new(StatusCode::CONFLICT, "SESSION_ALREADY_EXISTS", message);
+    }
+    if message.contains("cwd does not exist") {
+        return ApiServiceError::new(StatusCode::BAD_REQUEST, "VALIDATION_FAILED", message);
+    }
+
+    tracing::error!("create_session failed: {error}");
+    ApiServiceError::new(StatusCode::INTERNAL_SERVER_ERROR, "INTERNAL_ERROR", message)
 }
 
 pub async fn create_local_sessions_batch(
