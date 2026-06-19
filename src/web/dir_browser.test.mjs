@@ -77,7 +77,9 @@ test("directory group and search helpers keep membership and repo status searcha
 
   assert.deepEqual(dirEntryGroups(entry), ["core", "rust", "active"]);
   assert.equal(dirEntryMatchesSearch(entry, entry.full_path, "dirty"), true);
-  assert.equal(dirEntryMatchesSearch(entry, entry.full_path, "running rust"), false);
+  assert.equal(dirEntryMatchesSearch(entry, entry.full_path, "running rust"), true);
+  assert.equal(dirEntryMatchesSearch(entry, entry.full_path, "swimmers dirty"), true);
+  assert.equal(dirEntryMatchesSearch(entry, entry.full_path, "running missing"), false);
   assert.deepEqual(visibleDirEntries([entry], "/srv/repos", "core"), [entry]);
 });
 

@@ -125,6 +125,7 @@ export function dirEntryMatchesSearch(entry, resolvedPath, search = "") {
   if (!normalizedSearch) {
     return true;
   }
+  const terms = normalizedSearch.split(/\s+/).filter(Boolean);
   const haystack = [
     entry?.name,
     resolvedPath,
@@ -137,7 +138,7 @@ export function dirEntryMatchesSearch(entry, resolvedPath, search = "") {
     .filter(Boolean)
     .join(" ")
     .toLowerCase();
-  return haystack.includes(normalizedSearch);
+  return terms.every((term) => haystack.includes(term));
 }
 
 export function visibleDirEntries(entries, basePath, search = "") {
