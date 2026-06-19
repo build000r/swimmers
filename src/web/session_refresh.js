@@ -135,8 +135,8 @@ export async function runSessionRefresh(runtime) {
       : Promise.resolve(null);
     const [response, pressureResponse, healthResponse, publishedResponse] = await Promise.all([
       runtime.apiFetch(requestPlan.sessionsPath),
-      runtime.apiMaybeFetch(requestPlan.operatorPressurePath),
-      runtime.apiMaybeFetch(requestPlan.healthPath),
+      optionalSessionRefreshFetch(runtime, requestPlan.operatorPressurePath),
+      optionalSessionRefreshFetch(runtime, requestPlan.healthPath),
       publishedRequest,
     ]);
     const payload = await runtime.responseJson(response, normalizeSessionListResponse);
@@ -155,6 +155,14 @@ export async function runSessionRefresh(runtime) {
     await runSessionRefreshSuccessSideEffects(runtime);
   } catch (error) {
     applySessionRefreshError(error, runtime);
+  }
+}
+
+async function optionalSessionRefreshFetch(runtime, path) {
+  try {
+    return await runtime.apiMaybeFetch(path);
+  } catch (_) {
+    return null;
   }
 }
 

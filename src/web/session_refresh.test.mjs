@@ -240,6 +240,98 @@ test("runSessionRefresh preserves successful refresh ordering and status side ef
   ]);
 });
 
+test("runSessionRefresh keeps sessions when optional telemetry endpoints fail", async () => {
+  const calls = [];
+  const runtime = {
+    state: {
+      followPublishedSelection: false,
+      sessions: [],
+      environments: [],
+      selectedSessionId: null,
+      trogdorAtlasOpen: false,
+      readOnly: true,
+      token: "",
+    },
+    apiFetch: async (path) => {
+      calls.push(["apiFetch", path]);
+      return {
+        path,
+        json: async () => ({
+          sessions: [{ session_id: "agent-1" }],
+          environments: [{ id: "local", backend_mode: "native" }],
+        }),
+      };
+    },
+    apiMaybeFetch: async (path) => {
+      calls.push(["apiMaybeFetch", path]);
+      const error = new Error(`${path} unavailable`);
+      error.status = path === "/health" ? 500 : 503;
+      throw error;
+    },
+    responseJson: async (response, normalizer) => {
+      calls.push(["responseJson", response.path]);
+      return normalizer(await response.json());
+    },
+    responseJsonOrNull: async (response, normalizer = (value) => value) => {
+      calls.push(["responseJsonOrNull", response?.path ?? null]);
+      return response ? normalizer(await response.json()) : null;
+    },
+    applyOperatorPressure: (payload) => calls.push(["applyOperatorPressure", payload]),
+    applyBackendHealth: (payload) => calls.push(["applyBackendHealth", payload]),
+    syncTrogdorCueTransitions: () => calls.push(["syncTrogdorCueTransitions"]),
+    normalizeSessionId: (sessionId) => sessionId || null,
+    sessionExists: (sessionId) => runtime.state.sessions.some((session) => session.session_id === sessionId),
+    persistSelectedSession: (sessionId) => {
+      calls.push(["persistSelectedSession", sessionId]);
+      runtime.state.selectedSessionId = sessionId;
+    },
+    setupHudSurface: async () => calls.push(["setupHudSurface"]),
+    renderHudSurface: () => calls.push(["renderHudSurface"]),
+    syncTerminalTools: () => calls.push(["syncTerminalTools"]),
+    reconcileFleetFilterForSessions: () => calls.push(["reconcileFleetFilterForSessions"]),
+    connectSelectedSession: async () => calls.push(["connectSelectedSession"]),
+    refreshAgentContextForSelectedSession: (options) => calls.push(["refreshAgentContextForSelectedSession", options]),
+    refreshWorkbenchWidgetsForSelectedSession: (options) => calls.push(["refreshWorkbenchWidgetsForSelectedSession", options]),
+    setConnectionStatus: (label, muted) => calls.push(["setConnectionStatus", label, muted]),
+    setModeStatus: (label, muted) => calls.push(["setModeStatus", label, muted]),
+    resetAgentContextForSession: (sessionId) => calls.push(["resetAgentContextForSession", sessionId]),
+    resetWorkbenchWidgetsForSession: (sessionId) => calls.push(["resetWorkbenchWidgetsForSession", sessionId]),
+  };
+
+  await runSessionRefresh(runtime);
+
+  assert.equal(runtime.state.sessions.length, 1);
+  assert.equal(runtime.state.sessions[0].session_id, "agent-1");
+  assert.equal(runtime.state.sessions[0].environment.scope, "local");
+  assert.equal(runtime.state.environments.length, 1);
+  assert.equal(runtime.state.environments[0].id, "local");
+  assert.equal(runtime.state.environments[0].backend_mode, "native");
+  assert.equal(runtime.state.selectedSessionId, "agent-1");
+  assert.ok(!calls.some(([name]) => name === "resetAgentContextForSession"));
+  assert.ok(!calls.some(([name]) => name === "resetWorkbenchWidgetsForSession"));
+  assert.deepEqual(calls, [
+    ["apiFetch", "/v1/sessions"],
+    ["apiMaybeFetch", "/v1/operator-pressure"],
+    ["apiMaybeFetch", "/health"],
+    ["responseJson", "/v1/sessions"],
+    ["responseJsonOrNull", null],
+    ["responseJsonOrNull", null],
+    ["applyOperatorPressure", null],
+    ["applyBackendHealth", null],
+    ["syncTrogdorCueTransitions"],
+    ["persistSelectedSession", "agent-1"],
+    ["reconcileFleetFilterForSessions"],
+    ["setupHudSurface"],
+    ["renderHudSurface"],
+    ["syncTerminalTools"],
+    ["connectSelectedSession"],
+    ["refreshAgentContextForSelectedSession", { throttle: true, silent: true }],
+    ["refreshWorkbenchWidgetsForSelectedSession", { throttle: true, silent: true }],
+    ["setConnectionStatus", "live", false],
+    ["setModeStatus", "observer", true],
+  ]);
+});
+
 test("runSessionRefresh preserves refresh error reset behavior", async () => {
   const calls = [];
   const runtime = {
