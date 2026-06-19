@@ -495,6 +495,29 @@ mod picker {
     }
 
     #[test]
+    fn picker_filter_render_plan_truncates_labels_to_control_widths() {
+        let mut layout = filter_test_layout();
+        layout.env_button.width = 8;
+        layout.group_buttons = vec![("frontend-platform".to_string(), rect(12, 3, 6))];
+        layout.all_button.width = 5;
+        layout.group_target_button = Some(rect(42, 3, 7));
+
+        let mut picker = filter_test_picker();
+        picker.overlay_label = Some("ExtremelyLongOverlay".to_string());
+        picker.group_edit_target = Some("skillbox-prod-west".to_string());
+
+        let items = picker_filter_render_items(&picker, &layout);
+
+        assert_eq!(items[0].label, truncate_label("[extremelylongoverlay]", 8));
+        assert_eq!(items[1].label, truncate_label("[frontend-platform]", 6));
+        assert_eq!(items[2].label, truncate_label("[all folders]", 5));
+        assert_eq!(
+            items[3].label,
+            truncate_label("[target:skillbox-prod-west]", 7)
+        );
+    }
+
+    #[test]
     fn picker_filter_render_plan_uses_active_colors_for_each_mode() {
         let layout = filter_test_layout();
         let mut picker = filter_test_picker();

@@ -39,13 +39,16 @@ fn render_picker_header_controls(
     renderer.draw_text(
         layout.tool_button.x,
         layout.tool_button.y,
-        &tool_button_label(picker.spawn_tool),
+        &control_label(layout.tool_button, &tool_button_label(picker.spawn_tool)),
         Color::White,
     );
     renderer.draw_text(
         layout.launch_target_button.x,
         layout.launch_target_button.y,
-        &launch_target_button_label(picker),
+        &control_label(
+            layout.launch_target_button,
+            &launch_target_button_label(picker),
+        ),
         if picker.launch_targets.len() > 1 {
             Color::White
         } else {
@@ -55,7 +58,7 @@ fn render_picker_header_controls(
     renderer.draw_text(
         layout.batch_button.x,
         layout.batch_button.y,
-        &batch_button_label(picker),
+        &control_label(layout.batch_button, &batch_button_label(picker)),
         if picker.batch_included_count() == 0 {
             Color::DarkGrey
         } else {
@@ -65,7 +68,7 @@ fn render_picker_header_controls(
     renderer.draw_text(
         layout.exclude_button.x,
         layout.exclude_button.y,
-        exclude_button_label(),
+        &control_label(layout.exclude_button, exclude_button_label()),
         if picker.batch_exclude_mode {
             Color::Cyan
         } else if layout.visible_entries.is_empty() {
@@ -80,6 +83,10 @@ fn render_picker_header_controls(
         "[x]",
         Color::DarkGrey,
     );
+}
+
+fn control_label(rect: Rect, label: &str) -> String {
+    truncate_label(label, rect.width as usize)
 }
 
 fn render_picker_path_row(
@@ -152,7 +159,7 @@ fn picker_managed_filter_render_item(
     let in_group = picker.current_group.is_some();
     PickerFilterRenderItem {
         rect: layout.env_button,
-        label: managed_label,
+        label: control_label(layout.env_button, &managed_label),
         color: picker_filter_active_color(picker.managed_only && !in_group),
     }
 }
@@ -165,7 +172,7 @@ fn picker_group_filter_render_item(
     let active = picker.current_group.as_deref() == Some(name);
     PickerFilterRenderItem {
         rect,
-        label: format!("[{name}]"),
+        label: control_label(rect, &format!("[{name}]")),
         color: picker_filter_active_color(active),
     }
 }
@@ -177,7 +184,7 @@ fn picker_all_filter_render_item(
     let in_group = picker.current_group.is_some();
     PickerFilterRenderItem {
         rect: layout.all_button,
-        label: "[all folders]".to_string(),
+        label: control_label(layout.all_button, "[all folders]"),
         color: picker_filter_active_color(!picker.managed_only && !in_group),
     }
 }
@@ -194,7 +201,7 @@ fn picker_group_target_filter_render_item(
     let rect = layout.group_target_button?;
     Some(PickerFilterRenderItem {
         rect,
-        label: format!("[target:{target}]"),
+        label: control_label(rect, &format!("[target:{target}]")),
         color: Color::Yellow,
     })
 }

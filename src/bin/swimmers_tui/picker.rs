@@ -1157,72 +1157,58 @@ pub(crate) fn picker_layout(picker: &PickerState, field: Rect) -> PickerLayout {
         Some(label) => label.len() as u16 + 2, // [label]
         None => 9,                             // [managed]
     };
-    let env_button = Rect {
-        x: content.x,
-        y: content.y + 2,
-        width: managed_label_width,
-        height: 1,
-    };
-    let mut next_group_x = env_button.right() + 1;
+    let env_button = bounded_row_rect(
+        content.x,
+        content.y + 2,
+        managed_label_width,
+        content.right(),
+    );
+    let mut next_group_x = env_button.right().saturating_add(1);
     let mut group_buttons: Vec<(String, Rect)> = Vec::new();
     for name in &picker.available_groups {
         let label_width = name.len() as u16 + 2; // [name]
-        let rect = Rect {
-            x: next_group_x.min(content.right().saturating_sub(label_width)),
-            y: content.y + 2,
-            width: label_width,
-            height: 1,
-        };
-        next_group_x = rect.right() + 1;
+        let rect = bounded_row_rect(next_group_x, content.y + 2, label_width, content.right());
+        next_group_x = rect.right().saturating_add(1);
         group_buttons.push((name.clone(), rect));
     }
-    let all_button = Rect {
-        x: next_group_x.min(content.right().saturating_sub(13)),
-        y: content.y + 2,
-        width: 13,
-        height: 1,
-    };
+    let all_button = bounded_row_rect(next_group_x, content.y + 2, 13, content.right());
     let group_target_button = picker.group_edit_target.as_ref().map(|target| {
         let label_width = format!("[target:{target}]").len() as u16;
-        let x = all_button
-            .right()
-            .saturating_add(1)
-            .min(content.right().saturating_sub(label_width));
-        Rect {
-            x,
-            y: content.y + 2,
-            width: label_width,
-            height: 1,
-        }
+        bounded_row_rect(
+            all_button.right().saturating_add(1),
+            content.y + 2,
+            label_width,
+            content.right(),
+        )
     });
     let tool_label_width = tool_button_label(picker.spawn_tool).len() as u16;
-    let tool_button = Rect {
-        x: close_button.x.saturating_sub(tool_label_width + 1),
-        y: content.y,
-        width: tool_label_width,
-        height: 1,
-    };
+    let tool_button = button_rect_before(
+        close_button.x.saturating_sub(1),
+        content.x,
+        content.y,
+        tool_label_width,
+    );
     let launch_target_label_width = launch_target_button_label(picker).len() as u16;
-    let launch_target_button = Rect {
-        x: tool_button.x.saturating_sub(launch_target_label_width + 1),
-        y: content.y,
-        width: launch_target_label_width,
-        height: 1,
-    };
+    let launch_target_button = button_rect_before(
+        tool_button.x.saturating_sub(1),
+        content.x,
+        content.y,
+        launch_target_label_width,
+    );
     let batch_label_width = batch_button_label(picker).len() as u16;
-    let batch_button = Rect {
-        x: launch_target_button.x.saturating_sub(batch_label_width + 1),
-        y: content.y,
-        width: batch_label_width,
-        height: 1,
-    };
+    let batch_button = button_rect_before(
+        launch_target_button.x.saturating_sub(1),
+        content.x,
+        content.y,
+        batch_label_width,
+    );
     let exclude_label_width = exclude_button_label().len() as u16;
-    let exclude_button = Rect {
-        x: batch_button.x.saturating_sub(exclude_label_width + 1),
-        y: content.y,
-        width: exclude_label_width,
-        height: 1,
-    };
+    let exclude_button = button_rect_before(
+        batch_button.x.saturating_sub(1),
+        content.x,
+        content.y,
+        exclude_label_width,
+    );
 
     PickerLayout {
         frame,
@@ -1246,6 +1232,27 @@ pub(crate) fn picker_layout(picker: &PickerState, field: Rect) -> PickerLayout {
         first_entry_y: content.y + 4,
         visible_entry_rows: list_rows as usize,
         visible_entries,
+    }
+}
+
+fn bounded_row_rect(x: u16, y: u16, desired_width: u16, right_exclusive: u16) -> Rect {
+    let x = x.min(right_exclusive);
+    Rect {
+        x,
+        y,
+        width: desired_width.min(right_exclusive.saturating_sub(x)),
+        height: 1,
+    }
+}
+
+fn button_rect_before(right_exclusive: u16, left_bound: u16, y: u16, desired_width: u16) -> Rect {
+    let available = right_exclusive.saturating_sub(left_bound);
+    let width = desired_width.min(available);
+    Rect {
+        x: right_exclusive.saturating_sub(width).max(left_bound),
+        y,
+        width,
+        height: 1,
     }
 }
 

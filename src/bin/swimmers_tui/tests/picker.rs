@@ -180,6 +180,43 @@ fn render_picker_uses_entry_repo_theme_color() {
     );
 }
 
+#[test]
+fn render_picker_truncates_long_launch_target_without_overwriting_tool_button() {
+    let mut response = dir_response("/tmp", &[("swimmers", true)]);
+    response.launch_targets = vec![
+        LaunchTargetSummary::local(),
+        LaunchTargetSummary {
+            id: "devbox-long-target".to_string(),
+            label: "Very Long Remote Target Name For Picker".to_string(),
+            kind: "swimmers_api".to_string(),
+            base_url: Some("http://127.0.0.1:3210".to_string()),
+            auth_token_env: None,
+            path_mappings: vec![LaunchPathMapping {
+                local_prefix: "/tmp".to_string(),
+                remote_prefix: "/srv/repos".to_string(),
+            }],
+        },
+    ];
+    response.default_launch_target = Some("devbox-long-target".to_string());
+    let picker = PickerState::new(2, 2, response, true, SpawnTool::Codex, None);
+    let field = Rect {
+        x: 0,
+        y: 0,
+        width: 50,
+        height: 20,
+    };
+    let layout = picker_layout(&picker, field);
+    let mut renderer = test_renderer(50, 20);
+
+    render_picker(&mut renderer, &picker, field);
+
+    assert!(layout.launch_target_button.right() < layout.tool_button.x);
+    assert_eq!(
+        find_text_position(&renderer, &tool_button_label(SpawnTool::Codex)),
+        Some((layout.tool_button.x, layout.tool_button.y))
+    );
+}
+
 fn action_summary(actions: Vec<ActionLabel>) -> Vec<(String, RepoActionKind, Color, bool)> {
     actions
         .into_iter()
