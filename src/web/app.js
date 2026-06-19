@@ -1619,6 +1619,27 @@ function openMermaidSheet() {
   openSheet("mermaid");
 }
 
+async function copyTextToClipboard(text, label = "text") {
+  const copyText = String(text || "").trim();
+  const copyLabel = String(label || "text").trim() || "text";
+  if (!copyText) {
+    setUtilityStatus("Nothing to copy.", true, 2200);
+    return false;
+  }
+  if (!navigator.clipboard?.writeText) {
+    setUtilityStatus("Clipboard write is unavailable in this browser context.", true, 3000);
+    return false;
+  }
+  try {
+    await navigator.clipboard.writeText(copyText);
+    setUtilityStatus(`Copied ${copyLabel}.`, false, 2200);
+    return true;
+  } catch (error) {
+    setUtilityStatus(`Clipboard write failed: ${error.message}`, true, 3000);
+    return false;
+  }
+}
+
 const commandPaletteController = createCommandPaletteController({
   state,
   el,
@@ -1826,6 +1847,7 @@ const surfaceActionExecutors = {
   toggle_follow: () => toggleFollowPublished(),
   toggle_select: () => setSelectMode(!state.selectMode),
   copy_selection: () => copyTerminalSelection(),
+  copy_text: (action) => copyTextToClipboard(action.text, action.label),
   refresh: () => refreshSessions(),
 };
 

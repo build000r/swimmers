@@ -3,8 +3,8 @@ use swimmers::color::hsl_to_rgb;
 use swimmers::fleet_lens::build_fleet_lens_summary;
 use swimmers::session_labels::{session_canonical_cwd_key, session_cwd_label};
 use swimmers::types::{
-    ActionCueKind, AdvisoryMetadataSummary, DependencyHealthStatus, FleetLensBucket,
-    FleetLensBucketKind, SessionEnvironmentScope,
+    ActionCueKind, AdvisoryMetadataSummary, DependencyHealthStatus, EnvironmentSummary,
+    FleetLensBucket, FleetLensBucketKind, SessionEnvironmentScope,
 };
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
@@ -2240,9 +2240,15 @@ pub(crate) fn build_thought_panel<C: TuiApi>(
     let total_count = all_entries.len();
     let mode = thought_panel_display_mode(app, &all_entries);
     let entries = thought_panel_visible_entries(all_entries, mode);
-    let empty_message =
-        thought_panel_empty_message(app, entry_capacity, &entries, total_count, mode);
     let rows = build_thought_panel_rows(app, &entries, mode, thought_content, entry_capacity);
+    let empty_message = thought_panel_empty_message(
+        app,
+        entry_capacity,
+        &entries,
+        total_count,
+        mode,
+        rows.is_empty(),
+    );
 
     ThoughtPanelLayout {
         rows,
@@ -2271,6 +2277,7 @@ fn thought_panel_empty_message<C: TuiApi>(
     entries: &[ThoughtPanelEntryView],
     total_count: usize,
     mode: ThoughtPanelDisplayMode,
+    rows_are_empty: bool,
 ) -> Option<String> {
     if entry_capacity == 0 {
         return None;
@@ -2278,7 +2285,7 @@ fn thought_panel_empty_message<C: TuiApi>(
     if let Some(targets) = &app.group_input_targets {
         return Some(group_input_empty_message(targets));
     }
-    if entries.is_empty() {
+    if entries.is_empty() && rows_are_empty {
         return Some(empty_thought_panel_message(app, total_count, mode));
     }
 
@@ -2327,10 +2334,119 @@ fn build_thought_panel_rows<C: TuiApi>(
     thought_content: Rect,
     entry_capacity: usize,
 ) -> Vec<ThoughtRowLayout> {
+    if entries.is_empty() {
+        return selected_environment_detail_rows(app, thought_content, entry_capacity);
+    }
     if should_group_thought_entries(app, mode.group_by, entries) {
         build_grouped_rows(entries, app, mode.group_by, thought_content, entry_capacity)
     } else {
         build_flat_rows(entries, thought_content, entry_capacity)
+    }
+}
+
+fn selected_environment_detail_rows<C: TuiApi>(
+    app: &App<C>,
+    thought_content: Rect,
+    entry_capacity: usize,
+) -> Vec<ThoughtRowLayout> {
+    if entry_capacity == 0 {
+        return Vec::new();
+    }
+    let Some(environment) = selected_filter_environment(app) else {
+        return Vec::new();
+    };
+    environment_detail_lines(environment, thought_content.width as usize)
+        .into_iter()
+        .take(entry_capacity)
+        .map(|line| environment_detail_row(environment, thought_content, line))
+        .collect()
+}
+
+fn selected_filter_environment<C: TuiApi>(app: &App<C>) -> Option<&EnvironmentSummary> {
+    let fleet = app.thought_filter.fleet.as_ref()?;
+    if fleet.kind != FleetLensBucketKind::Target {
+        return None;
+    }
+    app.environments
+        .iter()
+        .find(|environment| environment_filter_target_key(environment) == fleet.key)
+}
+
+fn environment_detail_lines(environment: &EnvironmentSummary, width: usize) -> Vec<String> {
+    let mut lines = Vec::new();
+    let label = environment_filter_target_label(environment);
+    push_environment_detail_line(
+        &mut lines,
+        format!("env: {label} {}", environment.backend_mode),
+        width,
+    );
+    if let Some(error) = environment
+        .last_error
+        .as_deref()
+        .map(str::trim)
+        .filter(|error| !error.is_empty())
+    {
+        push_environment_detail_line(&mut lines, format!("health: {error}"), width);
+    } else {
+        push_environment_detail_line(
+            &mut lines,
+            format!("health: {:?}", environment.status),
+            width,
+        );
+    }
+    if let Some(attach) = environment
+        .attach_hint
+        .as_deref()
+        .map(str::trim)
+        .filter(|hint| !hint.is_empty())
+    {
+        push_environment_detail_line(&mut lines, format!("attach: {attach}"), width);
+    }
+    if let Some(bootstrap) = environment
+        .bootstrap_hint
+        .as_deref()
+        .map(str::trim)
+        .filter(|hint| !hint.is_empty())
+    {
+        push_environment_detail_line(&mut lines, format!("bootstrap: {bootstrap}"), width);
+    }
+    lines
+}
+
+fn push_environment_detail_line(lines: &mut Vec<String>, line: String, width: usize) {
+    lines.extend(wrap_text(&line, width.max(1)));
+}
+
+fn environment_detail_row(
+    environment: &EnvironmentSummary,
+    thought_content: Rect,
+    raw_line: String,
+) -> ThoughtRowLayout {
+    let line = truncate_label(&raw_line, thought_content.width as usize);
+    let width = display_width(&line);
+    ThoughtRowLayout {
+        session_rect: None,
+        text_rect: (width > 0).then_some(Rect {
+            x: thought_content.x,
+            y: 0,
+            width,
+            height: 1,
+        }),
+        mermaid_rect: None,
+        mermaid_label: None,
+        launch_rect: None,
+        commit_rect: None,
+        send_rect: None,
+        plan_rect: None,
+        plan_schema_path: None,
+        plan_slug: None,
+        group_session_ids: None,
+        session_id: String::new(),
+        cwd: String::new(),
+        label: environment_filter_target_label(environment),
+        tmux_name: String::new(),
+        line,
+        color: Color::DarkGrey,
     }
 }
 

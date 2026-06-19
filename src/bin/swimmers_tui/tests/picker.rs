@@ -8,6 +8,7 @@ fn remote_target_mapping_alpha() -> LaunchTargetSummary {
         kind: "swimmers_api".to_string(),
         base_url: Some("http://127.0.0.1:3210".to_string()),
         auth_token_env: None,
+        bootstrap_hint: None,
         path_mappings: vec![LaunchPathMapping {
             local_prefix: TEST_REPO_ALPHA.to_string(),
             remote_prefix: "/srv/repos/alpha".to_string(),
@@ -191,6 +192,7 @@ fn render_picker_truncates_long_launch_target_without_overwriting_tool_button() 
             kind: "swimmers_api".to_string(),
             base_url: Some("http://127.0.0.1:3210".to_string()),
             auth_token_env: None,
+            bootstrap_hint: None,
             path_mappings: vec![LaunchPathMapping {
                 local_prefix: "/tmp".to_string(),
                 remote_prefix: "/srv/repos".to_string(),

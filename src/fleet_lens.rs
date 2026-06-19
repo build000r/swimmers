@@ -259,6 +259,7 @@ mod tests {
                 kind: "swimmers_api".to_string(),
                 base_url: None,
                 auth_token_env: None,
+                bootstrap_hint: None,
                 path_mappings: Vec::new(),
             },
             "remote",

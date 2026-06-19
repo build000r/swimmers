@@ -328,6 +328,7 @@ export function buildEnvironmentMatrix(environments, sessions) {
         launchCapable: environment?.capabilities?.launch_session === true,
         attachHint: String(environment?.attach_hint || "").trim(),
         bootstrapHint: String(environment?.bootstrap_hint || "").trim(),
+        lastError: String(environment?.last_error || "").trim(),
       };
     })
     .sort((left, right) => (

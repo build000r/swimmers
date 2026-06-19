@@ -56,6 +56,7 @@ fn app_layout_shows_thought_rail_for_remote_attention_inbox() {
             kind: "swimmers_api".to_string(),
             base_url: None,
             auth_token_env: None,
+            bootstrap_hint: None,
             path_mappings: Vec::new(),
         },
         "sess-remote",

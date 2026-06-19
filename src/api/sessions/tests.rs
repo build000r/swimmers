@@ -344,6 +344,7 @@ fn remote_agent_context_target(base_url: String) -> LaunchTargetSummary {
         kind: "swimmers_api".to_string(),
         base_url: Some(base_url),
         auth_token_env: None,
+        bootstrap_hint: None,
         path_mappings: Vec::new(),
     }
 }

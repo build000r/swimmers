@@ -30,6 +30,22 @@ test("surface action dispatch guards null, disabled, and direct zones", () => {
   assert.deepEqual(surfaceActionDispatchPlan({ actionId: "toggle_session_grouping" }), {
     type: "toggle_session_grouping",
   });
+  assert.deepEqual(
+    surfaceActionDispatchPlan({
+      actionId: "copy_environment_hint",
+      kind: "bootstrap",
+      copyText: "ssh devbox 'AUTH_TOKEN=$AUTH_TOKEN swimmers serve'",
+    }),
+    {
+      type: "copy_text",
+      text: "ssh devbox 'AUTH_TOKEN=$AUTH_TOKEN swimmers serve'",
+      label: "bootstrap",
+    },
+  );
+  assert.deepEqual(
+    surfaceActionDispatchPlan({ actionId: "copy_environment_hint", copyText: "   " }),
+    { type: "ignore" },
+  );
 });
 
 test("surface action dispatch validates fleet filter payloads", () => {
@@ -106,6 +122,10 @@ test("surface action execution plans preserve payload passthroughs", () => {
     sheetId: "search",
   });
   assert.deepEqual(surfaceActionExecutionPlan({ type: "copy_selection" }), { type: "copy_selection" });
+  assert.deepEqual(
+    surfaceActionExecutionPlan({ type: "copy_text", text: "ssh devbox", label: "attach" }),
+    { type: "copy_text", text: "ssh devbox", label: "attach" },
+  );
   assert.deepEqual(
     surfaceActionExecutionPlan({ type: "set_fleet_filter", filter: { kind: "repo", key: "/tmp/repo" } }),
     { type: "set_fleet_filter", filter: { kind: "repo", key: "/tmp/repo" } },

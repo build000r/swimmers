@@ -79,6 +79,17 @@ export function surfaceActionDispatchPlan(zone, context = {}) {
       return { type: "toggle_select" };
     case "copy_selection":
       return { type: "copy_selection" };
+    case "copy_environment_hint": {
+      const text = String(zone.copyText || "").trim();
+      if (!text) {
+        return { type: "ignore" };
+      }
+      return {
+        type: "copy_text",
+        text,
+        label: String(zone.kind || "environment hint").trim() || "environment hint",
+      };
+    }
     case "focus_terminal":
       return { type: "focus_terminal" };
     case "refresh":
@@ -184,6 +195,12 @@ export function surfaceActionExecutionPlan(plan = {}, context = {}) {
     case "copy_selection":
     case "refresh":
       return { type: plan.type };
+    case "copy_text":
+      return {
+        type: "copy_text",
+        text: String(plan.text || ""),
+        label: String(plan.label || "text"),
+      };
     case "set_fleet_filter": {
       const filter = normalizeFleetFilterPayload(plan.filter);
       return filter ? { type: plan.type, filter } : { type: "ignore" };

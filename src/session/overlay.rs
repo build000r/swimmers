@@ -574,6 +574,8 @@ struct DevSanityLaunchTarget {
     #[serde(default)]
     auth_token_env: Option<String>,
     #[serde(default)]
+    bootstrap_hint: Option<String>,
+    #[serde(default)]
     path_mappings: Vec<DevSanityLaunchPathMapping>,
 }
 
@@ -990,6 +992,7 @@ fn parse_launch_target(target: DevSanityLaunchTarget) -> Option<LaunchTargetSumm
         id,
         base_url: target.base_url,
         auth_token_env: target.auth_token_env,
+        bootstrap_hint: target.bootstrap_hint.and_then(nonempty_launch_metadata),
         path_mappings: parse_launch_path_mappings(target.path_mappings),
     })
 }

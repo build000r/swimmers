@@ -182,6 +182,7 @@ fn environment_summary_for_target(target: &LaunchTargetSummary) -> EnvironmentSu
     let kind = normalized_target_kind(target);
     let is_swimmers_api = kind == "swimmers_api";
     let safe_ssh_alias = safe_ssh_alias_for_target(target);
+    let bootstrap_hint = environment_bootstrap_hint(target, safe_ssh_alias.as_deref());
     let health = if is_swimmers_api {
         remote_target_environment_health(target)
     } else {
@@ -193,7 +194,11 @@ fn environment_summary_for_target(target: &LaunchTargetSummary) -> EnvironmentSu
         kind,
         backend_mode: environment_backend_mode(target),
         display_host: target.label.clone(),
-        capabilities: environment_capabilities(target, safe_ssh_alias.is_some()),
+        capabilities: environment_capabilities(
+            target,
+            safe_ssh_alias.is_some(),
+            bootstrap_hint.is_some(),
+        ),
         base_url: is_swimmers_api
             .then(|| sanitized_target_base_url(target))
             .flatten(),
@@ -208,7 +213,7 @@ fn environment_summary_for_target(target: &LaunchTargetSummary) -> EnvironmentSu
         path_mapping_count: target.path_mappings.len(),
         ssh_alias: safe_ssh_alias.clone(),
         attach_hint: ssh_attach_hint_for_alias(safe_ssh_alias.as_deref()),
-        bootstrap_hint: ssh_bootstrap_hint_for_alias(safe_ssh_alias.as_deref()),
+        bootstrap_hint,
         status: health.status,
         last_seen_at: health.last_seen_at,
         last_error_at: health.last_error_at,
@@ -247,12 +252,14 @@ fn environment_backend_mode(target: &LaunchTargetSummary) -> String {
 fn environment_capabilities(
     target: &LaunchTargetSummary,
     has_safe_ssh_alias: bool,
+    has_bootstrap_hint: bool,
 ) -> EnvironmentCapabilitySummary {
     match normalized_target_kind(target).as_str() {
         "local" => EnvironmentCapabilitySummary::local(),
         "swimmers_api" => EnvironmentCapabilitySummary::remote_swimmers_api(
             remote_target_config_error(target).is_none(),
             !target.path_mappings.is_empty(),
+            has_bootstrap_hint,
         ),
         "ssh_only" => EnvironmentCapabilitySummary::ssh_handoff(has_safe_ssh_alias),
         _ => EnvironmentCapabilitySummary::advisory_only(),
@@ -302,6 +309,62 @@ fn ssh_attach_hint_for_alias(alias: Option<&str>) -> Option<String> {
 
 fn ssh_bootstrap_hint_for_alias(alias: Option<&str>) -> Option<String> {
     alias.map(|alias| format!("ssh {alias} 'swimmers serve'"))
+}
+
+fn environment_bootstrap_hint(
+    target: &LaunchTargetSummary,
+    safe_ssh_alias: Option<&str>,
+) -> Option<String> {
+    match normalized_target_kind(target).as_str() {
+        "ssh_only" => ssh_bootstrap_hint_for_alias(safe_ssh_alias),
+        "swimmers_api" => configured_bootstrap_hint_for_target(target),
+        _ => None,
+    }
+}
+
+fn configured_bootstrap_hint_for_target(target: &LaunchTargetSummary) -> Option<String> {
+    let hint = target.bootstrap_hint.as_deref()?.trim();
+    if hint.is_empty() || bootstrap_hint_contains_token_secret(target, hint) {
+        return None;
+    }
+    Some(hint.to_string())
+}
+
+fn bootstrap_hint_contains_token_secret(target: &LaunchTargetSummary, hint: &str) -> bool {
+    let mut env_names = vec!["AUTH_TOKEN", "OBSERVER_TOKEN"];
+    if let Some(env_name) = target
+        .auth_token_env
+        .as_deref()
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+    {
+        env_names.push(env_name);
+    }
+
+    env_names.iter().any(|env_name| {
+        bootstrap_hint_contains_env_value(env_name, hint)
+            || bootstrap_hint_has_inline_assignment(env_name, hint)
+    })
+}
+
+fn bootstrap_hint_contains_env_value(env_name: &str, hint: &str) -> bool {
+    matches!(std::env::var(env_name), Ok(value) if !value.trim().is_empty() && hint.contains(value.trim()))
+}
+
+fn bootstrap_hint_has_inline_assignment(env_name: &str, hint: &str) -> bool {
+    let needle = format!("{env_name}=");
+    let mut rest = hint;
+    while let Some(index) = rest.find(&needle) {
+        let before = rest[..index].chars().next_back();
+        if before.is_some_and(|ch| ch.is_ascii_alphanumeric() || ch == '_') {
+            rest = &rest[index + needle.len()..];
+            continue;
+        }
+        let after = rest[index + needle.len()..].trim_start();
+        let after = after.trim_start_matches(['\'', '"']);
+        return !after.starts_with('$') && !after.starts_with('<');
+    }
+    false
 }
 
 fn sanitized_target_base_url(target: &LaunchTargetSummary) -> Option<String> {

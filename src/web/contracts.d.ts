@@ -467,6 +467,7 @@ export interface LaunchTargetSummary {
   kind: string;
   base_url: Nullable<string>;
   auth_token_env: Nullable<string>;
+  bootstrap_hint: Nullable<string>;
   path_mappings: LaunchPathMapping[];
 }
 
@@ -1000,6 +1001,7 @@ export type SurfaceActionZone =
   | { type: "session"; sessionId: string; disabled?: boolean; rect?: unknown }
   | { type: "trogdor_agent"; sessionId: string; disabled?: boolean; rect?: unknown }
   | { type: "trogdor_reader"; sessionId?: string; disabled?: boolean; rect?: unknown }
+  | { type: "environment_hint"; actionId: "copy_environment_hint"; kind: string; key: string; label?: string; copyText: string; disabled?: boolean; rect?: unknown }
   | { type: "action"; actionId: string; disabled?: boolean; rect?: unknown; payload?: unknown };
 
 export type SurfaceActionDispatchPlan =
@@ -1023,6 +1025,7 @@ export type SurfaceActionDispatchPlan =
   | { type: "toggle_follow" }
   | { type: "toggle_select" }
   | { type: "copy_selection" }
+  | { type: "copy_text"; text: string; label: string }
   | { type: "focus_terminal" }
   | { type: "refresh" };
 
@@ -1040,6 +1043,7 @@ export type SurfaceActionExecutionPlan =
   | { type: "toggle_follow" }
   | { type: "toggle_select" }
   | { type: "copy_selection" }
+  | { type: "copy_text"; text: string; label: string }
   | { type: "refresh" }
   | {
       type: "focus_terminal";

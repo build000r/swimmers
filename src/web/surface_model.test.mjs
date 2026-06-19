@@ -457,6 +457,7 @@ test("buildEnvironmentMatrix keeps ssh-only handoff targets visible without fake
       capabilities: { ssh_attach_hint: true, bootstrap_hint: true, advisory_metadata: true },
       attach_hint: "ssh skillbox-devbox",
       bootstrap_hint: "ssh skillbox-devbox 'swimmers serve'",
+      last_error: null,
       path_mapping_count: 0,
     },
   ], [liveRemote]);
@@ -472,6 +473,34 @@ test("buildEnvironmentMatrix keeps ssh-only handoff targets visible without fake
   assert.equal(rows[2].readinessKey, "handoff");
   assert.deepEqual(rows[2].capabilityLabels, ["ssh", "bootstrap", "external"]);
   assert.equal(rows[2].attachHint, "ssh skillbox-devbox");
+  assert.equal(rows[2].bootstrapHint, "ssh skillbox-devbox 'swimmers serve'");
+  assert.equal(rows[2].lastError, "");
+});
+
+test("buildEnvironmentMatrix preserves down API health error and configured bootstrap hint", () => {
+  const rows = buildEnvironmentMatrix([
+    {
+      id: "skillbox-api",
+      label: "Skillbox API",
+      kind: "swimmers_api",
+      display_host: "Skillbox API",
+      backend_mode: "remote_swimmers_api",
+      status: "Unavailable",
+      last_error: "base_url_unavailable",
+      capabilities: { bootstrap_hint: true, advisory_metadata: true },
+      bootstrap_hint: "ssh skillbox-devbox 'AUTH_TOKEN=$AUTH_TOKEN swimmers serve'",
+      path_mapping_count: 2,
+    },
+  ], []);
+
+  assert.equal(rows[0].id, "skillbox-api");
+  assert.equal(rows[0].sessionCount, 0);
+  assert.equal(rows[0].readinessKey, "degraded");
+  assert.equal(rows[0].lastError, "base_url_unavailable");
+  assert.equal(
+    rows[0].bootstrapHint,
+    "ssh skillbox-devbox 'AUTH_TOKEN=$AUTH_TOKEN swimmers serve'",
+  );
 });
 
 test("buildSurfaceModel exposes environment matrix independent of active session filter", () => {

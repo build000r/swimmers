@@ -20,6 +20,7 @@ fn test_launch_target(id: &str, label: &str, kind: &str) -> LaunchTargetSummary 
         kind: kind.to_string(),
         base_url: None,
         auth_token_env: None,
+        bootstrap_hint: None,
         path_mappings: Vec::new(),
     }
 }
@@ -31,6 +32,7 @@ fn mapped_launch_target(id: &str, local_prefix: &str, remote_prefix: &str) -> La
         kind: "swimmers_api".to_string(),
         base_url: Some("http://127.0.0.1:3210".to_string()),
         auth_token_env: None,
+        bootstrap_hint: None,
         path_mappings: vec![crate::types::LaunchPathMapping {
             local_prefix: local_prefix.to_string(),
             remote_prefix: remote_prefix.to_string(),
@@ -357,6 +359,7 @@ fn parse_agent_launch_injects_local_and_filters_unknown_defaults() {
             kind: Some("swimmers_api".to_string()),
             base_url: Some("http://remote.test:3210".to_string()),
             auth_token_env: Some("REMOTE_TOKEN".to_string()),
+            bootstrap_hint: None,
             path_mappings: vec![DevSanityLaunchPathMapping {
                 local_prefix: Some("/local".to_string()),
                 remote_prefix: Some("/remote".to_string()),
@@ -403,6 +406,7 @@ fn parse_agent_launch_trims_target_identity_and_filters_blank_ids() {
                 kind: Some(" swimmers_api ".to_string()),
                 base_url: Some("http://remote.test:3210".to_string()),
                 auth_token_env: None,
+                bootstrap_hint: None,
                 path_mappings: Vec::new(),
             },
             DevSanityLaunchTarget {
@@ -411,6 +415,7 @@ fn parse_agent_launch_trims_target_identity_and_filters_blank_ids() {
                 kind: Some("swimmers_api".to_string()),
                 base_url: Some("http://blank.test:3210".to_string()),
                 auth_token_env: None,
+                bootstrap_hint: None,
                 path_mappings: Vec::new(),
             },
         ],
@@ -451,6 +456,7 @@ fn parse_agent_launch_ignores_blank_or_empty_expanded_path_mappings() {
             kind: Some("swimmers_api".to_string()),
             base_url: Some("http://remote.test:3210".to_string()),
             auth_token_env: None,
+            bootstrap_hint: None,
             path_mappings: vec![
                 DevSanityLaunchPathMapping {
                     local_prefix: Some("".to_string()),
@@ -1034,6 +1040,7 @@ fn overlay_health_reports_load_age_and_remote_target_count_without_probe() {
         kind: " swimmers_api ".to_string(),
         base_url: Some("http://example.test:3210".to_string()),
         auth_token_env: Some("REMOTE_TOKEN".to_string()),
+        bootstrap_hint: None,
         path_mappings: Vec::new(),
     };
     let client = ClientOverlay {

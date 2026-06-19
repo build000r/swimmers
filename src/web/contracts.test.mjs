@@ -503,6 +503,7 @@ test("normalizeDirListResponse preserves directory entries and launch target fie
       kind: "ssh",
       base_url: "https://example.test",
       auth_token_env: null,
+      bootstrap_hint: "ssh remote 'AUTH_TOKEN=$AUTH_TOKEN swimmers serve'",
       path_mappings: [{ local_prefix: "/srv", remote_prefix: "/home" }],
     }],
     default_launch_target: "remote",
@@ -521,6 +522,10 @@ test("normalizeDirListResponse preserves directory entries and launch target fie
 
   assert.equal(payload.entries[0].full_path, "/srv/repos/app");
   assert.deepEqual(payload.entries[0].groups, ["work", "7"]);
+  assert.equal(
+    payload.launch_targets[0].bootstrap_hint,
+    "ssh remote 'AUTH_TOKEN=$AUTH_TOKEN swimmers serve'",
+  );
   assert.equal(payload.launch_targets[0].path_mappings[0].remote_prefix, "/home");
 });
 

@@ -448,6 +448,8 @@ pub struct LaunchTargetSummary {
     pub base_url: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub auth_token_env: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bootstrap_hint: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub path_mappings: Vec<LaunchPathMapping>,
 }
@@ -460,6 +462,7 @@ impl LaunchTargetSummary {
             kind: "local".to_string(),
             base_url: None,
             auth_token_env: None,
+            bootstrap_hint: None,
             path_mappings: Vec::new(),
         }
     }
@@ -594,7 +597,11 @@ impl EnvironmentCapabilitySummary {
         }
     }
 
-    pub fn remote_swimmers_api(ready: bool, has_path_mappings: bool) -> Self {
+    pub fn remote_swimmers_api(
+        ready: bool,
+        has_path_mappings: bool,
+        has_bootstrap_hint: bool,
+    ) -> Self {
         Self {
             observe_sessions: ready,
             launch_session: ready,
@@ -603,7 +610,7 @@ impl EnvironmentCapabilitySummary {
             remote_dir_inventory: ready && has_path_mappings,
             native_attach: false,
             ssh_attach_hint: false,
-            bootstrap_hint: false,
+            bootstrap_hint: has_bootstrap_hint,
             advisory_metadata: true,
             health_probe: true,
         }

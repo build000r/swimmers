@@ -7,6 +7,7 @@ fn remote_target(id: &str, label: &str) -> swimmers::types::LaunchTargetSummary 
         kind: "swimmers_api".to_string(),
         base_url: Some("http://127.0.0.1:3210".to_string()),
         auth_token_env: None,
+        bootstrap_hint: None,
         path_mappings: Vec::new(),
     }
 }
@@ -927,6 +928,7 @@ fn thought_panel_header_summarizes_cross_host_inbox() {
             kind: "swimmers_api".to_string(),
             base_url: None,
             auth_token_env: None,
+            bootstrap_hint: None,
             path_mappings: Vec::new(),
         },
         "sess-remote",
@@ -1075,6 +1077,93 @@ fn header_filter_strip_exposes_zero_session_ssh_only_targets_without_fake_sessio
     assert!(!app.thought_filter.matches_session(&local));
     let active_strip = build_header_filter_layout(&app, 160);
     assert!(active_strip.chips.iter().any(|chip| chip.label == "host ."));
+}
+
+#[test]
+fn thought_panel_environment_detail_renders_ssh_only_handoff_hints() {
+    let api = MockApi::new();
+    let layout = test_layout(160, 32);
+    let thought_content = layout
+        .thought_content
+        .expect("wide layout enables thought rail");
+    let mut app = make_app(api);
+    app.environments = vec![ssh_only_environment("skillbox-devbox", "Skillbox devbox")];
+    app.thought_filter.fleet = Some(ThoughtFleetFilter {
+        kind: swimmers::types::FleetLensBucketKind::Target,
+        key: "skillbox-devbox".to_string(),
+        label: "Skillbox devbox".to_string(),
+    });
+
+    let panel = build_thought_panel(&app, thought_content, layout.thought_entry_capacity());
+    let lines = panel
+        .rows
+        .iter()
+        .map(|row| row.line.as_str())
+        .collect::<Vec<_>>();
+
+    assert_eq!(panel.empty_message, None);
+    assert!(lines.contains(&"env: Skillbox devbox ssh_handoff"));
+    assert!(lines.contains(&"health: NotConfigured"));
+    assert!(lines.contains(&"attach: ssh skillbox-devbox"));
+    assert!(lines.contains(&"bootstrap: ssh skillbox-devbox 'swimmers serve'"));
+}
+
+#[test]
+fn thought_panel_environment_detail_renders_down_api_health_and_bootstrap_hint() {
+    let api = MockApi::new();
+    let layout = test_layout(160, 32);
+    let thought_content = layout
+        .thought_content
+        .expect("wide layout enables thought rail");
+    let mut app = make_app(api);
+    app.environments = vec![swimmers::types::EnvironmentSummary {
+        id: "skillbox-api".to_string(),
+        label: "Skillbox API".to_string(),
+        kind: "swimmers_api".to_string(),
+        backend_mode: "remote_swimmers_api".to_string(),
+        display_host: "Skillbox API".to_string(),
+        capabilities: swimmers::types::EnvironmentCapabilitySummary::remote_swimmers_api(
+            false, true, true,
+        ),
+        base_url: Some("http://192.0.2.10:3210/".to_string()),
+        auth: swimmers::types::EnvironmentAuthSummary {
+            mode: "token_env".to_string(),
+            token_env_present: Some(false),
+        },
+        path_mapping_count: 1,
+        ssh_alias: None,
+        attach_hint: None,
+        bootstrap_hint: Some(
+            "ssh skillbox-devbox 'AUTH_TOKEN=$AUTH_TOKEN swimmers serve'".to_string(),
+        ),
+        status: swimmers::types::DependencyHealthStatus::Unavailable,
+        last_seen_at: None,
+        last_error_at: None,
+        last_error: Some("base_url_unavailable".to_string()),
+        freshness_ms: None,
+        advisory: Vec::new(),
+    }];
+    app.thought_filter.fleet = Some(ThoughtFleetFilter {
+        kind: swimmers::types::FleetLensBucketKind::Target,
+        key: "skillbox-api".to_string(),
+        label: "Skillbox API".to_string(),
+    });
+
+    let panel = build_thought_panel(&app, thought_content, layout.thought_entry_capacity());
+    let lines = panel
+        .rows
+        .iter()
+        .map(|row| row.line.as_str())
+        .collect::<Vec<_>>();
+
+    assert_eq!(panel.empty_message, None);
+    assert!(lines.contains(&"env: Skillbox API remote_swimmers_api"));
+    assert!(lines.contains(&"health: base_url_unavailable"));
+    let rendered = lines.join(" ");
+    assert!(
+        rendered.contains("bootstrap: ssh skillbox-devbox 'AUTH_TOKEN=$AUTH_TOKEN swimmers serve'")
+    );
+    assert!(!lines.iter().any(|line| line.contains("session 1")));
 }
 
 #[test]

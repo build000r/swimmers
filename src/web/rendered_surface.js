@@ -539,6 +539,30 @@ function drawEnvironmentMatrix(frame, overlay, model, startY) {
       rect(overlay.x + 1, y, overlay.w - 2, 1),
     );
     y += 1;
+    for (const hint of environmentRowHintLines(row)) {
+      if (y >= overlay.y + overlay.h - 2) {
+        break;
+      }
+      drawText(frame, overlay.x + 4, y, truncate(hint.label, overlay.w - 6), {
+        fg: hint.kind === "error" ? COLORS.danger : COLORS.text,
+        width: overlay.w - 6,
+      });
+      if (hint.copyText) {
+        pushZone(
+          frame,
+          {
+            type: "environment_hint",
+            actionId: "copy_environment_hint",
+            kind: hint.kind,
+            key: row.id,
+            label: hint.label,
+            copyText: hint.copyText,
+          },
+          rect(overlay.x + 3, y, overlay.w - 4, 1),
+        );
+      }
+      y += 1;
+    }
   }
   if (rows.length > visibleRows.length) {
     drawText(frame, overlay.x + 2, y, truncate(`more envs ${rows.length - visibleRows.length}`, overlay.w - 4), {
@@ -560,6 +584,23 @@ function environmentRowLabel(row) {
     : "";
   const maps = Number(row?.pathMappingCount || 0) > 0 ? ` maps ${row.pathMappingCount}` : "";
   return `${host} ${count} ${readiness}${caps}${maps}`;
+}
+
+function environmentRowHintLines(row) {
+  const lines = [];
+  const error = String(row?.lastError || "").trim();
+  if (error) {
+    lines.push({ kind: "error", label: `health ${error}` });
+  }
+  const attach = String(row?.attachHint || "").trim();
+  if (attach) {
+    lines.push({ kind: "attach", label: `attach ${attach}`, copyText: attach });
+  }
+  const bootstrap = String(row?.bootstrapHint || "").trim();
+  if (bootstrap) {
+    lines.push({ kind: "bootstrap", label: `bootstrap ${bootstrap}`, copyText: bootstrap });
+  }
+  return lines;
 }
 
 function environmentRowColor(row) {

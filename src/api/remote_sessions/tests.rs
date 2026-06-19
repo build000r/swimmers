@@ -19,6 +19,7 @@ fn target() -> LaunchTargetSummary {
         kind: "swimmers_api".to_string(),
         base_url: Some("http://127.0.0.1:3210".to_string()),
         auth_token_env: None,
+        bootstrap_hint: None,
         path_mappings: vec![
             LaunchPathMapping {
                 local_prefix: "/workspace/repos".to_string(),
@@ -974,7 +975,7 @@ fn environment_summary_redacts_token_values_and_credentialed_base_url() {
     let _guard = crate::test_support::ENV_LOCK
         .lock()
         .unwrap_or_else(|poison| poison.into_inner());
-    std::env::set_var("SWIMMERS_REMOTE_TEST_TOKEN", "secret-token");
+    std::env::set_var("SWIMMERS_REMOTE_TEST_TOKEN", "fixture-token");
     let mut target = target();
     target.auth_token_env = Some("SWIMMERS_REMOTE_TEST_TOKEN".to_string());
     target.base_url =
@@ -986,12 +987,76 @@ fn environment_summary_redacts_token_values_and_credentialed_base_url() {
     assert_eq!(environment.auth.mode, "token_env");
     assert_eq!(environment.auth.token_env_present, Some(true));
     assert_eq!(environment.path_mapping_count, 2);
+    assert!(!json.contains("fixture-token"));
     assert!(!json.contains("secret-token"));
     assert!(!json.contains("SWIMMERS_REMOTE_TEST_TOKEN"));
     assert_eq!(
         environment.base_url.as_deref(),
         Some("http://127.0.0.1:3210/")
     );
+
+    std::env::remove_var("SWIMMERS_REMOTE_TEST_TOKEN");
+}
+
+#[test]
+fn environment_summary_surfaces_configured_bootstrap_hint_for_down_swimmers_api_target() {
+    let _guard = shared_remote_cache_test_guard();
+    reset_remote_target_session_cache_for_tests();
+    let mut target = target();
+    target.base_url = Some("ftp://127.0.0.1:3210".to_string());
+    target.bootstrap_hint =
+        Some("ssh skillbox-devbox 'AUTH_TOKEN=$AUTH_TOKEN swimmers serve'".to_string());
+
+    let environment = environment_summary_for_target(&target);
+
+    assert_eq!(environment.kind, "swimmers_api");
+    assert_eq!(environment.backend_mode, "remote_swimmers_api");
+    assert_eq!(environment.status, DependencyHealthStatus::Unavailable);
+    assert_eq!(
+        environment.last_error.as_deref(),
+        Some("base_url_unavailable")
+    );
+    assert_eq!(environment.attach_hint, None);
+    assert_eq!(
+        environment.bootstrap_hint.as_deref(),
+        Some("ssh skillbox-devbox 'AUTH_TOKEN=$AUTH_TOKEN swimmers serve'")
+    );
+    assert_eq!(environment.capabilities.bootstrap_hint, true);
+    assert_eq!(environment.capabilities.observe_sessions, false);
+}
+
+#[test]
+fn configured_bootstrap_hint_suppresses_inline_token_values() {
+    let _guard = crate::test_support::ENV_LOCK
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
+    std::env::set_var("SWIMMERS_REMOTE_TEST_TOKEN", "fixture-token");
+    let mut target = target();
+    target.auth_token_env = Some("SWIMMERS_REMOTE_TEST_TOKEN".to_string());
+
+    target.bootstrap_hint = Some(
+        "ssh skillbox-devbox 'SWIMMERS_REMOTE_TEST_TOKEN=$SWIMMERS_REMOTE_TEST_TOKEN swimmers serve'"
+            .to_string(),
+    );
+    let safe = environment_summary_for_target(&target);
+    assert_eq!(
+        safe.bootstrap_hint.as_deref(),
+        Some(
+            "ssh skillbox-devbox 'SWIMMERS_REMOTE_TEST_TOKEN=$SWIMMERS_REMOTE_TEST_TOKEN swimmers serve'"
+        )
+    );
+
+    target.bootstrap_hint = Some(
+        "ssh skillbox-devbox 'SWIMMERS_REMOTE_TEST_TOKEN=fixture-token swimmers serve'".to_string(),
+    );
+    let leaked_value = environment_summary_for_target(&target);
+    assert_eq!(leaked_value.bootstrap_hint, None);
+    assert_eq!(leaked_value.capabilities.bootstrap_hint, false);
+
+    target.bootstrap_hint =
+        Some("ssh skillbox-devbox 'AUTH_TOKEN=literal-token swimmers serve'".to_string());
+    let inline_assignment = environment_summary_for_target(&target);
+    assert_eq!(inline_assignment.bootstrap_hint, None);
 
     std::env::remove_var("SWIMMERS_REMOTE_TEST_TOKEN");
 }

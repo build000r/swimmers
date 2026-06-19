@@ -453,6 +453,28 @@ test("surface fleet lens actions persist active filter and grouping mode", async
   assert.equal(storage.get("swimmers.web.sessionGroupMode"), "project");
 });
 
+test("surface environment hint actions copy command text", async () => {
+  resetWebState();
+  const writes = [];
+  globalThis.navigator.clipboard = {
+    async writeText(text) {
+      writes.push(text);
+    },
+  };
+
+  await web.handleSurfaceAction({
+    type: "environment_hint",
+    actionId: "copy_environment_hint",
+    kind: "bootstrap",
+    key: "skillbox-api",
+    copyText: "ssh skillbox-devbox 'AUTH_TOKEN=$AUTH_TOKEN swimmers serve'",
+  });
+
+  assert.deepEqual(writes, ["ssh skillbox-devbox 'AUTH_TOKEN=$AUTH_TOKEN swimmers serve'"]);
+  assert.equal(web.state.utilityLabel, "Copied bootstrap.");
+  delete globalThis.navigator.clipboard;
+});
+
 test("fleet filter reconciler clears persisted filters for unavailable targets", () => {
   resetWebState();
   web.state.fleetFilter = { kind: "target", key: "missing-devbox" };

@@ -60,6 +60,7 @@ fn service_mapped_launch_target(
         kind: "swimmers_api".to_string(),
         base_url: Some("http://127.0.0.1:3210".to_string()),
         auth_token_env: None,
+        bootstrap_hint: None,
         path_mappings: vec![LaunchPathMapping {
             local_prefix: local_prefix.to_string_lossy().into_owned(),
             remote_prefix: remote_prefix.to_string(),

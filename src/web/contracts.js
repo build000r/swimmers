@@ -564,6 +564,7 @@ export function normalizeLaunchTargetSummary(value) {
     kind: stringValue(target.kind, "local"),
     base_url: optionalString(target.base_url),
     auth_token_env: optionalString(target.auth_token_env),
+    bootstrap_hint: optionalString(target.bootstrap_hint),
     path_mappings: objectArray(target.path_mappings).map((mapping) => ({
       ...mapping,
       local_prefix: stringValue(mapping.local_prefix),

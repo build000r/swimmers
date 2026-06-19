@@ -336,6 +336,7 @@ mod tests {
             kind: "swimmers_api".to_string(),
             base_url: Some("http://100.64.1.2:3210/?token=secret".to_string()),
             auth_token_env: Some("SWIMMERS_TOKEN".to_string()),
+            bootstrap_hint: None,
             path_mappings: Vec::new(),
         };
         let mut session = SessionSummary {

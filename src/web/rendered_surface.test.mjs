@@ -242,6 +242,8 @@ test("surface renders clickable environment matrix rows including ssh-only hando
         pathMappingCount: 0,
         capabilityLabels: ["ssh", "bootstrap", "external"],
         handoffOnly: true,
+        attachHint: "ssh skillbox-devbox",
+        bootstrapHint: "ssh skillbox-devbox 'swimmers serve'",
       },
     ],
   }));
@@ -253,6 +255,8 @@ test("surface renders clickable environment matrix rows including ssh-only hando
   assert.match(text, /envs 2 \/ handoff 1 \/ degraded 0/);
   assert.match(text, /Skillbox API 1 needs attention observe\/launch\/dirs maps 2/);
   assert.match(text, /Skillbox devbox 0 handoff ssh\/bootstrap\/external/);
+  assert.match(text, /attach ssh skillbox-devbox/);
+  assert.match(text, /bootstrap ssh skillbox-devbox 'swimmers serve'/);
   assert.deepEqual(
     {
       actionId: handoffZone?.actionId,
@@ -266,6 +270,52 @@ test("surface renders clickable environment matrix rows including ssh-only hando
       key: "skillbox-devbox",
       type: "environment",
     },
+  );
+  assert.deepEqual(
+    frame.zones
+      .filter((zone) => zone.actionId === "copy_environment_hint")
+      .map((zone) => [zone.kind, zone.key, zone.copyText]),
+    [
+      ["attach", "skillbox-devbox", "ssh skillbox-devbox"],
+      ["bootstrap", "skillbox-devbox", "ssh skillbox-devbox 'swimmers serve'"],
+    ],
+  );
+});
+
+test("surface renders down API health error with configured bootstrap hint and no fake sessions", () => {
+  const frame = buildSurfaceFrame(baseModel({
+    currentSession: null,
+    selectedSessionId: null,
+    sessions: [],
+    trogdorAtlasOpen: true,
+    environmentMatrix: [
+      {
+        id: "skillbox-api",
+        displayHost: "Skillbox API",
+        label: "Skillbox API",
+        readinessKey: "degraded",
+        readinessLabel: "degraded",
+        sessionCount: 0,
+        degradedCount: 0,
+        pathMappingCount: 2,
+        capabilityLabels: ["bootstrap", "external"],
+        status: "Unavailable",
+        lastError: "base_url_unavailable",
+        bootstrapHint: "ssh skillbox-devbox 'AUTH_TOKEN=$AUTH_TOKEN swimmers serve'",
+      },
+    ],
+  }));
+  const text = frameText(frame);
+
+  assert.match(text, /Skillbox API 0 degraded bootstrap\/external maps 2/);
+  assert.match(text, /health base_url_unavailable/);
+  assert.match(text, /bootstrap ssh skillbox-devbox 'AUTH_TOKEN=\$AUTH_TOKEN/);
+  assert.doesNotMatch(text, /Skillbox API 1/);
+  assert.deepEqual(
+    frame.zones
+      .filter((zone) => zone.actionId === "copy_environment_hint")
+      .map((zone) => [zone.kind, zone.copyText]),
+    [["bootstrap", "ssh skillbox-devbox 'AUTH_TOKEN=$AUTH_TOKEN swimmers serve'"]],
   );
 });
 

@@ -810,6 +810,7 @@ fn clicking_remote_swimmer_shows_handoff_without_native_open() {
         kind: "swimmers_api".to_string(),
         base_url: Some("http://100.64.1.2:3210/?token=secret".to_string()),
         auth_token_env: Some("SWIMMERS_TOKEN".to_string()),
+        bootstrap_hint: None,
         path_mappings: Vec::new(),
     };
     session.environment = swimmers::types::SessionEnvironmentSummary::remote(
@@ -1291,6 +1292,7 @@ fn picker_commit_action_blocks_remote_target_before_local_write() {
                     kind: "swimmers_api".to_string(),
                     base_url: None,
                     auth_token_env: None,
+                    bootstrap_hint: None,
                     path_mappings: Vec::new(),
                 },
             ],
