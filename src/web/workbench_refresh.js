@@ -21,9 +21,11 @@ export function workbenchRefreshStartPlan(context = {}) {
 }
 
 export function workbenchRefreshStalePlan(context = {}) {
+  const requestSeqMatches = context.requestSeq === context.currentRequestSeq;
   return {
-    stale: context.requestSeq !== context.currentRequestSeq ||
+    stale: !requestSeqMatches ||
       context.selectedSessionId !== context.sessionId,
+    clearLoading: requestSeqMatches,
   };
 }
 
@@ -75,7 +77,10 @@ export async function runWorkbenchWidgetRefresh(options = {}, runtime) {
     sessionId: startPlan.sessionId,
   });
   if (stalePlan.stale) {
-    runtime.state.workbenchWidgets.loading = false;
+    if (stalePlan.clearLoading) {
+      runtime.state.workbenchWidgets.loading = false;
+      runtime.renderWorkbenchWidgets();
+    }
     return;
   }
 

@@ -73,19 +73,19 @@ test("workbenchRefreshStalePlan preserves request and selected-session stale gua
     currentRequestSeq: 2,
     selectedSessionId: "sess_0",
     sessionId: "sess_0",
-  }), { stale: false });
+  }), { stale: false, clearLoading: true });
   assert.deepEqual(workbenchRefreshStalePlan({
     requestSeq: 2,
     currentRequestSeq: 3,
     selectedSessionId: "sess_0",
     sessionId: "sess_0",
-  }), { stale: true });
+  }), { stale: true, clearLoading: false });
   assert.deepEqual(workbenchRefreshStalePlan({
     requestSeq: 2,
     currentRequestSeq: 2,
     selectedSessionId: "other",
     sessionId: "sess_0",
-  }), { stale: true });
+  }), { stale: true, clearLoading: true });
 });
 
 test("runWorkbenchWidgetRefresh preserves no-session reset behavior", async () => {
@@ -143,7 +143,7 @@ test("runWorkbenchWidgetRefresh preserves stale response guard", async () => {
 
   assert.equal(runtime.state.workbenchWidgets.lastLoadedAt, 0);
   assert.equal(runtime.state.workbenchWidgets.loading, false);
-  assert.equal(calls.filter(([name]) => name === "renderWorkbenchWidgets").length, 1);
+  assert.equal(calls.filter(([name]) => name === "renderWorkbenchWidgets").length, 2);
 
   runtime.state.selectedSessionId = "sess_0";
   await runWorkbenchWidgetRefresh({ throttle: true }, runtime);
@@ -151,5 +151,26 @@ test("runWorkbenchWidgetRefresh preserves stale response guard", async () => {
   assert.equal(runtime.state.workbenchWidgets.loading, false);
   assert.equal(runtime.state.workbenchWidgets.lastLoadedAt, 4242);
   assert.equal(calls.filter(([name]) => name === "apiMaybeFetch").length, 12);
-  assert.equal(calls.filter(([name]) => name === "renderWorkbenchWidgets").length, 3);
+  assert.equal(calls.filter(([name]) => name === "renderWorkbenchWidgets").length, 4);
+});
+
+test("runWorkbenchWidgetRefresh does not let old responses clear newer loading state", async () => {
+  const { calls, runtime } = buildRuntime();
+  const originalResponseJsonOrNull = runtime.responseJsonOrNull;
+  let supersedeOnce = true;
+  runtime.responseJsonOrNull = async (response) => {
+    if (supersedeOnce && response.path.endsWith("/timeline")) {
+      supersedeOnce = false;
+      runtime.state.workbenchWidgets.requestSeq = 2;
+      runtime.state.workbenchWidgets.loading = true;
+    }
+    return originalResponseJsonOrNull(response);
+  };
+
+  await runWorkbenchWidgetRefresh({}, runtime);
+
+  assert.equal(runtime.state.workbenchWidgets.requestSeq, 2);
+  assert.equal(runtime.state.workbenchWidgets.loading, true);
+  assert.equal(runtime.state.workbenchWidgets.lastLoadedAt, 0);
+  assert.equal(calls.filter(([name]) => name === "renderWorkbenchWidgets").length, 1);
 });
