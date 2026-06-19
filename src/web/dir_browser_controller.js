@@ -99,14 +99,22 @@ export function createDirBrowserController(runtime) {
     return dirBrowserLaunchTargetStatusTextForPreview(preview);
   }
 
-  function syncCreateLaunchTargetStatus() {
+  function refreshCreateLaunchTargetBlocker() {
     const path = String(el.createCwd?.value || state.dirBrowser.path || "").trim();
     if (!path) {
       state.dirBrowser.singleLaunchBlocker = null;
-      return;
+      return null;
     }
     const preview = launchTargetPreviewForPath(path);
     state.dirBrowser.singleLaunchBlocker = preview.blocked ? preview : null;
+    return preview;
+  }
+
+  function syncCreateLaunchTargetStatus() {
+    const preview = refreshCreateLaunchTargetBlocker();
+    if (!preview) {
+      return;
+    }
     setDirStatus(launchTargetStatusForPreview(preview), preview.blocked);
   }
 
@@ -476,6 +484,7 @@ export function createDirBrowserController(runtime) {
         }
         renderCreateBatchBar();
         batchLaunchBlockersForPaths(selectedBatchDirs());
+        refreshCreateLaunchTargetBlocker();
         syncSheetActionAvailability();
       }
     }

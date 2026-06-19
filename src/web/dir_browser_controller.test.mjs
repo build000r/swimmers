@@ -434,18 +434,19 @@ test("directory browser controller preserves explicit local target during reload
   }
 });
 
-test("directory browser controller reverts target when target-change reload fails", async () => {
+test("directory browser controller reverts target and stale blockers when target-change reload fails", async () => {
   const { runtime, state, el, statuses } = createRuntime({
     apiFetch: async () => {
       throw new Error("remote down");
     },
     location: new URL("http://swimmers.test/"),
   });
-  state.dirBrowser.path = "/workspace";
+  state.dirBrowser.path = "/tmp/outside";
   state.dirBrowser.entries = [{ name: "swimmers", has_children: false }];
   state.dirBrowser.launchTargets = [{ id: "local", label: "Local machine", kind: "local" }, devboxTarget()];
   state.dirBrowser.launchTarget = "local";
-  el.dirsPath.value = "/workspace";
+  el.dirsPath.value = "/tmp/outside";
+  el.createCwd.value = "/tmp/outside";
   el.createLaunchTarget = selectElement("devbox");
 
   const controller = createDirBrowserController(runtime);
@@ -453,6 +454,7 @@ test("directory browser controller reverts target when target-change reload fail
 
   assert.equal(state.dirBrowser.launchTarget, "local");
   assert.equal(el.createLaunchTarget.value, "local");
+  assert.equal(state.dirBrowser.singleLaunchBlocker, null);
   assert.deepEqual(statuses.at(-1), {
     message: "Failed to load directories: remote down",
     isError: true,
