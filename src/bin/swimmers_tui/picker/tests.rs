@@ -2,7 +2,8 @@ mod picker {
     use super::super::picker_render::{
         initial_request_context_line, initial_request_hint, initial_request_input_render_model,
         initial_request_title, initial_request_voice_color, picker_filter_render_items,
-        InitialRequestInputRenderModel, PickerFilterRenderItem,
+        picker_search_overlay_render_model, InitialRequestInputRenderModel, PickerFilterRenderItem,
+        PickerSearchOverlayRenderModel,
     };
     use super::super::*;
     use swimmers::types::{LaunchPathMapping, RepoActionStatus};
@@ -538,6 +539,24 @@ mod picker {
         let all_items = picker_filter_render_items(&picker, &layout);
         assert_eq!(all_items[0].color, Color::DarkGrey);
         assert_eq!(all_items[3].color, Color::White);
+    }
+
+    #[test]
+    fn picker_search_overlay_aligns_by_display_width() {
+        let mut layout = filter_test_layout();
+        layout.content = rect(10, 2, 30);
+        layout.visible_entries = vec![0];
+        let mut picker = filter_test_picker();
+        picker.search = "漢字".to_string();
+
+        assert_eq!(
+            picker_search_overlay_render_model(&picker, &layout),
+            Some(PickerSearchOverlayRenderModel {
+                x: 17,
+                y: 3,
+                label: "search: 漢字_ (1 match)".to_string(),
+            })
+        );
     }
 
     #[test]

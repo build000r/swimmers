@@ -6,6 +6,7 @@ use super::{
     InitialRequestLayout, InitialRequestState, LaunchTargetPreview, PickerLayout, PickerSelection,
     PickerState, Rect, Renderer, VoiceUiState, INITIAL_REQUEST_HEIGHT, INITIAL_REQUEST_WIDTH,
 };
+use unicode_width::UnicodeWidthStr;
 
 pub(crate) fn render_picker(renderer: &mut Renderer, picker: &PickerState, field: Rect) {
     let layout = picker_layout(picker, field);
@@ -234,31 +235,52 @@ fn render_picker_search_overlay(
     layout: &PickerLayout,
     picker_accent: Color,
 ) {
-    if !picker.search.is_empty() {
-        let label = format!(
-            "search: {}_ ({} match{})",
-            picker.search,
-            layout.visible_entries.len(),
-            if layout.visible_entries.len() == 1 {
-                ""
-            } else {
-                "es"
-            },
-        );
-        let path_y = layout.content.y + 1;
-        let overlay_x = layout
-            .content
-            .right()
-            .saturating_sub(label.len() as u16)
-            .max(layout.content.x);
-        let available = layout.content.right().saturating_sub(overlay_x) as usize;
-        renderer.draw_text(
-            overlay_x,
-            path_y,
-            &truncate_label(&label, available),
-            picker_accent,
-        );
+    if let Some(overlay) = picker_search_overlay_render_model(picker, layout) {
+        renderer.draw_text(overlay.x, overlay.y, &overlay.label, picker_accent);
     }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) struct PickerSearchOverlayRenderModel {
+    pub(super) x: u16,
+    pub(super) y: u16,
+    pub(super) label: String,
+}
+
+pub(super) fn picker_search_overlay_render_model(
+    picker: &PickerState,
+    layout: &PickerLayout,
+) -> Option<PickerSearchOverlayRenderModel> {
+    if picker.search.is_empty() {
+        return None;
+    }
+
+    let label = format!(
+        "search: {}_ ({} match{})",
+        picker.search,
+        layout.visible_entries.len(),
+        if layout.visible_entries.len() == 1 {
+            ""
+        } else {
+            "es"
+        },
+    );
+    let x = layout
+        .content
+        .right()
+        .saturating_sub(display_width_u16(&label))
+        .max(layout.content.x);
+    let available = layout.content.right().saturating_sub(x) as usize;
+
+    Some(PickerSearchOverlayRenderModel {
+        x,
+        y: layout.content.y + 1,
+        label: truncate_label(&label, available),
+    })
+}
+
+fn display_width_u16(label: &str) -> u16 {
+    UnicodeWidthStr::width(label).min(u16::MAX as usize) as u16
 }
 
 fn render_picker_entries(renderer: &mut Renderer, picker: &PickerState, layout: &PickerLayout) {
