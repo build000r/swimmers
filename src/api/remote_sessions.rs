@@ -912,7 +912,7 @@ pub async fn create_remote_sessions_batch(
     let batch = prepare_remote_sessions_batch(body)?;
     let mut response =
         create_remote_sessions_batch_on_target(&batch.target, batch.remote_body).await?;
-    restore_original_batch_cwds(&mut response, &batch.original_dirs);
+    restore_original_batch_cwds(&mut response, &batch.original_dirs)?;
     Ok(response)
 }
 
@@ -961,12 +961,60 @@ fn map_batch_cwds_for_target(
 fn restore_original_batch_cwds(
     response: &mut CreateSessionsBatchResponse,
     original_dirs: &[String],
-) {
+) -> Result<(), RemoteSessionError> {
+    validate_remote_batch_result_indexes(&response.results, original_dirs.len())?;
     for result in &mut response.results {
-        if let Some(original) = original_dirs.get(result.index) {
-            result.cwd = original.clone();
-        }
+        result.cwd = original_dirs[result.index].clone();
     }
+
+    Ok(())
+}
+
+fn validate_remote_batch_result_indexes(
+    results: &[crate::types::CreateSessionsBatchResult],
+    expected_len: usize,
+) -> Result<(), RemoteSessionError> {
+    if results.len() != expected_len {
+        return Err(remote_batch_result_count_error(results.len(), expected_len));
+    }
+
+    let mut seen = vec![false; expected_len];
+    for index in results.iter().map(|result| result.index) {
+        mark_remote_batch_result_index(&mut seen, index)?;
+    }
+    Ok(())
+}
+
+fn mark_remote_batch_result_index(
+    seen: &mut [bool],
+    index: usize,
+) -> Result<(), RemoteSessionError> {
+    let Some(slot) = seen.get_mut(index) else {
+        return Err(malformed_remote_batch_response(format!(
+            "remote batch response included out-of-range result index {index}"
+        )));
+    };
+    if *slot {
+        return Err(malformed_remote_batch_response(format!(
+            "remote batch response included duplicate result index {index}"
+        )));
+    }
+    *slot = true;
+    Ok(())
+}
+
+fn remote_batch_result_count_error(actual: usize, expected: usize) -> RemoteSessionError {
+    malformed_remote_batch_response(format!(
+        "remote batch response returned {actual} results for {expected} requested dirs"
+    ))
+}
+
+fn malformed_remote_batch_response(message: impl Into<String>) -> RemoteSessionError {
+    RemoteSessionError::new(
+        StatusCode::BAD_GATEWAY,
+        "REMOTE_LAUNCH_FAILED",
+        message.into(),
+    )
 }
 
 pub async fn create_remote_sessions_batch_on_target(

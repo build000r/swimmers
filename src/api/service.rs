@@ -287,6 +287,13 @@ pub fn validate_sessions_batch_dirs(dirs: &[String]) -> Result<(), ApiServiceErr
             format!("dirs must include at most {BATCH_CREATE_MAX_DIRS} entries"),
         ));
     }
+    if dirs.iter().any(|dir| dir.trim().is_empty()) {
+        return Err(ApiServiceError::new(
+            StatusCode::BAD_REQUEST,
+            "VALIDATION_FAILED",
+            "dirs must not include blank entries",
+        ));
+    }
     Ok(())
 }
 

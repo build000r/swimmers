@@ -529,6 +529,19 @@ fn require_batch_dirs_rejects_oversized_batches() {
 }
 
 #[test]
+fn require_batch_dirs_rejects_blank_dirs() {
+    let err = require_batch_dirs(vec![
+        "/workspace/repos/project".to_string(),
+        " \t\n".to_string(),
+    ])
+    .expect_err("blank batch dirs should be invalid");
+
+    assert_eq!(err.status, StatusCode::BAD_REQUEST);
+    assert_eq!(err.code, "VALIDATION_FAILED");
+    assert_eq!(err.message(), "dirs must not include blank entries");
+}
+
+#[test]
 fn map_batch_cwds_for_target_maps_each_dir() {
     let mapped = map_batch_cwds_for_target(
         &target(),
@@ -556,29 +569,90 @@ fn restore_original_batch_cwds_uses_result_index() {
     ];
     let mut response = CreateSessionsBatchResponse {
         results: vec![
-            CreateSessionsBatchResult {
-                index: 1,
-                cwd: "/monoserver/second".to_string(),
-                ok: true,
-                session: None,
-                repo_theme: None,
-                error: None,
-            },
-            CreateSessionsBatchResult {
-                index: 9,
-                cwd: "/monoserver/unmatched".to_string(),
-                ok: false,
-                session: None,
-                repo_theme: None,
-                error: None,
-            },
+            batch_result(1, "/monoserver/second"),
+            batch_result(0, "/monoserver/first"),
         ],
     };
 
-    restore_original_batch_cwds(&mut response, &original_dirs);
+    restore_original_batch_cwds(&mut response, &original_dirs).expect("restore cwds");
 
     assert_eq!(response.results[0].cwd, "/workspace/repos/second");
-    assert_eq!(response.results[1].cwd, "/monoserver/unmatched");
+    assert_eq!(response.results[1].cwd, "/workspace/repos/first");
+}
+
+#[test]
+fn restore_original_batch_cwds_rejects_result_count_mismatch() {
+    let original_dirs = vec![
+        "/workspace/repos/first".to_string(),
+        "/workspace/repos/second".to_string(),
+    ];
+    let mut response = CreateSessionsBatchResponse {
+        results: vec![batch_result(0, "/monoserver/first")],
+    };
+
+    let err = restore_original_batch_cwds(&mut response, &original_dirs)
+        .expect_err("missing remote result should fail");
+
+    assert_malformed_remote_batch_error(err, "returned 1 results for 2 requested dirs");
+}
+
+#[test]
+fn restore_original_batch_cwds_rejects_out_of_range_index() {
+    let original_dirs = vec![
+        "/workspace/repos/first".to_string(),
+        "/workspace/repos/second".to_string(),
+    ];
+    let mut response = CreateSessionsBatchResponse {
+        results: vec![
+            batch_result(0, "/monoserver/first"),
+            batch_result(9, "/monoserver/unmatched"),
+        ],
+    };
+
+    let err = restore_original_batch_cwds(&mut response, &original_dirs)
+        .expect_err("out-of-range remote result should fail");
+
+    assert_malformed_remote_batch_error(err, "out-of-range result index 9");
+}
+
+#[test]
+fn restore_original_batch_cwds_rejects_duplicate_index() {
+    let original_dirs = vec![
+        "/workspace/repos/first".to_string(),
+        "/workspace/repos/second".to_string(),
+    ];
+    let mut response = CreateSessionsBatchResponse {
+        results: vec![
+            batch_result(0, "/monoserver/first"),
+            batch_result(0, "/monoserver/duplicate"),
+        ],
+    };
+
+    let err = restore_original_batch_cwds(&mut response, &original_dirs)
+        .expect_err("duplicate remote result should fail");
+
+    assert_malformed_remote_batch_error(err, "duplicate result index 0");
+}
+
+fn batch_result(index: usize, cwd: &str) -> CreateSessionsBatchResult {
+    CreateSessionsBatchResult {
+        index,
+        cwd: cwd.to_string(),
+        ok: true,
+        session: None,
+        repo_theme: None,
+        error: None,
+    }
+}
+
+fn assert_malformed_remote_batch_error(err: RemoteSessionError, detail: &str) {
+    assert_eq!(err.status, StatusCode::BAD_GATEWAY);
+    assert_eq!(err.code, "REMOTE_LAUNCH_FAILED");
+    assert!(
+        err.message().contains(detail),
+        "expected error to contain {detail:?}, got {:?}",
+        err.message()
+    );
 }
 
 #[test]

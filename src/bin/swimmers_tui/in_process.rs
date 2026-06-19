@@ -1100,6 +1100,26 @@ printf '{"effective":[],"recommendations":[]}\n'
     }
 
     #[tokio::test]
+    async fn create_sessions_batch_rejects_blank_dirs() {
+        let api = InProcessApi::new(test_state());
+
+        let err = api
+            .create_sessions_batch(
+                vec!["/tmp/project".to_string(), " ".to_string()],
+                SpawnTool::Codex,
+                None,
+                None,
+            )
+            .await
+            .expect_err("blank batch dir should fail");
+
+        assert_eq!(
+            err,
+            "VALIDATION_FAILED: dirs must not include blank entries"
+        );
+    }
+
+    #[tokio::test]
     async fn create_sessions_batch_rejects_oversized_remote_batches_before_target_lookup() {
         let api = InProcessApi::new(test_state());
         let dirs = (0..=swimmers::api::service::BATCH_CREATE_MAX_DIRS)

@@ -61,6 +61,27 @@ async fn create_remote_sessions_batch_response_maps_validation_errors() {
 }
 
 #[tokio::test]
+async fn create_sessions_batch_rejects_blank_dirs() {
+    let response = create_sessions_batch(
+        Extension(AuthInfo::new(OPERATOR_SCOPES.to_vec())),
+        State(test_state()),
+        Json(CreateSessionsBatchRequest {
+            dirs: vec!["/tmp/project".to_string(), " \t\n".to_string()],
+            spawn_tool: None,
+            launch_target: None,
+            initial_request: None,
+        }),
+    )
+    .await
+    .into_response();
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let json = response_json(response).await;
+    assert_eq!(json["code"], "VALIDATION_FAILED");
+    assert_eq!(json["message"], "dirs must not include blank entries");
+}
+
+#[tokio::test]
 async fn create_sessions_batch_rejects_oversized_batches() {
     let response = create_sessions_batch(
         Extension(AuthInfo::new(OPERATOR_SCOPES.to_vec())),
