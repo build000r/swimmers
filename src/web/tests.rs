@@ -6,7 +6,7 @@ use super::ws_events::{
 };
 use super::ws_messages::{
     decode_binary_input, decode_input_text, decode_submit_line, decode_text_client_message,
-    MAX_WS_INPUT_BYTES,
+    MAX_WS_INPUT_BYTES, MAX_WS_TEXT_FRAME_BYTES,
 };
 use super::*;
 use crate::session::actor::{OutputFrame, ReplayCursor, SubscribeOutcome};
@@ -1987,6 +1987,45 @@ fn decode_text_client_message_oversized_input_text_is_rejected() {
     match decode_text_client_message(&operator_auth(), &json) {
         WsClientDecision::SendError { code, .. } => assert_eq!(code, "INPUT_TOO_LARGE"),
         other => panic!("unexpected: {other:?}"),
+    }
+}
+
+#[test]
+fn decode_text_client_message_oversized_control_frame_is_rejected_before_parse() {
+    let frame = "{".repeat(MAX_WS_TEXT_FRAME_BYTES + 1);
+
+    match decode_text_client_message(&operator_auth(), &frame) {
+        WsClientDecision::SendError {
+            code,
+            message,
+            client_message_id,
+        } => {
+            assert_eq!(code, "INPUT_TOO_LARGE");
+            assert_eq!(
+                message,
+                format!("terminal control frame exceeds {MAX_WS_TEXT_FRAME_BYTES} byte limit")
+            );
+            assert_eq!(client_message_id, None);
+        }
+        other => panic!("unexpected oversized frame decision: {other:?}"),
+    }
+}
+
+#[test]
+fn decode_text_client_message_accepts_near_limit_payload_with_json_overhead() {
+    let payload = "x".repeat(MAX_WS_INPUT_BYTES);
+    let json = format!(r#"{{"type":"input_text","data":"{payload}"}}"#);
+    assert!(
+        json.len() <= MAX_WS_TEXT_FRAME_BYTES,
+        "control-frame slack should allow a max-sized data field"
+    );
+
+    match decode_text_client_message(&operator_auth(), &json) {
+        WsClientDecision::Forward {
+            cmd: SessionCommand::WriteInputAck { data, .. },
+            ..
+        } => assert_eq!(data.len(), MAX_WS_INPUT_BYTES),
+        other => panic!("unexpected near-limit frame decision: {other:?}"),
     }
 }
 

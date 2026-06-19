@@ -7,6 +7,7 @@ use crate::session::actor::SessionCommand;
 use crate::types::{clamp_terminal_resize, MAX_SESSION_INPUT_BYTES};
 
 pub(super) const MAX_WS_INPUT_BYTES: usize = MAX_SESSION_INPUT_BYTES;
+pub(super) const MAX_WS_TEXT_FRAME_BYTES: usize = MAX_WS_INPUT_BYTES + 4096;
 
 #[derive(Debug, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -111,9 +112,21 @@ fn parse_browser_client_message(text: &str) -> Result<BrowserClientMessage, WsCl
 }
 
 pub(super) fn decode_text_client_message(auth: &AuthInfo, text: &str) -> WsClientDecision {
+    if text.len() > MAX_WS_TEXT_FRAME_BYTES {
+        return oversized_text_frame_error();
+    }
+
     parse_browser_client_message(text)
         .map(|parsed| decode_browser_client_message(auth, parsed))
         .unwrap_or_else(|decision| decision)
+}
+
+fn oversized_text_frame_error() -> WsClientDecision {
+    WsClientDecision::SendError {
+        code: "INPUT_TOO_LARGE",
+        message: format!("terminal control frame exceeds {MAX_WS_TEXT_FRAME_BYTES} byte limit"),
+        client_message_id: None,
+    }
 }
 
 fn decode_browser_client_message(
