@@ -83,6 +83,11 @@ const SPRITE_HEIGHT: u16 = 4;
 const LABEL_HEIGHT: u16 = 1;
 const ENTITY_WIDTH: u16 = 12;
 const ENTITY_HEIGHT: u16 = SPRITE_HEIGHT + LABEL_HEIGHT;
+
+#[cfg(test)]
+pub(crate) static TEST_ENV_LOCK: std::sync::LazyLock<std::sync::Mutex<()>> =
+    std::sync::LazyLock::new(|| std::sync::Mutex::new(()));
+
 // Sprite theme toggle position (on the header row, right of "swimmers tui").
 const SPRITE_THEME_TOGGLE_X: u16 = 16;
 const SWIM_BOB_RATE: f32 = 0.08;

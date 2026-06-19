@@ -28,11 +28,11 @@ use swimmers::types::{
     AdoptSessionResponse, AttentionGroupLayout, CreateSessionRequest, CreateSessionResponse,
     CreateSessionsBatchRequest, CreateSessionsBatchResponse, DirGroupMembershipUpdateRequest,
     DirGroupMembershipUpdateResponse, DirListResponse, DirRepoActionResponse,
-    DirRepoSearchResponse, ErrorResponse, GhosttyOpenMode, MermaidArtifactResponse,
-    NativeAttentionGroupOpenRequest, NativeAttentionGroupOpenResponse, NativeDesktopApp,
-    NativeDesktopOpenResponse, NativeDesktopStatusResponse, PlanFileResponse, RepoActionKind,
-    SessionGroupInputRequest, SessionGroupInputResponse, SessionSkillListResponse, SessionSummary,
-    SpawnTool,
+    DirRepoSearchResponse, EnvironmentSummary, ErrorResponse, GhosttyOpenMode,
+    MermaidArtifactResponse, NativeAttentionGroupOpenRequest, NativeAttentionGroupOpenResponse,
+    NativeDesktopApp, NativeDesktopOpenResponse, NativeDesktopStatusResponse, PlanFileResponse,
+    RepoActionKind, SessionGroupInputRequest, SessionGroupInputResponse, SessionSkillListResponse,
+    SessionSummary, SpawnTool,
 };
 
 use super::api::{ThoughtConfigTestResponse, TuiApi};
@@ -174,6 +174,11 @@ fn native_attention_group_request(
 impl TuiApi for InProcessApi {
     fn fetch_sessions(&self) -> BoxFuture<'_, Result<Vec<SessionSummary>, String>> {
         Box::pin(async move { Ok(list_sessions_for_client(&self.state, true).await) })
+    }
+
+    fn fetch_environments(&self) -> BoxFuture<'_, Result<Vec<EnvironmentSummary>, String>> {
+        // Mirrors: src/api/sessions/core_routes.rs:list_sessions
+        Box::pin(async move { Ok(remote_sessions::environment_summaries(true)) })
     }
 
     fn fetch_backend_health(&self) -> BoxFuture<'_, Result<BackendHealthResponse, String>> {
@@ -791,6 +796,20 @@ mod tests {
                 .map(|session| session.session_id.as_str())
                 .collect::<Vec<_>>()
         );
+    }
+
+    #[tokio::test]
+    async fn fetch_environments_returns_local_environment() {
+        let api = InProcessApi::new(test_state());
+
+        let environments = api.fetch_environments().await.expect("environments");
+
+        let local = environments
+            .iter()
+            .find(|environment| environment.id == "local")
+            .expect("local environment");
+        assert_eq!(local.kind, "local");
+        assert_eq!(local.backend_mode, "local");
     }
 
     #[tokio::test]

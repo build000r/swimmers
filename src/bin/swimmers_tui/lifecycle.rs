@@ -548,7 +548,6 @@ mod tests {
     use std::cell::Cell;
     use std::ffi::OsString;
     use std::io;
-    use std::sync::Mutex;
 
     use tempfile::tempdir;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -812,8 +811,6 @@ mod tests {
         assert_eq!(find_binary_in_path_value("swimmers", &path), None);
     }
 
-    static ENV_TEST_LOCK: Mutex<()> = Mutex::new(());
-
     thread_local! {
         static ENV_TEST_LOCK_DEPTH: Cell<usize> = Cell::new(0);
     }
@@ -859,7 +856,9 @@ mod tests {
             return run();
         }
 
-        let _guard = ENV_TEST_LOCK.lock().expect("env test lock poisoned");
+        let _guard = super::super::TEST_ENV_LOCK
+            .lock()
+            .expect("env test lock poisoned");
         let _depth = EnvLockDepth::enter();
         run()
     }

@@ -24,8 +24,6 @@ const EXPECTED_TERMINAL_TEARDOWN: &str = concat!(
 
 const EMBEDDED_FIRST_FRAME_BUDGET: Duration = Duration::from_millis(80);
 
-static TEST_ENV_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
-
 fn p95_duration(mut samples: Vec<Duration>) -> Duration {
     assert!(!samples.is_empty(), "p95 requires at least one sample");
     samples.sort_unstable();
