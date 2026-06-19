@@ -1044,11 +1044,17 @@ fn restore_original_batch_cwds(
         let original_cwd = original_dirs[result.index].clone();
         result.cwd = original_cwd.clone();
         if let Some(session) = result.session.as_mut() {
-            session.cwd = original_cwd;
+            restore_session_local_cwd(session, original_cwd);
         }
     }
 
     Ok(())
+}
+
+fn restore_session_local_cwd(session: &mut SessionSummary, local_cwd: String) {
+    session.cwd = local_cwd.clone();
+    session.environment.local_cwd = Some(local_cwd.clone());
+    session.environment.canonical_cwd = Some(local_cwd);
 }
 
 fn validate_remote_batch_result_indexes(

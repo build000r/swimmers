@@ -700,9 +700,9 @@ fn restore_original_batch_cwds_uses_result_index() {
 
 #[test]
 fn restore_original_batch_cwds_updates_nested_session_cwd() {
-    let original_dirs = vec!["/workspace/repos/swimmers".to_string()];
+    let original_dirs = vec!["/workspace/repos/opensource/swimmers".to_string()];
     let mut result = batch_result(0, "/monoserver/opensource/swimmers");
-    result.session = Some(summary("sess_0"));
+    result.session = Some(namespace_session_summary(&target(), summary("sess_0")));
     let mut response = CreateSessionsBatchResponse {
         results: vec![result],
     };
@@ -710,10 +710,40 @@ fn restore_original_batch_cwds_updates_nested_session_cwd() {
     restore_original_batch_cwds(&mut response, &original_dirs).expect("restore cwds");
 
     let result = response.results.first().expect("result");
-    assert_eq!(result.cwd, "/workspace/repos/swimmers");
+    assert_eq!(result.cwd, "/workspace/repos/opensource/swimmers");
     assert_eq!(
         result.session.as_ref().expect("session").cwd,
-        "/workspace/repos/swimmers"
+        "/workspace/repos/opensource/swimmers"
+    );
+    assert_eq!(
+        result
+            .session
+            .as_ref()
+            .expect("session")
+            .environment
+            .local_cwd
+            .as_deref(),
+        Some("/workspace/repos/opensource/swimmers")
+    );
+    assert_eq!(
+        result
+            .session
+            .as_ref()
+            .expect("session")
+            .environment
+            .canonical_cwd
+            .as_deref(),
+        Some("/workspace/repos/opensource/swimmers")
+    );
+    assert_eq!(
+        result
+            .session
+            .as_ref()
+            .expect("session")
+            .environment
+            .remote_cwd
+            .as_deref(),
+        Some("/monoserver/opensource/swimmers")
     );
 }
 
