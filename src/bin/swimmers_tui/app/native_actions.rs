@@ -133,12 +133,13 @@ pub(super) fn remote_native_handoff_message(session: &SessionSummary) -> Option<
         session.environment.canonical_cwd.as_deref(),
         Some(session.cwd.as_str()),
     ]);
-    let target_suffix = if session.environment.target_id.trim().is_empty()
-        || session.environment.target_id == target
+    let target_id = session.environment.target_id.trim();
+    let target_suffix = if target_id.is_empty()
+        || target_id == target
     {
         String::new()
     } else {
-        format!(" ({})", session.environment.target_id)
+        format!(" ({target_id})")
     };
     let cwd_suffix = cwd.map(|cwd| format!(" @ {cwd}")).unwrap_or_default();
 
@@ -332,7 +333,7 @@ mod tests {
     #[test]
     fn remote_native_handoff_message_describes_target_without_secret_fields() {
         let target = LaunchTargetSummary {
-            id: "skillbox".to_string(),
+            id: " skillbox ".to_string(),
             label: "Skillbox devbox".to_string(),
             kind: "swimmers_api".to_string(),
             base_url: Some("http://100.64.1.2:3210/?token=secret".to_string()),
