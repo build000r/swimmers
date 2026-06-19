@@ -27,6 +27,11 @@ export function createSessionSocketController(runtime) {
       return;
     }
 
+    const existingSocket = state.ws || null;
+    if (existingSocket && existingSocket.sessionId !== session.session_id) {
+      runtime.disconnectSocket();
+    }
+
     await runtime.setupTerminalSurface();
     const plan = selectedSessionConnectionPlan({
       session,

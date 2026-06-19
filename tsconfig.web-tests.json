@@ -34,6 +34,7 @@
     "src/web/send_sheet.test.mjs",
     "src/web/session_persistence.test.mjs",
     "src/web/session_refresh.test.mjs",
+    "src/web/session_socket_controller.test.mjs",
     "src/web/surface_action_plans.test.mjs",
     "src/web/surface_model.test.mjs",
     "src/web/terminal_input_plans.test.mjs",
