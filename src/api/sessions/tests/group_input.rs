@@ -133,6 +133,31 @@ async fn send_group_input_returns_not_found_for_all_missing_sessions() {
 }
 
 #[tokio::test]
+async fn send_group_input_rejects_unknown_remote_target_as_request_error() {
+    let response = send_group_input(
+        Extension(AuthInfo::new(OPERATOR_SCOPES.to_vec())),
+        State(test_state()),
+        Json(SessionGroupInputRequest {
+            session_ids: vec![
+                "missing-remote::first".to_string(),
+                "missing-remote::second".to_string(),
+            ],
+            text: "continue".to_string(),
+        }),
+    )
+    .await
+    .into_response();
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let json = response_json(response).await;
+    assert_eq!(json["code"], "LAUNCH_TARGET_UNKNOWN");
+    assert_eq!(
+        json["message"],
+        "remote session target 'missing-remote' is not configured"
+    );
+}
+
+#[tokio::test]
 async fn send_group_input_preserves_surrounding_whitespace() {
     let state = test_state();
     let first = with_test_batch(summary("first", SessionState::Idle), "batch-group");

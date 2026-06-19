@@ -1206,6 +1206,27 @@ printf '{"effective":[],"recommendations":[]}\n'
     }
 
     #[tokio::test]
+    async fn send_group_input_returns_unknown_remote_target_as_tui_error_string() {
+        let api = InProcessApi::new(test_state());
+
+        let err = api
+            .send_group_input(
+                vec![
+                    "missing-remote::first".to_string(),
+                    "missing-remote::second".to_string(),
+                ],
+                "continue".to_string(),
+            )
+            .await
+            .expect_err("unknown remote group input target should fail");
+
+        assert_eq!(
+            err,
+            "LAUNCH_TARGET_UNKNOWN: remote session target 'missing-remote' is not configured"
+        );
+    }
+
+    #[tokio::test]
     async fn send_group_input_delivers_to_ready_batch_sessions() {
         let state = test_state();
         let batch_id = "batch-shared";

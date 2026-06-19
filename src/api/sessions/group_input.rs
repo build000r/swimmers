@@ -381,6 +381,10 @@ impl RemoteGroupInputScopeError {
     fn from_remote_error(error: remote_sessions::RemoteSessionError) -> Self {
         Self::new(error.code(), error.message().to_string())
     }
+
+    fn into_error_response(self) -> ErrorResponse {
+        error_body(self.code, Some(self.message))
+    }
 }
 
 fn remote_group_input_target(
@@ -471,13 +475,7 @@ pub async fn send_group_input_service(
             return Ok(send_remote_group_input_to_target(session_ids, target, text).await);
         }
         Ok(None) => {}
-        Err(error) => {
-            return Ok(group_input_all_error_response(
-                session_ids,
-                error.code,
-                error.message,
-            ));
-        }
+        Err(error) => return Err(error.into_error_response()),
     }
 
     let summaries = group_input_summary_map(&state).await;

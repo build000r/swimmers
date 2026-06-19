@@ -99,7 +99,7 @@ pub fn resolve_data_dir() -> PathBuf {
 fn data_dir_from_env(value: Result<String, std::env::VarError>) -> Option<PathBuf> {
     value
         .ok()
-        .filter(|value| !value.is_empty())
+        .filter(|value| !value.trim().is_empty())
         .map(PathBuf::from)
 }
 
@@ -819,8 +819,9 @@ mod tests {
     }
 
     #[test]
-    fn resolve_data_dir_env_empty_or_missing_is_ignored() {
+    fn resolve_data_dir_env_empty_whitespace_or_missing_is_ignored() {
         assert_eq!(data_dir_from_env(Ok(String::new())), None);
+        assert_eq!(data_dir_from_env(Ok(" \t\n ".to_string())), None);
         assert_eq!(data_dir_from_env(Err(std::env::VarError::NotPresent)), None);
     }
 
