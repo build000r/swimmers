@@ -228,6 +228,24 @@ test("surfaceSession exposes advisory metadata as passive external badges", () =
   assert.equal(session.advisoryLabel, "c0 group: wave-a (external stale)");
 });
 
+test("surfaceSession only treats known action cues as attention readiness", () => {
+  const quiet = surfaceSession(rawSession({
+    state: "idle",
+    rest_state: "active",
+    commit_candidate: false,
+    action_cues: [{ kind: "" }, { kind: "note" }],
+  }));
+  const actionable = surfaceSession(rawSession({
+    state: "idle",
+    rest_state: "active",
+    commit_candidate: false,
+    action_cues: [{ kind: " COMMIT_READY " }],
+  }));
+
+  assert.equal(quiet.readinessKey, "quiet");
+  assert.equal(actionable.readinessKey, "needs_attention");
+});
+
 test("buildAttentionInbox keeps healthy actionable sessions ahead of degraded remote sessions", () => {
   const healthy = surfaceSession(rawSession({
     session_id: "healthy",

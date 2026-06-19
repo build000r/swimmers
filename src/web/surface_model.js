@@ -3,6 +3,12 @@ import {
 } from "./trogdor_logic.js";
 
 const REPO_NAMESPACE_PARTS = new Set(["opensource", "clients", "personal", "work", "projects"]);
+const ACTIONABLE_CUE_KINDS = new Set([
+  "awaiting_user",
+  "commit_ready",
+  "validation_missing_after_edit",
+  "dirty_check_missing",
+]);
 
 export function relativeCwd(cwd) {
   if (!cwd) return "unknown cwd";
@@ -108,7 +114,10 @@ export function sessionReadiness(session) {
   const state = String(session?.state || "").toLowerCase();
   const rest = String(session?.rest_state || "").toLowerCase();
   const cues = Array.isArray(session?.action_cues) ? session.action_cues : [];
-  if (state === "attention" || session?.commit_candidate || cues.length > 0) {
+  const hasActionableCue = cues.some((cue) => (
+    ACTIONABLE_CUE_KINDS.has(String(cue?.kind || "").trim().toLowerCase())
+  ));
+  if (state === "attention" || session?.commit_candidate || hasActionableCue) {
     return { key: "needs_attention", label: "needs attention" };
   }
   if (state === "busy") {
