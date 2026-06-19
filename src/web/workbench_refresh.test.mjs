@@ -130,8 +130,10 @@ test("runWorkbenchWidgetRefresh preserves request ordering and result applicatio
 test("runWorkbenchWidgetRefresh preserves stale response guard", async () => {
   const { calls, runtime } = buildRuntime();
   const originalResponseJsonOrNull = runtime.responseJsonOrNull;
+  let staleOnce = true;
   runtime.responseJsonOrNull = async (response) => {
-    if (response.path.endsWith("/timeline")) {
+    if (staleOnce && response.path.endsWith("/timeline")) {
+      staleOnce = false;
       runtime.state.selectedSessionId = "other";
     }
     return originalResponseJsonOrNull(response);
@@ -140,5 +142,14 @@ test("runWorkbenchWidgetRefresh preserves stale response guard", async () => {
   await runWorkbenchWidgetRefresh({}, runtime);
 
   assert.equal(runtime.state.workbenchWidgets.lastLoadedAt, 0);
+  assert.equal(runtime.state.workbenchWidgets.loading, false);
   assert.equal(calls.filter(([name]) => name === "renderWorkbenchWidgets").length, 1);
+
+  runtime.state.selectedSessionId = "sess_0";
+  await runWorkbenchWidgetRefresh({ throttle: true }, runtime);
+
+  assert.equal(runtime.state.workbenchWidgets.loading, false);
+  assert.equal(runtime.state.workbenchWidgets.lastLoadedAt, 4242);
+  assert.equal(calls.filter(([name]) => name === "apiMaybeFetch").length, 12);
+  assert.equal(calls.filter(([name]) => name === "renderWorkbenchWidgets").length, 3);
 });

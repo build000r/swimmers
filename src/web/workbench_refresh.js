@@ -75,6 +75,7 @@ export async function runWorkbenchWidgetRefresh(options = {}, runtime) {
     sessionId: startPlan.sessionId,
   });
   if (stalePlan.stale) {
+    runtime.state.workbenchWidgets.loading = false;
     return;
   }
 
