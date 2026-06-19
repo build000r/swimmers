@@ -394,28 +394,32 @@ pub async fn list_group_entries(group: &OverlayDirGroup) -> Vec<DirEntry> {
 }
 
 pub fn list_group_entries_sync(group: &OverlayDirGroup) -> Vec<DirEntry> {
-    let mut seen = BTreeSet::new();
+    let mut seen_paths = BTreeSet::new();
     let mut entries: Vec<(DirEntry, u64)> = Vec::new();
 
     for entry_path in &group.paths {
-        if let Some(entry) = group_path_entry(entry_path, &mut seen) {
+        if let Some(entry) = group_path_entry(entry_path, &mut seen_paths) {
             entries.push(entry);
         }
     }
 
     for source_dir in &group.dirs {
-        append_source_dir_entries(source_dir, &mut seen, &mut entries);
+        append_source_dir_entries(source_dir, &mut seen_paths, &mut entries);
     }
 
     sort_group_entries(&mut entries);
     entries.into_iter().map(|(entry, _)| entry).collect()
 }
 
-fn group_path_entry(entry_path: &Path, seen: &mut BTreeSet<String>) -> Option<(DirEntry, u64)> {
+fn group_path_entry(
+    entry_path: &Path,
+    seen_paths: &mut BTreeSet<String>,
+) -> Option<(DirEntry, u64)> {
     let name = visible_file_name(entry_path)?;
-    seen.insert(name.clone()).then(|| {
+    let full_path = canonical_path_string(entry_path);
+    seen_paths.insert(full_path.clone()).then(|| {
         (
-            group_dir_entry(name, false, Some(canonical_path_string(entry_path))),
+            group_dir_entry(name, false, Some(full_path)),
             modified_secs(entry_path),
         )
     })
@@ -423,7 +427,7 @@ fn group_path_entry(entry_path: &Path, seen: &mut BTreeSet<String>) -> Option<(D
 
 fn append_source_dir_entries(
     source_dir: &Path,
-    seen: &mut BTreeSet<String>,
+    seen_paths: &mut BTreeSet<String>,
     entries: &mut Vec<(DirEntry, u64)>,
 ) {
     let Ok(read_dir) = std::fs::read_dir(source_dir) else {
@@ -433,30 +437,31 @@ fn append_source_dir_entries(
     entries.extend(
         read_dir
             .flatten()
-            .filter_map(|entry| source_dir_child_entry(entry, seen)),
+            .filter_map(|entry| source_dir_child_entry(entry, seen_paths)),
     );
 }
 
 fn source_dir_child_entry(
     entry: std::fs::DirEntry,
-    seen: &mut BTreeSet<String>,
+    seen_paths: &mut BTreeSet<String>,
 ) -> Option<(DirEntry, u64)> {
     if !entry.file_type().ok()?.is_dir() {
         return None;
     }
 
     let name = entry.file_name().to_string_lossy().into_owned();
-    if name.starts_with('.') || !seen.insert(name.clone()) {
+    if name.starts_with('.') {
         return None;
     }
 
     let entry_path = entry.path();
+    let full_path = canonical_path_string(&entry_path);
+    if !seen_paths.insert(full_path.clone()) {
+        return None;
+    }
+
     Some((
-        group_dir_entry(
-            name,
-            has_visible_child_dirs(&entry_path),
-            Some(canonical_path_string(&entry_path)),
-        ),
+        group_dir_entry(name, has_visible_child_dirs(&entry_path), Some(full_path)),
         dir_entry_modified_secs(&entry),
     ))
 }
@@ -493,7 +498,12 @@ fn dir_entry_modified_secs(entry: &std::fs::DirEntry) -> u64 {
 }
 
 fn sort_group_entries(entries: &mut [(DirEntry, u64)]) {
-    entries.sort_by_key(|(a, _)| a.name.to_lowercase());
+    entries.sort_by(|(left, _), (right, _)| {
+        left.name
+            .to_lowercase()
+            .cmp(&right.name.to_lowercase())
+            .then_with(|| left.full_path.cmp(&right.full_path))
+    });
 }
 
 pub fn list_effective_group_entries_sync(
@@ -504,23 +514,23 @@ pub fn list_effective_group_entries_sync(
         return list_group_entries_sync(group);
     };
 
-    let mut seen_names = BTreeSet::new();
-    let mut entries = effective_entries_after_excludes(group, delta, &mut seen_names);
-    append_included_delta_entries(delta, &mut seen_names, &mut entries);
+    let mut seen_paths = BTreeSet::new();
+    let mut entries = effective_entries_after_excludes(group, delta, &mut seen_paths);
+    append_included_delta_entries(delta, &mut seen_paths, &mut entries);
 
-    entries.sort_by_key(|(a, _)| a.name.to_lowercase());
+    sort_group_entries(&mut entries);
     entries.into_iter().map(|(entry, _)| entry).collect()
 }
 
 fn effective_entries_after_excludes(
     group: &OverlayDirGroup,
     delta: &DirGroupMembershipDelta,
-    seen_names: &mut BTreeSet<String>,
+    seen_paths: &mut BTreeSet<String>,
 ) -> Vec<(DirEntry, u64)> {
     list_group_entries_sync(group)
         .into_iter()
         .filter(|entry| !entry_is_excluded(entry, delta))
-        .map(|entry| existing_effective_entry(entry, seen_names))
+        .map(|entry| existing_effective_entry(entry, seen_paths))
         .collect()
 }
 
@@ -532,50 +542,53 @@ fn entry_is_excluded(entry: &DirEntry, delta: &DirGroupMembershipDelta) -> bool 
         .unwrap_or(false)
 }
 
-fn existing_effective_entry(entry: DirEntry, seen_names: &mut BTreeSet<String>) -> (DirEntry, u64) {
-    seen_names.insert(entry.name.clone());
+fn existing_effective_entry(entry: DirEntry, seen_paths: &mut BTreeSet<String>) -> (DirEntry, u64) {
     let modified_at = entry
         .full_path
         .as_deref()
         .map(|path| modified_secs(Path::new(path)))
         .unwrap_or(0);
+    if let Some(path) = entry.full_path.as_deref() {
+        seen_paths.insert(path.to_string());
+    }
     (entry, modified_at)
 }
 
 fn append_included_delta_entries(
     delta: &DirGroupMembershipDelta,
-    seen_names: &mut BTreeSet<String>,
+    seen_paths: &mut BTreeSet<String>,
     entries: &mut Vec<(DirEntry, u64)>,
 ) {
     entries.extend(
         delta
             .include_paths
             .iter()
-            .filter_map(|raw_path| included_delta_entry(raw_path, delta, seen_names)),
+            .filter_map(|raw_path| included_delta_entry(raw_path, delta, seen_paths)),
     );
 }
 
 fn included_delta_entry(
     raw_path: &str,
     delta: &DirGroupMembershipDelta,
-    seen_names: &mut BTreeSet<String>,
+    seen_paths: &mut BTreeSet<String>,
 ) -> Option<(DirEntry, u64)> {
     if delta.exclude_paths.contains(raw_path) {
         return None;
     }
 
-    included_path_entry(&PathBuf::from(raw_path), seen_names)
+    included_path_entry(&PathBuf::from(raw_path), seen_paths)
 }
 
-fn included_path_entry(path: &Path, seen_names: &mut BTreeSet<String>) -> Option<(DirEntry, u64)> {
+fn included_path_entry(path: &Path, seen_paths: &mut BTreeSet<String>) -> Option<(DirEntry, u64)> {
     if !path.is_dir() {
         return None;
     }
 
     let name = visible_file_name(path)?;
-    seen_names.insert(name.clone()).then(|| {
+    let full_path = canonical_path_string(path);
+    seen_paths.insert(full_path.clone()).then(|| {
         (
-            group_dir_entry(name, false, Some(canonical_path_string(path))),
+            group_dir_entry(name, false, Some(full_path)),
             modified_secs(path),
         )
     })
@@ -833,7 +846,7 @@ mod tests {
     }
 
     #[test]
-    fn list_group_entries_prefers_exact_paths_for_name_dedupe() {
+    fn list_group_entries_keeps_distinct_paths_with_duplicate_names() {
         let dir = tempfile::tempdir().expect("tempdir");
         let exact = dir.path().join("shared");
         let source = dir.path().join("source");
@@ -845,20 +858,21 @@ mod tests {
 
         let group = OverlayDirGroup {
             name: "workspace".into(),
-            paths: vec![exact.clone()],
+            paths: vec![exact.clone(), exact.clone()],
             dirs: vec![source],
         };
 
         let entries = list_group_entries_sync(&group);
         let shared = entries
             .iter()
-            .find(|entry| entry.name == "shared")
-            .expect("shared entry");
+            .filter(|entry| entry.name == "shared")
+            .collect::<Vec<_>>();
 
-        assert_eq!(entries.len(), 2);
-        assert!(!shared.has_children);
+        assert_eq!(entries.len(), 3);
+        assert_eq!(shared.len(), 2);
+        assert!(shared.iter().all(|entry| !entry.has_children));
         assert_eq!(
-            shared.full_path.as_deref(),
+            shared[0].full_path.as_deref(),
             Some(
                 exact
                     .canonicalize()
@@ -868,11 +882,21 @@ mod tests {
             )
         );
         assert_eq!(
+            shared[1].full_path.as_deref(),
+            Some(
+                duplicate
+                    .canonicalize()
+                    .expect("canonical duplicate")
+                    .to_string_lossy()
+                    .as_ref()
+            )
+        );
+        assert_eq!(
             entries
                 .iter()
                 .map(|entry| entry.name.as_str())
                 .collect::<Vec<_>>(),
-            vec!["shared", "unique"]
+            vec!["shared", "shared", "unique"]
         );
     }
 
@@ -1224,7 +1248,7 @@ mod tests {
     }
 
     #[test]
-    fn list_effective_group_entries_filters_and_dedupes_included_paths() {
+    fn list_effective_group_entries_filters_and_keeps_duplicate_names() {
         let dir = tempfile::tempdir().expect("tempdir");
         let first_shared = dir.path().join("a").join("shared");
         let duplicate_shared = dir.path().join("b").join("shared");
@@ -1249,7 +1273,7 @@ mod tests {
         };
         let mut memberships = DirGroupMemberships::default();
         let delta = memberships.groups.entry("frontend".into()).or_default();
-        delta.include_paths.insert(duplicate_shared_path);
+        delta.include_paths.insert(duplicate_shared_path.clone());
         delta.include_paths.insert(first_shared_path.clone());
         delta.include_paths.insert(excluded_path.clone());
         delta.include_paths.insert(file_only_path);
@@ -1258,11 +1282,15 @@ mod tests {
 
         let entries = list_effective_group_entries_sync(&group, &memberships);
 
-        assert_eq!(entries.len(), 1);
-        assert_eq!(entries[0].name, "shared");
+        assert_eq!(entries.len(), 2);
+        assert!(entries.iter().all(|entry| entry.name == "shared"));
         assert_eq!(
             entries[0].full_path.as_deref(),
             Some(first_shared_path.as_str())
+        );
+        assert_eq!(
+            entries[1].full_path.as_deref(),
+            Some(duplicate_shared_path.as_str())
         );
     }
 

@@ -591,25 +591,39 @@ mod tests {
         let group = OverlayDirGroup {
             name: "skills".into(),
             paths: Vec::new(),
-            dirs: vec![src_a.clone(), src_b],
+            dirs: vec![src_a.clone(), src_b.clone()],
         };
 
         let entries = list_group_entries_sync(&group);
         let names: Vec<&str> = entries.iter().map(|entry| entry.name.as_str()).collect();
-        assert_eq!(names, vec!["alpha", "beta"]);
+        assert_eq!(names, vec!["alpha", "alpha", "beta"]);
 
-        let alpha = entries
+        let alpha_entries = entries
             .iter()
-            .find(|entry| entry.name == "alpha")
-            .expect("alpha entry");
+            .filter(|entry| entry.name == "alpha")
+            .collect::<Vec<_>>();
         let alpha_path = src_a
             .join("alpha")
             .canonicalize()
             .expect("canonical alpha path")
             .to_string_lossy()
             .into_owned();
-        assert!(alpha.has_children);
-        assert_eq!(alpha.full_path.as_deref(), Some(alpha_path.as_str()));
+        let duplicate_alpha_path = src_b
+            .join("alpha")
+            .canonicalize()
+            .expect("canonical duplicate alpha path")
+            .to_string_lossy()
+            .into_owned();
+        assert_eq!(alpha_entries.len(), 2);
+        assert!(alpha_entries[0].has_children);
+        assert_eq!(
+            alpha_entries[0].full_path.as_deref(),
+            Some(alpha_path.as_str())
+        );
+        assert_eq!(
+            alpha_entries[1].full_path.as_deref(),
+            Some(duplicate_alpha_path.as_str())
+        );
     }
 
     #[test]
