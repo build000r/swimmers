@@ -394,6 +394,60 @@ test("buildSurfaceModel applies fleet lens filters without losing bucket counts"
   assert.equal(model.fleetChips[1].active, true);
 });
 
+test("buildSurfaceModel collapses repo fallback buckets without pressure data", () => {
+  const root = rawSession({
+    session_id: "root",
+    tmux_name: "root-agent",
+    cwd: "/Users/b/repos/opensource/swimmers",
+    environment: {
+      scope: "local",
+      target_id: "local",
+      target_label: "Local machine",
+      target_kind: "local",
+      display_host: "local",
+      canonical_cwd: "/Users/b/repos/opensource/swimmers",
+    },
+  });
+  const nested = rawSession({
+    session_id: "nested",
+    tmux_name: "nested-agent",
+    cwd: "/Users/b/repos/opensource/swimmers/src/web",
+    environment: {
+      scope: "local",
+      target_id: "local",
+      target_label: "Local machine",
+      target_kind: "local",
+      display_host: "local",
+      canonical_cwd: "/Users/b/repos/opensource/swimmers/src/web",
+    },
+  });
+  const state = baseState({
+    sessions: [root, nested],
+    fleetFilter: { kind: "repo", key: "/Users/b/repos/opensource/swimmers" },
+  });
+
+  const model = buildSurfaceModel({
+    state,
+    boot: { focus_layout: false, franken_term_available: true },
+    websocketOpen: 7,
+  });
+
+  assert.deepEqual(model.fleetFilter, {
+    kind: "repo",
+    key: "/Users/b/repos/opensource/swimmers",
+  });
+  assert.deepEqual(
+    model.sessions.map((session) => session.sessionId),
+    ["root", "nested"],
+  );
+  assert.deepEqual(
+    model.fleetLens.buckets
+      .filter((bucket) => bucket.kind === "repo")
+      .map((bucket) => [bucket.key, bucket.label, bucket.count]),
+    [["/Users/b/repos/opensource/swimmers", "opensource/swimmers", 2]],
+  );
+});
+
 test("buildSurfaceModel suppresses selected details outside the active fleet filter", () => {
   const local = rawSession({
     session_id: "local",

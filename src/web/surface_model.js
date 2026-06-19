@@ -2,6 +2,8 @@ import {
   trogdorSurfaceSessionTrogdorState,
 } from "./trogdor_logic.js";
 
+const REPO_NAMESPACE_PARTS = new Set(["opensource", "clients", "personal", "work", "projects"]);
+
 export function relativeCwd(cwd) {
   if (!cwd) return "unknown cwd";
   const parts = cwd.split("/").filter(Boolean);
@@ -9,8 +11,66 @@ export function relativeCwd(cwd) {
   return parts.slice(-2).join("/");
 }
 
+function normalizeCwd(cwd) {
+  const trimmed = String(cwd || "").trim();
+  if (trimmed === "/") return "/";
+  return trimmed.replace(/\/+$/g, "");
+}
+
 export function canonicalCwd(session) {
   return session?.environment?.canonical_cwd || session?.cwd || "";
+}
+
+function cwdPathParts(cwd) {
+  return normalizeCwd(cwd)
+    .split("/")
+    .map((part) => part.trim())
+    .filter(Boolean)
+    .filter((part) => part !== "." && part !== "..");
+}
+
+function repoNamespacePart(part) {
+  return REPO_NAMESPACE_PARTS.has(String(part || "").toLowerCase());
+}
+
+function repoComponentIndex(parts) {
+  const reposIndex = parts.findIndex((part) => part.toLowerCase() === "repos");
+  if (reposIndex < 0) return -1;
+  const first = reposIndex + 1;
+  const firstPart = parts[first];
+  if (!firstPart) return -1;
+  return repoNamespacePart(firstPart) && parts[first + 1] ? first + 1 : first;
+}
+
+function rootedPath(parts, absolute) {
+  const joined = parts.join("/");
+  return absolute && joined ? `/${joined}` : joined;
+}
+
+export function repoKeyForCwd(cwd) {
+  const normalized = normalizeCwd(cwd);
+  const parts = cwdPathParts(normalized);
+  const repoIndex = repoComponentIndex(parts);
+  if (repoIndex < 0) return normalized;
+  return rootedPath(parts.slice(0, repoIndex + 1), normalized.startsWith("/"));
+}
+
+function cwdTailLabel(cwd) {
+  return normalizeCwd(cwd)
+    .split("/")
+    .filter(Boolean)
+    .at(-1) || "";
+}
+
+export function repoLabelForKey(repoKey) {
+  const parts = cwdPathParts(repoKey);
+  const repoIndex = repoComponentIndex(parts);
+  if (repoIndex >= 0) {
+    const repo = parts[repoIndex];
+    const namespace = parts[repoIndex - 1];
+    return namespace && repoNamespacePart(namespace) ? `${namespace}/${repo}` : repo;
+  }
+  return cwdTailLabel(repoKey) || String(repoKey || "").trim();
 }
 
 export function sessionHostLabel(session) {
@@ -425,6 +485,11 @@ export function surfaceSession(session, {
 } = {}) {
   const target = sessionTarget(session);
   const environment = session?.environment || {};
+  const sessionCanonicalCwd = canonicalCwd(session);
+  const fallbackRepoKey = repoKeyForCwd(sessionCanonicalCwd)
+    || session.tmux_name
+    || session.session_id
+    || "";
   const remoteEnvironment = String(environment.scope || "local").trim().toLowerCase() === "remote";
   const launchCwd = remoteEnvironment ? String(environment.local_cwd || "") : String(session?.cwd || "");
   const launchTarget = remoteEnvironment && launchCwd ? firstNonEmpty(environment.target_id) : "";
@@ -446,7 +511,7 @@ export function surfaceSession(session, {
     toolLabel: session.tool || "shell",
     cwdLabel: sessionCwdLabel(session),
     fullCwd: session.cwd || "",
-    canonicalCwd: canonicalCwd(session),
+    canonicalCwd: sessionCanonicalCwd,
     launchCwd,
     launchTarget,
     thoughtLabel: detail ? session.thought || "No thought snapshot yet." : summarizeThought(session),
@@ -465,8 +530,8 @@ export function surfaceSession(session, {
     batchSendSessionIds: Array.isArray(operatorPressure?.batch_send_session_ids)
       ? operatorPressure.batch_send_session_ids
       : [],
-    repoKey: operatorPressure?.repo_key || canonicalCwd(session),
-    repoLabel: operatorPressure?.repo_label || relativeCwd(canonicalCwd(session)),
+    repoKey: operatorPressure?.repo_key || fallbackRepoKey,
+    repoLabel: operatorPressure?.repo_label || repoLabelForKey(fallbackRepoKey) || relativeCwd(sessionCanonicalCwd),
     targetKey: target.key,
     targetLabel: target.label,
     advisoryBadges,
