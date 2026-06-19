@@ -223,6 +223,7 @@ function normalizeFleetLensBucket(value) {
     stale_count: finiteNumber(bucket.stale_count),
     attention_count: finiteNumber(bucket.attention_count),
     commit_ready_count: finiteNumber(bucket.commit_ready_count),
+    advisory_count: finiteNumber(bucket.advisory_count),
   };
 }
 
@@ -888,6 +889,8 @@ export function normalizeTrogdorSurfaceSession(value) {
     repoLabel: stringValue(session.repoLabel),
     targetKey: stringValue(session.targetKey),
     targetLabel: stringValue(session.targetLabel),
+    advisoryBadges: objectArray(session.advisoryBadges).map(normalizeAdvisoryMetadataSummary),
+    advisoryLabel: stringValue(session.advisoryLabel),
     stateKey: stringValue(session.stateKey),
     readinessKey: stringValue(session.readinessKey),
     readinessLabel: stringValue(session.readinessLabel),

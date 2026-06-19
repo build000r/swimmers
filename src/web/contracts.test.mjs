@@ -191,6 +191,7 @@ test("normalizeSessionListResponse preserves SessionSummary-derived web fields w
       stale_count: 0,
       attention_count: 1,
       commit_ready_count: 0,
+      advisory_count: 0,
     }],
   });
 });
@@ -492,6 +493,8 @@ test("normalizeSurfaceModel preserves Trogdor view model fields and null current
       trogdorBurnt: false,
       trogdorDismissed: true,
       trogdorSwordsmanVisible: false,
+      advisoryBadges: [{ source: "load_guard", label: "capacity", value: 7, stale: false }],
+      advisoryLabel: 42,
     }],
     attentionInbox: [{
       sessionId: "agent-1",
@@ -501,7 +504,7 @@ test("normalizeSurfaceModel preserves Trogdor view model fields and null current
     attentionInboxCount: "1",
     filteredFleetLens: {
       total_sessions: "1",
-      buckets: [{ kind: "readiness", key: "needs_attention", label: "needs attention", count: "1" }],
+      buckets: [{ kind: "readiness", key: "needs_attention", label: "needs attention", count: "1", advisory_count: "1" }],
     },
     currentSession: null,
     selectedSessionId: undefined,
@@ -521,10 +524,19 @@ test("normalizeSurfaceModel preserves Trogdor view model fields and null current
   assert.equal(model.sessions[0].trogdorBurnt, false);
   assert.equal(model.sessions[0].trogdorDismissed, true);
   assert.equal(model.sessions[0].trogdorSwordsmanVisible, false);
+  assert.deepEqual(model.sessions[0].advisoryBadges, [{
+    source: "load_guard",
+    label: "capacity",
+    value: "7",
+    status: "external",
+    stale: false,
+  }]);
+  assert.equal(model.sessions[0].advisoryLabel, "42");
   assert.equal(model.attentionInbox.length, 1);
   assert.equal(model.attentionInbox[0].lastActivityAt, "2026-06-05T00:00:00Z");
   assert.equal(model.attentionInboxCount, 1);
   assert.equal(model.filteredFleetLens.buckets[0].count, 1);
+  assert.equal(model.filteredFleetLens.buckets[0].advisory_count, 1);
   assert.equal(model.currentSession, null);
   assert.equal(model.selectedSessionId, null);
   assert.equal(model.publishedSessionId, "agent-1");
