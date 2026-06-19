@@ -1,7 +1,7 @@
 use super::*;
 use swimmers::color::hsl_to_rgb;
-use swimmers::fleet_lens::{advisory_key, build_fleet_lens_summary};
-use swimmers::session_labels::{session_canonical_cwd_key, session_cwd_label};
+use swimmers::fleet_lens::{advisory_key, build_fleet_lens_summary, fleet_preset_matches_session};
+use swimmers::session_labels::{session_canonical_cwd_key, session_cwd_label, session_repo_key};
 use swimmers::types::{
     ActionCueKind, AdvisoryMetadataSummary, DependencyHealthStatus, EnvironmentSummary,
     FleetLensBucket, FleetLensBucketKind, SessionEnvironmentScope,
@@ -30,8 +30,10 @@ pub(crate) struct ThoughtLogEntry {
     pub(crate) tmux_name: String,
     pub(crate) cwd: String,
     pub(crate) pwd_label: Option<String>,
+    pub(crate) repo_key: String,
     pub(crate) target_key: String,
     pub(crate) target_label: String,
+    pub(crate) target_kind: String,
     pub(crate) state_key: String,
     pub(crate) readiness_key: String,
     pub(crate) transport_key: String,
@@ -61,8 +63,10 @@ impl ThoughtLogEntry {
             tmux_name: session.tmux_name.clone(),
             cwd: session_canonical_cwd_key(session),
             pwd_label: session_cwd_label(session),
+            repo_key: session_repo_key(session),
             target_key: thought_filter_target_key(session),
             target_label: session_target_label(session),
+            target_kind: session.environment.target_kind.clone(),
             state_key: thought_filter_state_key(session.state).to_string(),
             readiness_key: thought_filter_readiness_key(session).to_string(),
             transport_key: thought_filter_transport_key(session.transport_health).to_string(),
@@ -95,11 +99,19 @@ pub(crate) struct ThoughtFleetFilter {
     pub(crate) label: String,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct ThoughtActivePreset {
+    pub(crate) id: String,
+    pub(crate) label: String,
+    pub(crate) matchers: Vec<FleetLensPresetMatcher>,
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(crate) struct ThoughtFilter {
     pub(crate) cwd: Option<String>,
     pub(crate) tmux_name: Option<String>,
     pub(crate) fleet: Option<ThoughtFleetFilter>,
+    pub(crate) preset: Option<ThoughtActivePreset>,
     pub(crate) excluded_cwds: HashSet<String>,
     pub(crate) filter_out_mode: bool,
 }
@@ -109,6 +121,7 @@ impl ThoughtFilter {
         self.cwd.is_some()
             || self.tmux_name.is_some()
             || self.fleet.is_some()
+            || self.preset.is_some()
             || !self.excluded_cwds.is_empty()
     }
 
@@ -131,7 +144,12 @@ impl ThoughtFilter {
             .as_ref()
             .map(|fleet| thought_filter_entry_fleet_matches(entry, fleet))
             .unwrap_or(true);
-        cwd_matches && tmux_matches && fleet_matches
+        let preset_matches = self
+            .preset
+            .as_ref()
+            .map(|preset| thought_filter_entry_preset_matches(entry, preset))
+            .unwrap_or(true);
+        cwd_matches && tmux_matches && fleet_matches && preset_matches
     }
 
     pub(crate) fn matches_session(&self, session: &SessionSummary) -> bool {
@@ -155,7 +173,12 @@ impl ThoughtFilter {
             .as_ref()
             .map(|fleet| thought_filter_session_fleet_matches(session, fleet))
             .unwrap_or(true);
-        cwd_matches && tmux_matches && fleet_matches
+        let preset_matches = self
+            .preset
+            .as_ref()
+            .map(|preset| thought_filter_session_preset_matches(session, preset))
+            .unwrap_or(true);
+        cwd_matches && tmux_matches && fleet_matches && preset_matches
     }
 
     pub(crate) fn excludes_cwd(&self, cwd: &str) -> bool {
@@ -166,6 +189,7 @@ impl ThoughtFilter {
         self.cwd = None;
         self.tmux_name = None;
         self.fleet = None;
+        self.preset = None;
         self.excluded_cwds.clear();
         self.filter_out_mode = false;
     }
@@ -881,6 +905,9 @@ fn active_thought_filter_parts(filter: &ThoughtFilter) -> Vec<String> {
             fleet.label
         ));
     }
+    if let Some(preset) = filter.preset.as_ref() {
+        parts.push(format!("lens={}", preset.label));
+    }
     parts
 }
 
@@ -962,11 +989,49 @@ pub(crate) fn thought_filter_transport_key(health: TransportHealth) -> &'static 
 fn thought_filter_entry_fleet_matches(entry: &ThoughtLogEntry, fleet: &ThoughtFleetFilter) -> bool {
     match fleet.kind {
         FleetLensBucketKind::Target => entry.target_key == fleet.key,
-        FleetLensBucketKind::Repo => entry.cwd == fleet.key,
+        FleetLensBucketKind::Repo => entry.repo_key == fleet.key,
         FleetLensBucketKind::Advisory => entry.advisory_keys.iter().any(|key| key == &fleet.key),
         FleetLensBucketKind::State => entry.state_key == fleet.key,
         FleetLensBucketKind::Readiness => entry.readiness_key == fleet.key,
         FleetLensBucketKind::Transport => entry.transport_key == fleet.key,
+    }
+}
+
+fn thought_filter_entry_preset_matches(
+    entry: &ThoughtLogEntry,
+    preset: &ThoughtActivePreset,
+) -> bool {
+    preset
+        .matchers
+        .iter()
+        .all(|matcher| thought_entry_matches_preset_matcher(entry, matcher))
+}
+
+fn thought_entry_matches_preset_matcher(
+    entry: &ThoughtLogEntry,
+    matcher: &FleetLensPresetMatcher,
+) -> bool {
+    match matcher {
+        FleetLensPresetMatcher::All => true,
+        FleetLensPresetMatcher::FleetBucket { kind, key } => thought_filter_entry_fleet_matches(
+            entry,
+            &ThoughtFleetFilter {
+                kind: *kind,
+                key: key.clone(),
+                label: key.clone(),
+            },
+        ),
+        FleetLensPresetMatcher::TargetId { id } => entry.target_key == *id,
+        FleetLensPresetMatcher::TargetKind { kind } => entry.target_kind.eq_ignore_ascii_case(kind),
+        FleetLensPresetMatcher::Repo { key } => entry.repo_key == *key,
+        FleetLensPresetMatcher::CurrentRepo => true,
+        FleetLensPresetMatcher::Readiness { key } => entry.readiness_key == *key,
+        FleetLensPresetMatcher::Transport { key } => entry.transport_key == *key,
+        FleetLensPresetMatcher::Capability { .. } => false,
+        FleetLensPresetMatcher::Degraded => {
+            entry.is_stale || entry.transport_health != TransportHealth::Healthy
+        }
+        FleetLensPresetMatcher::NeedsAttention => entry.readiness_key == "needs_attention",
     }
 }
 
@@ -989,6 +1054,19 @@ fn thought_filter_session_fleet_matches(
             thought_filter_transport_key(session.transport_health) == fleet.key
         }
     }
+}
+
+fn thought_filter_session_preset_matches(
+    session: &SessionSummary,
+    preset: &ThoughtActivePreset,
+) -> bool {
+    let resolved = FleetLensPreset {
+        id: preset.id.clone(),
+        label: preset.label.clone(),
+        source: "tui".to_string(),
+        matchers: preset.matchers.clone(),
+    };
+    fleet_preset_matches_session(&resolved, session, None)
 }
 
 fn fleet_filter_kind_label(kind: FleetLensBucketKind) -> &'static str {

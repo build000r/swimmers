@@ -304,6 +304,8 @@ function resetWebState() {
   web.state.readOnly = false;
   web.state.backendHealth = null;
   web.state.fleetFilter = { kind: "", key: "" };
+  web.state.fleetPresetId = "";
+  web.state.fleetPresets = [];
   web.state.sessionGroupMode = "flat";
   web.state.terminalFallbackActive = false;
   web.state.terminalFallbackAutoFollow = true;
@@ -451,6 +453,31 @@ test("surface fleet lens actions persist active filter and grouping mode", async
   });
   assert.equal(web.state.sessionGroupMode, "project");
   assert.equal(storage.get("swimmers.web.sessionGroupMode"), "project");
+});
+
+test("surface fleet preset actions persist URL-safe preset state", async () => {
+  resetWebState();
+
+  await web.handleSurfaceAction({
+    type: "action",
+    actionId: "fleet_preset",
+    presetId: "remote-api",
+  });
+
+  assert.equal(web.state.fleetPresetId, "remote-api");
+  assert.deepEqual(web.state.fleetFilter, { kind: "", key: "" });
+  assert.equal(storage.get("swimmers.web.fleet.preset"), "remote-api");
+  assert.equal(window.location.search, "?preset=remote-api");
+
+  await web.handleSurfaceAction({
+    type: "action",
+    actionId: "fleet_preset",
+    presetId: "remote-api",
+  });
+
+  assert.equal(web.state.fleetPresetId, "");
+  assert.equal(storage.has("swimmers.web.fleet.preset"), false);
+  assert.equal(window.location.search, "");
 });
 
 test("surface environment hint actions copy command text", async () => {

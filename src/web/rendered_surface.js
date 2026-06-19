@@ -124,6 +124,16 @@ function drawHeader(frame, layout, model) {
       type: "action",
       actionId: "refresh",
     }),
+    ...(Array.isArray(model?.fleetPresetChips) ? model.fleetPresetChips.map((chip) => chipSpec(
+      safeLabel(chip.label, "lens"),
+      chip.active ? COLORS.success : COLORS.muted,
+      chip.active ? COLORS.chipActiveBg : COLORS.chipBg,
+      {
+        type: "action",
+        actionId: "fleet_preset",
+        presetId: chip.presetId,
+      },
+    )) : []),
     ...(Array.isArray(model?.fleetChips) ? model.fleetChips.map((chip) => chipSpec(
       safeLabel(chip.label, "filter"),
       chip.active ? COLORS.success : COLORS.text,
@@ -178,7 +188,8 @@ function drawSessionRail(frame, rail, model) {
 
   const sessions = Array.isArray(model?.sessions) ? model.sessions : [];
   if (!sessions.length && !model?.trogdorAtlasOpen) {
-    drawTextBlock(frame, rail.x + 2, rail.y + 2, rail.w - 4, 4, "No live sessions.\nCreate one from the rendered action rail.", {
+    const message = model?.fleetEmptyMessage || "No live sessions.\nCreate one from the rendered action rail.";
+    drawTextBlock(frame, rail.x + 2, rail.y + 2, rail.w - 4, 4, message, {
       fg: COLORS.muted,
     });
     return;
@@ -456,7 +467,7 @@ function drawCenterOverlay(frame, center, model) {
       border: COLORS.panelBorderSoft,
     });
     pushMask(frame, overlay);
-    drawTextBlock(frame, overlay.x + 2, overlay.y + 2, overlay.w - 4, overlay.h - 3, "No live sessions. Create one from the rendered action rail.", {
+    drawTextBlock(frame, overlay.x + 2, overlay.y + 2, overlay.w - 4, overlay.h - 3, model?.fleetEmptyMessage || "No live sessions. Create one from the rendered action rail.", {
       fg: COLORS.text,
     });
     return;

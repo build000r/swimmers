@@ -317,6 +317,27 @@ export function normalizeFleetLensSummary(value) {
   };
 }
 
+function normalizeFleetLensPresetMatcher(value) {
+  const matcher = objectRecord(value) || {};
+  return {
+    ...matcher,
+    type: stringValue(matcher.type),
+    kind: stringValue(matcher.kind),
+    key: stringValue(matcher.key),
+    id: stringValue(matcher.id),
+  };
+}
+
+function normalizeFleetLensPreset(value) {
+  const preset = objectRecord(value) || {};
+  return {
+    id: stringValue(preset.id),
+    label: stringValue(preset.label || preset.id),
+    source: stringValue(preset.source),
+    matchers: objectArray(preset.matchers).map(normalizeFleetLensPresetMatcher),
+  };
+}
+
 function normalizeFleetFilter(value) {
   const filter = objectRecord(value) || {};
   return {
@@ -344,6 +365,7 @@ export function normalizeSessionListResponse(value) {
     repo_themes: objectMap(payload.repo_themes),
     environments: objectArray(payload.environments).map(normalizeEnvironmentSummary),
     fleet_lens: normalizeFleetLensSummary(payload.fleet_lens),
+    fleet_presets: objectArray(payload.fleet_presets).map(normalizeFleetLensPreset),
   };
 }
 

@@ -480,6 +480,15 @@ pub(crate) trait TuiApi: Send + Sync + 'static {
     fn fetch_environments(&self) -> BoxFuture<'_, Result<Vec<EnvironmentSummary>, String>> {
         Box::pin(async { Ok(Vec::new()) })
     }
+    fn fetch_fleet_presets(&self) -> BoxFuture<'_, Result<Vec<FleetLensPreset>, String>> {
+        Box::pin(async {
+            Ok(swimmers::fleet_lens::build_fleet_lens_presets(
+                swimmers::session::overlay::default_overlay()
+                    .map(|overlay| overlay.all_fleet_presets())
+                    .unwrap_or_default(),
+            ))
+        })
+    }
     fn fetch_backend_health(&self) -> BoxFuture<'_, Result<BackendHealthResponse, String>>;
     fn fetch_thought_config(&self) -> BoxFuture<'_, Result<ThoughtConfigResponse, String>>;
     fn update_thought_config(
@@ -638,6 +647,27 @@ impl TuiApi for ApiClient {
                     .await
                     .map_err(|err| format!("failed to parse environments response: {err}"))?;
                 return Ok(payload.environments);
+            }
+
+            Err(read_error(response).await)
+        })
+    }
+
+    fn fetch_fleet_presets(&self) -> BoxFuture<'_, Result<Vec<FleetLensPreset>, String>> {
+        Box::pin(async move {
+            let url = format!("{}/v1/sessions", self.base_url);
+            let response = self
+                .with_auth(self.http.get(url).timeout(API_SESSION_LIST_TIMEOUT))
+                .send()
+                .await
+                .map_err(|err| self.transport_error("refresh fleet presets", err))?;
+
+            if response.status().is_success() {
+                let payload = response
+                    .json::<SessionListResponse>()
+                    .await
+                    .map_err(|err| format!("failed to parse fleet presets response: {err}"))?;
+                return Ok(payload.fleet_presets);
             }
 
             Err(read_error(response).await)

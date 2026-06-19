@@ -42,14 +42,14 @@ use swimmers::types::{
     CreateSessionResponse, CreateSessionsBatchRequest, CreateSessionsBatchResponse, DirEntry,
     DirGroupMembershipUpdateRequest, DirGroupMembershipUpdateResponse, DirListResponse,
     DirRepoActionRequest, DirRepoActionResponse, DirRepoSearchResponse, EnvironmentSummary,
-    ErrorResponse, GhosttyOpenMode, LaunchReceipt, LaunchTargetSummary, MermaidArtifactResponse,
-    NativeAttentionGroupOpenRequest, NativeAttentionGroupOpenResponse, NativeDesktopApp,
-    NativeDesktopConfigRequest, NativeDesktopModeRequest, NativeDesktopOpenRequest,
-    NativeDesktopOpenResponse, NativeDesktopStatusResponse, PlanFileResponse,
-    PublishSelectionRequest, RepoActionKind, RepoActionState, RepoTheme, RestState,
-    SessionBatchMembership, SessionGroupInputRequest, SessionGroupInputResponse,
-    SessionListResponse, SessionSkillListResponse, SessionSkillSummary, SessionState,
-    SessionSummary, SpawnTool, StateConfidence, TransportHealth,
+    ErrorResponse, FleetLensPreset, FleetLensPresetMatcher, GhosttyOpenMode, LaunchReceipt,
+    LaunchTargetSummary, MermaidArtifactResponse, NativeAttentionGroupOpenRequest,
+    NativeAttentionGroupOpenResponse, NativeDesktopApp, NativeDesktopConfigRequest,
+    NativeDesktopModeRequest, NativeDesktopOpenRequest, NativeDesktopOpenResponse,
+    NativeDesktopStatusResponse, PlanFileResponse, PublishSelectionRequest, RepoActionKind,
+    RepoActionState, RepoTheme, RestState, SessionBatchMembership, SessionGroupInputRequest,
+    SessionGroupInputResponse, SessionListResponse, SessionSkillListResponse, SessionSkillSummary,
+    SessionState, SessionSummary, SpawnTool, StateConfidence, TransportHealth,
 };
 
 const MIN_WIDTH: u16 = 70;

@@ -1376,12 +1376,13 @@ test("terminalToolsAvailabilityPlan preserves control disabled states", () => {
 
 test("initialStateBootPlan preserves token, session, directory, and desktop defaults", () => {
   assert.deepEqual(initialStateBootPlan({
-    searchParams: new URLSearchParams("token=query-token&session=url-session"),
+    searchParams: new URLSearchParams("token=query-token&session=url-session&preset=remote-api"),
     storedToken: "stored-token",
     selectedFromStorage: "stored-session",
     rawStoredDirPath: " /repo/swimmers ",
     rawStoredManagedOnly: "true",
     rawStoredFleetFilter: JSON.stringify({ kind: "TARGET", key: "skillbox" }),
+    rawStoredFleetPresetId: "local",
     rawStoredSessionGroupMode: "project",
     bootFollowPublishedSelection: false,
     terminalWorkbenchMobile: false,
@@ -1395,6 +1396,7 @@ test("initialStateBootPlan preserves token, session, directory, and desktop defa
     clearStoredDirPath: false,
     storedManagedOnly: true,
     storedFleetFilter: { kind: "target", key: "skillbox" },
+    storedFleetPresetId: "remote-api",
     storedSessionGroupMode: "project",
     terminalWorkbenchOpen: true,
   });
@@ -1408,6 +1410,7 @@ test("initialStateBootPlan preserves stored fallbacks and root directory cleanup
     rawStoredDirPath: "/",
     rawStoredManagedOnly: "false",
     rawStoredFleetFilter: "{not json",
+    rawStoredFleetPresetId: "ssh-handoff",
     rawStoredSessionGroupMode: "unknown",
     bootFollowPublishedSelection: false,
     terminalWorkbenchMobile: true,
@@ -1421,6 +1424,7 @@ test("initialStateBootPlan preserves stored fallbacks and root directory cleanup
     clearStoredDirPath: true,
     storedManagedOnly: false,
     storedFleetFilter: { kind: "", key: "" },
+    storedFleetPresetId: "ssh-handoff",
     storedSessionGroupMode: "flat",
     terminalWorkbenchOpen: false,
   });
@@ -1445,6 +1449,7 @@ test("initialStateBootPlan preserves follow-published selection override", () =>
     clearStoredDirPath: true,
     storedManagedOnly: false,
     storedFleetFilter: { kind: "", key: "" },
+    storedFleetPresetId: "",
     storedSessionGroupMode: "flat",
     terminalWorkbenchOpen: true,
   });

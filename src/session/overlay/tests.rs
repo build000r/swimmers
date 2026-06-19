@@ -155,6 +155,7 @@ fn test_launch_client(label: &str, targets: Vec<LaunchTargetSummary>) -> ClientO
                 group_defaults: BTreeMap::new(),
             },
         }),
+        fleet_presets: Vec::new(),
     }
 }
 
@@ -177,6 +178,7 @@ fn test_dir_client(
             groups: Vec::new(),
             launch: OverlayLaunchConfig::local_only(),
         }),
+        fleet_presets: Vec::new(),
     }
 }
 
@@ -554,6 +556,7 @@ fn all_launch_targets_returns_empty_when_no_clients_have_dir_config() {
             plan_root: None,
             plan_draft: None,
             dir_config: None,
+            fleet_presets: Vec::new(),
         }],
         loaded_at: Utc::now(),
     };
@@ -907,6 +910,53 @@ dev_sanity:
 }
 
 #[test]
+fn parse_client_overlay_keeps_harmless_fleet_lens_presets() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let client_dir = tmp.path().join("clients").join("personal");
+    std::fs::create_dir_all(&client_dir).expect("client dir");
+    let repo_base = tmp.path().join("repos");
+    std::fs::create_dir_all(&repo_base).expect("repo base");
+    let overlay_path = client_dir.join("overlay.yaml");
+    std::fs::write(
+        &overlay_path,
+        format!(
+            r#"
+version: 1
+client:
+  id: personal
+  context:
+    cwd_match:
+      - {repo_base}
+dev_sanity:
+  fleet_lenses:
+    - id: swimmers-on-devbox
+      label: Swimmers on devbox
+      matchers:
+        - type: target_kind
+          kind: swimmers_api
+        - type: repo
+          key: {repo_base}/opensource/swimmers
+  services:
+    base_path: {repo_base}
+    entries: []
+"#,
+            repo_base = repo_base.display()
+        ),
+    )
+    .expect("write overlay");
+
+    let client = parse_client_overlay(&client_dir, &overlay_path).expect("parse overlay");
+    assert_eq!(client.fleet_presets.len(), 1);
+    assert_eq!(client.fleet_presets[0].id, "swimmers-on-devbox");
+    assert_eq!(client.fleet_presets[0].label, "Swimmers on devbox");
+    assert_eq!(client.fleet_presets[0].source, "overlay");
+    assert!(matches!(
+        &client.fleet_presets[0].matchers[0],
+        FleetLensPresetMatcher::TargetKind { kind } if kind == "swimmers_api"
+    ));
+}
+
+#[test]
 fn list_all_plans_sorts_by_mtime_desc() {
     use std::time::Duration;
     let tmp = tempfile::tempdir().expect("tempdir");
@@ -938,6 +988,7 @@ fn list_all_plans_sorts_by_mtime_desc() {
         plan_root: Some(released),
         plan_draft: Some(draft),
         dir_config: None,
+        fleet_presets: Vec::new(),
     };
     let overlay = SkillboxOverlay {
         clients: vec![client],
@@ -977,6 +1028,7 @@ fn list_all_plans_breaks_equal_mtime_ties_deterministically() {
                 plan_root: Some(beta_root),
                 plan_draft: None,
                 dir_config: None,
+                fleet_presets: Vec::new(),
             },
             ClientOverlay {
                 label: "alpha".to_string(),
@@ -985,6 +1037,7 @@ fn list_all_plans_breaks_equal_mtime_ties_deterministically() {
                 plan_root: Some(alpha_root),
                 plan_draft: None,
                 dir_config: None,
+                fleet_presets: Vec::new(),
             },
         ],
         loaded_at: Utc::now(),
@@ -1022,6 +1075,7 @@ fn list_all_plans_skips_archived_and_missing_schema() {
         plan_root: Some(released),
         plan_draft: Some(client_dir.join("plans").join("archived")),
         dir_config: None,
+        fleet_presets: Vec::new(),
     };
     let overlay = SkillboxOverlay {
         clients: vec![client],
@@ -1061,6 +1115,7 @@ fn overlay_health_reports_load_age_and_remote_target_count_without_probe() {
                 group_defaults: BTreeMap::new(),
             },
         }),
+        fleet_presets: Vec::new(),
     };
     let overlay = SkillboxOverlay {
         clients: vec![client],
@@ -1129,6 +1184,7 @@ fn make_plan_client(
         plan_root,
         plan_draft,
         dir_config: None,
+        fleet_presets: Vec::new(),
     }
 }
 

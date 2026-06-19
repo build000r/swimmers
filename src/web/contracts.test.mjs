@@ -202,6 +202,12 @@ test("normalizeSessionListResponse preserves SessionSummary-derived web fields w
         null,
       ],
     },
+    fleet_presets: [{
+      id: "swimmers-on-devbox",
+      label: "Swimmers on devbox",
+      source: "overlay",
+      matchers: [{ type: "target_kind", kind: "swimmers_api" }],
+    }],
   });
 
   assert.equal(payload.version, 7);
@@ -341,6 +347,17 @@ test("normalizeSessionListResponse preserves SessionSummary-derived web fields w
       advisory_count: 0,
     }],
   });
+  assert.deepEqual(payload.fleet_presets, [{
+    id: "swimmers-on-devbox",
+    label: "Swimmers on devbox",
+    source: "overlay",
+    matchers: [{
+      type: "target_kind",
+      kind: "swimmers_api",
+      key: "",
+      id: "",
+    }],
+  }]);
 });
 
 test("normalizeSessionListResponse keeps partial remote identity remote", () => {

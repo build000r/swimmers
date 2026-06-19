@@ -80,6 +80,27 @@ test("surface action dispatch validates fleet filter payloads", () => {
   );
 });
 
+test("surface action dispatch validates fleet preset payloads", () => {
+  assert.deepEqual(
+    surfaceActionDispatchPlan({ type: "action", actionId: "fleet_preset", presetId: " Remote-API " }),
+    {
+      type: "set_fleet_preset",
+      presetId: "remote-api",
+    },
+  );
+  assert.deepEqual(
+    surfaceActionDispatchPlan({ type: "action", actionId: "fleet_preset", presetId: "" }),
+    { type: "ignore" },
+  );
+  assert.deepEqual(
+    surfaceActionExecutionPlan({ type: "set_fleet_preset", presetId: " SSH-Handoff " }),
+    {
+      type: "set_fleet_preset",
+      presetId: "ssh-handoff",
+    },
+  );
+});
+
 test("surface action dispatch preserves gated current-session send behavior", () => {
   assert.deepEqual(surfaceActionDispatchPlan({ actionId: "open_send" }, { readOnly: true }), { type: "ignore" });
   assert.deepEqual(surfaceActionDispatchPlan({ actionId: "open_send" }, { readOnly: false }), { type: "ignore" });

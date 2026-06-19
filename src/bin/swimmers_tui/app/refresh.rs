@@ -89,6 +89,13 @@ impl<C: TuiApi> App<C> {
         if let Ok(environments) = self.runtime.block_on(self.client.fetch_environments()) {
             self.environments = environments;
         }
+        if let Ok(fleet_presets) = self.runtime.block_on(self.client.fetch_fleet_presets()) {
+            self.fleet_presets = if fleet_presets.is_empty() {
+                swimmers::fleet_lens::build_fleet_lens_presets(Vec::new())
+            } else {
+                fleet_presets
+            };
+        }
         if let Ok(health) = self.runtime.block_on(self.client.fetch_backend_health()) {
             self.backend_health = Some(health);
         }

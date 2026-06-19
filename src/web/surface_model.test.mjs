@@ -752,6 +752,129 @@ test("buildSurfaceModel drops saved fleet filters when the bucket is unavailable
   assert.equal(model.fleetChips[0].active, true);
 });
 
+test("buildSurfaceModel applies saved current-repo preset across local and remote sessions", () => {
+  const local = rawSession({
+    session_id: "local",
+    tmux_name: "local",
+    cwd: "/Users/tester/repos/opensource/swimmers",
+    environment: {
+      scope: "local",
+      target_id: "local",
+      target_label: "Local machine",
+      target_kind: "local",
+      display_host: "local",
+      canonical_cwd: "/Users/tester/repos/opensource/swimmers",
+    },
+  });
+  const remote = rawSession({
+    session_id: "remote",
+    tmux_name: "remote",
+    cwd: "/srv/skillbox/repos/swimmers",
+    environment: {
+      scope: "remote",
+      target_id: "portfolio-devbox",
+      target_label: "Portfolio Devbox",
+      target_kind: "swimmers_api",
+      display_host: "Portfolio Devbox",
+      canonical_cwd: "/Users/tester/repos/opensource/swimmers",
+    },
+  });
+  const other = rawSession({
+    session_id: "other",
+    tmux_name: "other",
+    cwd: "/Users/tester/repos/skills",
+    environment: {
+      scope: "local",
+      target_id: "local",
+      target_label: "Local machine",
+      target_kind: "local",
+      display_host: "local",
+      canonical_cwd: "/Users/tester/repos/skills",
+    },
+  });
+
+  const model = buildSurfaceModel({
+    state: baseState({
+      sessions: [local, remote, other],
+      selectedSessionId: "local",
+      fleetPresetId: "current-repo",
+    }),
+    boot: { focus_layout: false, franken_term_available: true },
+    currentSession: () => local,
+    websocketOpen: 7,
+  });
+
+  assert.equal(model.fleetPresetId, "current-repo");
+  assert.deepEqual(model.sessions.map((session) => session.sessionId), ["local", "remote"]);
+  assert.equal(model.fleetPresetChips.find((chip) => chip.presetId === "current-repo")?.active, true);
+});
+
+test("buildSurfaceModel keeps ssh handoff preset visible with zero live sessions", () => {
+  const model = buildSurfaceModel({
+    state: baseState({
+      sessions: [],
+      selectedSessionId: null,
+      fleetPresetId: "ssh-handoff",
+      environments: [{
+        id: "skillbox-devbox",
+        label: "Skillbox devbox",
+        kind: "ssh_only",
+        display_host: "Skillbox devbox",
+        backend_mode: "ssh_handoff",
+        status: "NotConfigured",
+        capabilities: { ssh_attach_hint: true, bootstrap_hint: true, advisory_metadata: true },
+        attach_hint: "ssh skillbox-devbox",
+      }],
+    }),
+    boot: { focus_layout: false, franken_term_available: true },
+    websocketOpen: 7,
+  });
+
+  assert.equal(model.fleetPresetId, "ssh-handoff");
+  assert.deepEqual(model.sessions, []);
+  assert.equal(model.environmentMatrix.length, 1);
+  assert.equal(model.environmentMatrix[0].id, "skillbox-devbox");
+  assert.match(model.fleetEmptyMessage, /No sessions match SSH handoff/);
+});
+
+test("buildSurfaceModel exposes custom overlay fleet presets", () => {
+  const model = buildSurfaceModel({
+    state: baseState({
+      fleetPresetId: "swimmers-on-devbox",
+      fleetPresets: [{
+        id: "swimmers-on-devbox",
+        label: "Swimmers on devbox",
+        source: "overlay",
+        matchers: [
+          { type: "target_kind", kind: "swimmers_api" },
+          { type: "repo", key: "/Users/tester/repos/opensource/swimmers" },
+        ],
+      }],
+      sessions: [rawSession({
+        session_id: "remote",
+        cwd: "/srv/skillbox/repos/swimmers",
+        environment: {
+          scope: "remote",
+          target_id: "portfolio-devbox",
+          target_label: "Portfolio Devbox",
+          target_kind: "swimmers_api",
+          display_host: "Portfolio Devbox",
+          canonical_cwd: "/Users/tester/repos/opensource/swimmers",
+        },
+      })],
+    }),
+    boot: { focus_layout: false, franken_term_available: true },
+    websocketOpen: 7,
+  });
+
+  assert.equal(model.fleetPresetId, "swimmers-on-devbox");
+  assert.deepEqual(model.sessions.map((session) => session.sessionId), ["remote"]);
+  assert.equal(
+    model.fleetPresetChips.find((chip) => chip.presetId === "swimmers-on-devbox")?.label,
+    "Swimmers on devbox",
+  );
+});
+
 test("buildSurfaceModel builds display-only project groups across local and remote sessions", () => {
   const local = rawSession({
     session_id: "local",

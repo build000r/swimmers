@@ -9,6 +9,15 @@ const ACTIONABLE_CUE_KINDS = new Set([
   "validation_missing_after_edit",
   "dirty_check_missing",
 ]);
+const BUILT_IN_FLEET_PRESETS = [
+  { id: "all", label: "All environments", source: "builtin", matchers: [{ type: "all" }] },
+  { id: "local", label: "Local", source: "builtin", matchers: [{ type: "target_id", id: "local" }] },
+  { id: "remote-api", label: "Remote API", source: "builtin", matchers: [{ type: "target_kind", kind: "swimmers_api" }] },
+  { id: "ssh-handoff", label: "SSH handoff", source: "builtin", matchers: [{ type: "target_kind", kind: "ssh_only" }] },
+  { id: "current-repo", label: "Current repo", source: "builtin", matchers: [{ type: "current_repo" }] },
+  { id: "needs-attention", label: "Needs attention", source: "builtin", matchers: [{ type: "needs_attention" }] },
+  { id: "degraded", label: "Degraded", source: "builtin", matchers: [{ type: "degraded" }] },
+];
 
 export function relativeCwd(cwd) {
   if (!cwd) return "unknown cwd";
@@ -104,6 +113,119 @@ export function normalizeFleetFilter(filter) {
     return { kind: "", key: "" };
   }
   return { kind, key };
+}
+
+function normalizePresetId(id) {
+  return String(id || "").trim().toLowerCase();
+}
+
+function normalizePresetMatcher(matcher = {}) {
+  const type = String(matcher?.type || "").trim().toLowerCase();
+  return {
+    ...matcher,
+    type,
+    kind: String(matcher?.kind || "").trim().toLowerCase(),
+    key: String(matcher?.key || "").trim(),
+    id: String(matcher?.id || "").trim(),
+  };
+}
+
+export function buildFleetLensPresets(presets = []) {
+  const seen = new Set();
+  const merged = [];
+  for (const preset of [...BUILT_IN_FLEET_PRESETS, ...(Array.isArray(presets) ? presets : [])]) {
+    const id = normalizePresetId(preset?.id);
+    const label = String(preset?.label || id).trim();
+    const matchers = Array.isArray(preset?.matchers)
+      ? preset.matchers.map(normalizePresetMatcher).filter((matcher) => matcher.type)
+      : [];
+    if (!id || !label || !matchers.length || seen.has(id)) continue;
+    seen.add(id);
+    merged.push({
+      id,
+      label,
+      source: String(preset?.source || "").trim() || "builtin",
+      matchers,
+    });
+  }
+  return merged;
+}
+
+function currentRepoKeyForPreset(selectedSession, allSurfaceSessions) {
+  const selectedId = selectedSession?.session_id || selectedSession?.sessionId || "";
+  const selected = selectedId
+    ? allSurfaceSessions.find((session) => session.sessionId === selectedId)
+    : null;
+  return selected?.repoKey || allSurfaceSessions[0]?.repoKey || "";
+}
+
+function resolveFleetPreset(preset, selectedSession, allSurfaceSessions) {
+  if (!preset) return null;
+  const currentRepoKey = currentRepoKeyForPreset(selectedSession, allSurfaceSessions);
+  const matchers = preset.matchers.map((matcher) => (
+    matcher.type === "current_repo"
+      ? { type: "repo", key: currentRepoKey }
+      : matcher
+  ));
+  if (matchers.some((matcher) => matcher.type === "repo" && !matcher.key)) {
+    return null;
+  }
+  return { ...preset, matchers };
+}
+
+function sessionMatchesPresetMatcher(session, matcher) {
+  switch (matcher.type) {
+    case "all":
+      return true;
+    case "fleet_bucket":
+      return sessionMatchesFleetFilter(session, { kind: matcher.kind, key: matcher.key });
+    case "target_id":
+      return session.targetKey === matcher.id;
+    case "target_kind":
+      return String(session.targetKind || "").trim().toLowerCase() === matcher.kind;
+    case "repo":
+      return session.repoKey === matcher.key;
+    case "readiness":
+      return session.readinessKey === matcher.key;
+    case "transport":
+      return session.transportKey === matcher.key;
+    case "capability":
+      return sessionCapabilityEnabled(session, matcher.key);
+    case "degraded":
+      return Boolean(session.isStale || session.transportKey !== "healthy");
+    case "needs_attention":
+      return session.readinessKey === "needs_attention";
+    default:
+      return false;
+  }
+}
+
+function sessionMatchesPreset(session, preset) {
+  if (!preset) return true;
+  return preset.matchers.every((matcher) => sessionMatchesPresetMatcher(session, matcher));
+}
+
+function sessionCapabilityEnabled(session, key) {
+  const capability = String(key || "").trim().toLowerCase();
+  const local = session.targetKey === "local";
+  const remoteApi = session.targetKind === "swimmers_api";
+  switch (capability) {
+    case "observe":
+    case "observe_sessions":
+      return local || (remoteApi && session.transportKey === "healthy");
+    case "launch":
+    case "launch_session":
+      return local || (remoteApi && session.transportKey === "healthy");
+    case "send":
+    case "send_input":
+      return local || (remoteApi && session.transportKey === "healthy");
+    case "external":
+    case "advisory":
+    case "advisory_metadata":
+      return true;
+    default:
+      return false;
+  }
 }
 
 export function normalizeSessionGroupMode(mode) {
@@ -385,6 +507,78 @@ export function buildEnvironmentMatrix(environments, sessions) {
       || left.displayHost.localeCompare(right.displayHost)
       || left.id.localeCompare(right.id)
     ));
+}
+
+function environmentMatchesPresetMatcher(environment, matcher) {
+  switch (matcher.type) {
+    case "all":
+      return true;
+    case "fleet_bucket":
+      return matcher.kind === "target" && environment.id === matcher.key;
+    case "target_id":
+      return environment.id === matcher.id;
+    case "target_kind":
+      return environment.kind === matcher.kind;
+    case "capability":
+      return environmentCapabilityEnabled(environment, matcher.key);
+    case "degraded":
+      return ["degraded", "unavailable", "unknown"].includes(String(environment.status || "").toLowerCase());
+    default:
+      return false;
+  }
+}
+
+function environmentMatchesPreset(environment, preset) {
+  if (!preset) return true;
+  return preset.matchers.every((matcher) => environmentMatchesPresetMatcher(environment, matcher));
+}
+
+function environmentCapabilityEnabled(environment, key) {
+  const capabilities = environment?.capabilities || {};
+  switch (String(key || "").trim().toLowerCase()) {
+    case "observe":
+    case "observe_sessions":
+      return capabilities.observe_sessions === true;
+    case "launch":
+    case "launch_session":
+      return capabilities.launch_session === true;
+    case "send":
+    case "send_input":
+      return capabilities.send_input === true;
+    case "group":
+    case "group_input":
+      return capabilities.group_input === true;
+    case "dirs":
+    case "remote_dir_inventory":
+      return capabilities.remote_dir_inventory === true;
+    case "native_attach":
+      return capabilities.native_attach === true;
+    case "ssh":
+    case "ssh_attach_hint":
+      return capabilities.ssh_attach_hint === true;
+    case "bootstrap":
+    case "bootstrap_hint":
+      return capabilities.bootstrap_hint === true;
+    case "external":
+    case "advisory":
+    case "advisory_metadata":
+      return capabilities.advisory_metadata === true;
+    case "health":
+    case "health_probe":
+      return capabilities.health_probe === true;
+    default:
+      return false;
+  }
+}
+
+export function fleetPresetChips(presets, activePresetId) {
+  const active = normalizePresetId(activePresetId);
+  return buildFleetLensPresets(presets).map((preset) => ({
+    label: preset.label,
+    presetId: preset.id,
+    active: preset.id === active,
+    source: preset.source,
+  }));
 }
 
 export function fleetLensChips(lens, filter) {
@@ -682,6 +876,7 @@ export function surfaceSession(session, {
     repoLabel: operatorPressure?.repo_label || repoLabelForKey(fallbackRepoKey) || relativeCwd(sessionCanonicalCwd),
     targetKey: target.key,
     targetLabel: target.label,
+    targetKind: String(environment.target_kind || (target.key === "local" ? "local" : "")).trim().toLowerCase(),
     advisoryBadges,
     advisoryLabel: advisorySummaryLabel(advisoryBadges),
     stateKey,
@@ -718,10 +913,24 @@ export function buildSurfaceModel({
   const allSurfaceSessions = state.sessions.map((session) => surfaceSession(session, surfaceOptions(session)));
   const sessionGroupMode = normalizeSessionGroupMode(state.sessionGroupMode);
   const fleetLens = buildFleetLensSummary(allSurfaceSessions);
-  const fleetFilter = availableFleetFilter(fleetLens, state.fleetFilter);
-  const surfaceSessions = allSurfaceSessions.filter((session) => sessionMatchesFleetFilter(session, fleetFilter));
+  const fleetPresets = buildFleetLensPresets(state.fleetPresets);
+  const requestedPresetId = normalizePresetId(state.fleetPresetId);
+  const activePreset = resolveFleetPreset(
+    fleetPresets.find((preset) => preset.id === requestedPresetId),
+    selectedSession,
+    allSurfaceSessions,
+  );
+  const fleetFilter = activePreset ? { kind: "", key: "" } : availableFleetFilter(fleetLens, state.fleetFilter);
+  const surfaceSessions = activePreset
+    ? allSurfaceSessions.filter((session) => sessionMatchesPreset(session, activePreset))
+    : allSurfaceSessions.filter((session) => sessionMatchesFleetFilter(session, fleetFilter));
   const filteredFleetLens = buildFleetLensSummary(surfaceSessions);
-  const environmentMatrix = buildEnvironmentMatrix(state.environments, allSurfaceSessions);
+  const allEnvironmentMatrix = buildEnvironmentMatrix(state.environments, allSurfaceSessions);
+  const environmentById = new Map((Array.isArray(state.environments) ? state.environments : [])
+    .map((environment) => [String(environment?.id || "").trim(), environment]));
+  const environmentMatrix = activePreset
+    ? allEnvironmentMatrix.filter((row) => environmentMatchesPreset(environmentById.get(row.id), activePreset))
+    : allEnvironmentMatrix;
   const attentionInbox = buildAttentionInbox(surfaceSessions);
   const selectedSessionVisible = selectedSession
     ? surfaceSessions.some((session) => session.sessionId === selectedSession.session_id)
@@ -764,9 +973,16 @@ export function buildSurfaceModel({
     attentionInboxCount: readinessBucketCount(filteredFleetLens, "needs_attention"),
     environmentMatrix,
     fleetFilter,
+    fleetPresetId: activePreset?.id || "",
+    fleetPreset: activePreset || null,
+    fleetPresets,
     fleetLens,
     filteredFleetLens,
     fleetChips: fleetLensChips(fleetLens, fleetFilter),
+    fleetPresetChips: fleetPresetChips(fleetPresets, activePreset?.id || ""),
+    fleetEmptyMessage: activePreset && surfaceSessions.length === 0
+      ? `No sessions match ${activePreset.label}.`
+      : "",
     selectedSessionId: state.selectedSessionId,
     publishedSessionId: normalizeSessionId(state.publishedSelection?.session_id),
     publishedAtLabel: formatTime(state.publishedSelection?.published_at),

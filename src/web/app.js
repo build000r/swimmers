@@ -97,6 +97,7 @@ import {
 } from "./workbench_render.js";
 import {
   availableFleetFilter,
+  buildFleetLensPresets,
   buildSurfaceModel as buildSurfaceModelFromState,
   buildFleetLensSummary,
   formatTime,
@@ -125,6 +126,7 @@ const SESSION_STORAGE_KEY = "swimmers.web.session";
 const DIR_BROWSER_PATH_KEY = "swimmers.web.dirs.path";
 const DIR_BROWSER_MANAGED_ONLY_KEY = "swimmers.web.dirs.managed";
 const FLEET_FILTER_STORAGE_KEY = "swimmers.web.fleet.filter";
+const FLEET_PRESET_STORAGE_KEY = "swimmers.web.fleet.preset";
 const SESSION_GROUP_MODE_STORAGE_KEY = "swimmers.web.sessionGroupMode";
 const TERMINAL_ZOOM_STORAGE_KEY = "swimmers.web.terminalZoom";
 const SEND_HISTORY_KEY = "swimmers.web.send.history";
@@ -239,6 +241,8 @@ const state = {
   utilityMuted: true,
   backendHealth: null,
   fleetFilter: { kind: "", key: "" },
+  fleetPresetId: "",
+  fleetPresets: [],
   fleetLens: null,
   sessionGroupMode: "flat",
   surfaceZones: [],
@@ -904,6 +908,11 @@ function fleetFilterEquals(left = {}, right = {}) {
 }
 
 function reconcileFleetFilterForSessions() {
+  const presets = buildFleetLensPresets(state.fleetPresets);
+  if (state.fleetPresetId && !presets.some((preset) => preset.id === state.fleetPresetId)) {
+    state.fleetPresetId = "";
+    persistFleetPreset();
+  }
   const surfaceSessions = state.sessions.map((session) => buildSurfaceSession(session, {
     operatorPressure: operatorPressureSnapshot(session.session_id),
     sessionBurnt: trogdorSessionBurnt,
@@ -1176,6 +1185,7 @@ function loadInitialState() {
     rawStoredDirPath: localStorage.getItem(DIR_BROWSER_PATH_KEY) ?? "",
     rawStoredManagedOnly: localStorage.getItem(DIR_BROWSER_MANAGED_ONLY_KEY),
     rawStoredFleetFilter: localStorage.getItem(FLEET_FILTER_STORAGE_KEY),
+    rawStoredFleetPresetId: localStorage.getItem(FLEET_PRESET_STORAGE_KEY),
     rawStoredSessionGroupMode: localStorage.getItem(SESSION_GROUP_MODE_STORAGE_KEY),
     bootFollowPublishedSelection: boot.follow_published_selection,
     terminalWorkbenchMobile: window.matchMedia?.("(max-width: 700px)")?.matches ?? false,
@@ -1193,6 +1203,7 @@ function loadInitialState() {
   state.dirBrowser.path = plan.storedDirPath;
   state.dirBrowser.managedOnly = plan.storedManagedOnly;
   state.fleetFilter = plan.storedFleetFilter;
+  state.fleetPresetId = plan.storedFleetPresetId;
   state.sessionGroupMode = plan.storedSessionGroupMode;
   el.dirsPath.value = plan.storedDirPath;
   el.dirsManagedOnly.checked = plan.storedManagedOnly;
@@ -1766,6 +1777,7 @@ async function handleSurfaceAction(zone) {
   if (plan.type === "toggle_trogdor_atlas") return toggleTrogdorAtlasSurfaceAction();
   if (plan.type === "focus_terminal") return focusTerminalSurfaceAction();
   if (plan.type === "set_fleet_filter") return setFleetFilter(plan.filter);
+  if (plan.type === "set_fleet_preset") return setFleetPreset(plan.presetId);
   if (plan.type === "toggle_session_grouping") return toggleSessionGrouping();
   return runSurfaceActionExecution(surfaceActionExecutionForZone(plan, zone));
 }
@@ -1779,7 +1791,18 @@ function setFleetFilter(filter = {}) {
   state.fleetFilter = current.kind === next.kind && current.key === next.key
     ? { kind: "", key: "" }
     : next;
+  state.fleetPresetId = "";
   persistFleetFilter();
+  persistFleetPreset();
+  renderHudSurface();
+}
+
+function setFleetPreset(presetId = "") {
+  const next = String(presetId || "").trim().toLowerCase();
+  state.fleetPresetId = state.fleetPresetId === next ? "" : next;
+  state.fleetFilter = { kind: "", key: "" };
+  persistFleetFilter();
+  persistFleetPreset();
   renderHudSurface();
 }
 
@@ -1787,6 +1810,20 @@ function toggleSessionGrouping() {
   state.sessionGroupMode = state.sessionGroupMode === "project" ? "flat" : "project";
   localStorage.setItem(SESSION_GROUP_MODE_STORAGE_KEY, state.sessionGroupMode);
   renderHudSurface();
+}
+
+function persistFleetPreset() {
+  const presetId = String(state.fleetPresetId || "").trim().toLowerCase();
+  const url = new URL(window.location.href);
+  if (presetId) {
+    localStorage.setItem(FLEET_PRESET_STORAGE_KEY, presetId);
+    url.searchParams.set("preset", presetId);
+  } else {
+    localStorage.removeItem(FLEET_PRESET_STORAGE_KEY);
+    url.searchParams.delete("preset");
+    url.searchParams.delete("fleet_preset");
+  }
+  window.history.replaceState({}, "", url);
 }
 
 function persistFleetFilter() {

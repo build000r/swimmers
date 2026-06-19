@@ -13,7 +13,7 @@ use crate::api::service::{
 use crate::api::{fetch_live_summary, remote_sessions, AppState};
 use crate::auth::{AuthInfo, AuthScope};
 use crate::config::SessionDeleteMode;
-use crate::fleet_lens::build_fleet_lens_summary;
+use crate::fleet_lens::{build_fleet_lens_presets, build_fleet_lens_summary};
 use crate::session::actor::{ActorHandle, InputDeliveryResult, SessionCommand};
 use crate::session::supervisor::TmuxAdoptError;
 use crate::types::{
@@ -38,12 +38,19 @@ pub(super) async fn list_sessions(
     // The version counter is not tracked by the supervisor itself; we use 0
     // as a placeholder. A proper monotonic version can be added to the
     // supervisor later if clients need ETag-style cache validation.
+    let environments = remote_sessions::environment_summaries(true);
+    let fleet_presets = build_fleet_lens_presets(
+        crate::session::overlay::default_overlay()
+            .map(|overlay| overlay.all_fleet_presets())
+            .unwrap_or_default(),
+    );
     Ok(Json(SessionListResponse {
         fleet_lens: build_fleet_lens_summary(&sessions),
+        fleet_presets,
         sessions,
         version: 0,
         repo_themes: Default::default(),
-        environments: remote_sessions::environment_summaries(true),
+        environments,
     }))
 }
 

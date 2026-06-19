@@ -878,6 +878,126 @@ fn header_filter_strip_applies_native_fleet_filters() {
 }
 
 #[test]
+fn saved_fleet_lens_current_repo_matches_local_and_remote_sessions() {
+    let api = MockApi::new();
+    let layout = test_layout(240, 32);
+    let mut app = make_app(api);
+
+    let local = session_summary_with_thought(
+        "sess-local",
+        "7",
+        TEST_REPO_SWIMMERS,
+        "local is working",
+        "2026-03-08T14:00:05Z",
+    );
+    let remote_id = remote_sessions::namespace_session_id("skillbox", "sess-remote");
+    let mut remote = session_summary_with_thought(
+        &remote_id,
+        "9",
+        "/srv/skillbox/repos/swimmers",
+        "remote is mapped",
+        "2026-03-08T14:00:06Z",
+    );
+    remote.environment = swimmers::types::SessionEnvironmentSummary::remote(
+        &LaunchTargetSummary {
+            id: "skillbox".to_string(),
+            label: "Skillbox devbox".to_string(),
+            kind: "swimmers_api".to_string(),
+            base_url: None,
+            auth_token_env: None,
+            bootstrap_hint: None,
+            path_mappings: Vec::new(),
+        },
+        "sess-remote",
+        "/srv/skillbox/repos/swimmers".to_string(),
+        Some(TEST_REPO_SWIMMERS.to_string()),
+        "remote_swimmers_api",
+    );
+    let beta = session_summary_with_thought(
+        "sess-beta",
+        "11",
+        TEST_REPO_BETA,
+        "other repo",
+        "2026-03-08T14:00:07Z",
+    );
+
+    app.capture_thought_updates(
+        &[local.clone(), remote.clone(), beta.clone()],
+        layout.thought_entry_capacity(),
+    );
+    app.entities = vec![
+        SessionEntity::new(local, layout.overview_field),
+        SessionEntity::new(remote, layout.overview_field),
+        SessionEntity::new(beta, layout.overview_field),
+    ];
+    app.selected_id = Some("sess-local".to_string());
+
+    assert!(app.set_thought_filter_preset(FleetLensPreset {
+        id: "current-repo".to_string(),
+        label: "Current repo".to_string(),
+        source: "builtin".to_string(),
+        matchers: vec![FleetLensPresetMatcher::CurrentRepo],
+    }));
+
+    assert_eq!(
+        app.active_thought_filter_text(),
+        "filter: lens=Current repo"
+    );
+    assert_eq!(
+        visible_entity_ids(&app),
+        vec!["sess-local".to_string(), remote_id.clone()]
+    );
+}
+
+#[test]
+fn saved_fleet_lens_cycle_applies_builtin_presets() {
+    let api = MockApi::new();
+    let layout = test_layout(240, 32);
+    let mut app = make_app(api);
+    let local = session_summary_with_thought(
+        "sess-local",
+        "7",
+        TEST_REPO_SWIMMERS,
+        "local is working",
+        "2026-03-08T14:00:05Z",
+    );
+    let mut remote = session_summary_with_thought(
+        "sess-remote",
+        "9",
+        "/srv/skillbox/repos/swimmers",
+        "remote is mapped",
+        "2026-03-08T14:00:06Z",
+    );
+    remote.environment = swimmers::types::SessionEnvironmentSummary::remote(
+        &LaunchTargetSummary {
+            id: "skillbox".to_string(),
+            label: "Skillbox devbox".to_string(),
+            kind: "swimmers_api".to_string(),
+            base_url: None,
+            auth_token_env: None,
+            bootstrap_hint: None,
+            path_mappings: Vec::new(),
+        },
+        "sess-remote",
+        "/srv/skillbox/repos/swimmers".to_string(),
+        Some(TEST_REPO_SWIMMERS.to_string()),
+        "remote_swimmers_api",
+    );
+    app.entities = vec![
+        SessionEntity::new(local, layout.overview_field),
+        SessionEntity::new(remote, layout.overview_field),
+    ];
+
+    app.cycle_fleet_preset(1);
+    assert_eq!(app.active_thought_filter_text(), "filter: lens=Local");
+    assert_eq!(visible_entity_ids(&app), vec!["sess-local".to_string()]);
+
+    app.cycle_fleet_preset(1);
+    assert_eq!(app.active_thought_filter_text(), "filter: lens=Remote API");
+    assert_eq!(visible_entity_ids(&app), vec!["sess-remote".to_string()]);
+}
+
+#[test]
 fn clicking_bracketed_thought_label_opens_that_session() {
     let api = MockApi::new();
     let layout = test_layout(120, 32);

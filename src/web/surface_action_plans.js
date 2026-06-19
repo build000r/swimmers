@@ -104,6 +104,10 @@ export function surfaceActionDispatchPlan(zone, context = {}) {
         filter,
       };
     }
+    case "fleet_preset": {
+      const presetId = String(zone.presetId || zone.preset_id || "").trim().toLowerCase();
+      return presetId ? { type: "set_fleet_preset", presetId } : { type: "ignore" };
+    }
     default:
       return { type: "ignore" };
   }
@@ -204,6 +208,10 @@ export function surfaceActionExecutionPlan(plan = {}, context = {}) {
     case "set_fleet_filter": {
       const filter = normalizeFleetFilterPayload(plan.filter);
       return filter ? { type: plan.type, filter } : { type: "ignore" };
+    }
+    case "set_fleet_preset": {
+      const presetId = String(plan.presetId || "").trim().toLowerCase();
+      return presetId ? { type: plan.type, presetId } : { type: "ignore" };
     }
     default:
       return { type: "ignore" };

@@ -241,6 +241,7 @@ async fn spawn_delayed_api_server(
                     repo_themes: HashMap::new(),
                     environments: Vec::new(),
                     fleet_lens: Default::default(),
+                    fleet_presets: Vec::new(),
                 })
             }),
         )
@@ -559,6 +560,7 @@ async fn startup_preflight_retries_until_local_listener_is_ready() {
                         repo_themes: HashMap::new(),
                         environments: Vec::new(),
                         fleet_lens: Default::default(),
+                        fleet_presets: Vec::new(),
                     })
                 }),
             )

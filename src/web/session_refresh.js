@@ -148,6 +148,7 @@ export async function runSessionRefresh(runtime) {
     runtime.state.sessions = Array.isArray(payload.sessions) ? payload.sessions : [];
     runtime.state.environments = Array.isArray(payload.environments) ? payload.environments : [];
     runtime.state.fleetLens = payload.fleet_lens || null;
+    runtime.state.fleetPresets = Array.isArray(payload.fleet_presets) ? payload.fleet_presets : [];
     runtime.applyOperatorPressure(pressurePayload);
     runtime.applyBackendHealth(healthPayload);
     runtime.syncTrogdorCueTransitions();
@@ -211,6 +212,7 @@ function applySessionRefreshError(error, runtime) {
   runtime.state.sessions = [];
   runtime.state.environments = [];
   runtime.state.fleetLens = null;
+  runtime.state.fleetPresets = [];
   runtime.state.operatorPressureBySession = new Map();
   runtime.state.backendHealth = null;
   runtime.state.publishedSelection = null;

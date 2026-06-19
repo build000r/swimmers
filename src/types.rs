@@ -747,6 +747,46 @@ pub struct FleetLensBucket {
     pub commit_ready_count: usize,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum FleetLensPresetMatcher {
+    All,
+    FleetBucket {
+        kind: FleetLensBucketKind,
+        key: String,
+    },
+    TargetId {
+        id: String,
+    },
+    TargetKind {
+        kind: String,
+    },
+    Repo {
+        key: String,
+    },
+    CurrentRepo,
+    Readiness {
+        key: String,
+    },
+    Transport {
+        key: String,
+    },
+    Capability {
+        key: String,
+    },
+    Degraded,
+    NeedsAttention,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FleetLensPreset {
+    pub id: String,
+    pub label: String,
+    pub source: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub matchers: Vec<FleetLensPresetMatcher>,
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FleetLensSummary {
     pub total_sessions: usize,
@@ -1804,6 +1844,8 @@ pub struct SessionListResponse {
     pub environments: Vec<EnvironmentSummary>,
     #[serde(default, skip_serializing_if = "FleetLensSummary::is_empty")]
     pub fleet_lens: FleetLensSummary,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub fleet_presets: Vec<FleetLensPreset>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

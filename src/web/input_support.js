@@ -929,6 +929,7 @@ export function initialStateBootPlan(context = {}) {
   const param = (name, fallback = null) => context.searchParams?.get?.(name) ?? fallback;
   const queryToken = param("token", "");
   const selectedFromUrl = param("session");
+  const presetFromUrl = param("preset", "") || param("fleet_preset", "");
   const selectedFromStorage = context.selectedFromStorage ?? null;
   const followFromUrl = param("follow") === "published";
   const rawStoredDirPath = String(context.rawStoredDirPath ?? "");
@@ -945,6 +946,7 @@ export function initialStateBootPlan(context = {}) {
     clearStoredDirPath: Boolean(rawStoredDirPath && !storedDirPath),
     storedManagedOnly: context.rawStoredManagedOnly === "true",
     storedFleetFilter: parseStoredFleetFilter(context.rawStoredFleetFilter),
+    storedFleetPresetId: parseStoredFleetPresetId(presetFromUrl || context.rawStoredFleetPresetId),
     storedSessionGroupMode: parseStoredSessionGroupMode(context.rawStoredSessionGroupMode),
     terminalWorkbenchOpen: !Boolean(context.terminalWorkbenchMobile),
   };
@@ -962,6 +964,10 @@ function parseStoredFleetFilter(raw) {
   } catch {
     return { kind: "", key: "" };
   }
+}
+
+function parseStoredFleetPresetId(raw) {
+  return String(raw || "").trim().toLowerCase();
 }
 
 function parseStoredSessionGroupMode(raw) {

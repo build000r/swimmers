@@ -249,12 +249,28 @@ export interface FleetLensSummary {
   buckets: FleetLensBucket[];
 }
 
+export interface FleetLensPresetMatcher {
+  type: string;
+  kind?: string;
+  key?: string;
+  id?: string;
+  [key: string]: unknown;
+}
+
+export interface FleetLensPreset {
+  id: string;
+  label: string;
+  source: string;
+  matchers: FleetLensPresetMatcher[];
+}
+
 export interface SessionListResponse {
   sessions: SessionSummary[];
   version: number;
   repo_themes: Record<string, RepoTheme | Record<string, unknown>>;
   environments: EnvironmentSummary[];
   fleet_lens: FleetLensSummary;
+  fleet_presets: FleetLensPreset[];
 }
 
 export interface ErrorResponse {

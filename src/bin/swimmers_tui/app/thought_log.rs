@@ -1,5 +1,5 @@
 use super::*;
-use swimmers::session_labels::{session_canonical_cwd_key, session_cwd_label};
+use swimmers::session_labels::{session_canonical_cwd_key, session_cwd_label, session_repo_key};
 
 impl<C: TuiApi> App<C> {
     pub(crate) fn trim_thought_log(&mut self, capacity: usize) {
@@ -96,6 +96,7 @@ impl<C: TuiApi> App<C> {
     pub(crate) fn set_thought_filter_cwd(&mut self, cwd: String) {
         self.thought_filter.cwd = Some(cwd);
         self.thought_filter.fleet = None;
+        self.thought_filter.preset = None;
         self.thought_filter.excluded_cwds.clear();
         self.thought_filter.filter_out_mode = false;
         self.reconcile_selection();
@@ -105,16 +106,94 @@ impl<C: TuiApi> App<C> {
     pub(crate) fn set_thought_filter_fleet(&mut self, fleet: ThoughtFleetFilter) {
         self.thought_filter.cwd = None;
         self.thought_filter.fleet = Some(fleet);
+        self.thought_filter.preset = None;
         self.thought_filter.excluded_cwds.clear();
         self.thought_filter.filter_out_mode = false;
         self.reconcile_selection();
         self.sync_selection_publication();
     }
 
+    pub(crate) fn set_thought_filter_preset(&mut self, preset: FleetLensPreset) -> bool {
+        let Some(active) = self.thought_active_preset_for(&preset) else {
+            self.set_message(format!("fleet lens unavailable: {}", preset.label));
+            return false;
+        };
+        self.thought_filter.clear();
+        self.thought_filter.preset = Some(active.clone());
+        self.reconcile_selection();
+        self.sync_selection_publication();
+        self.set_message(format!("fleet lens: {}", active.label));
+        true
+    }
+
+    pub(crate) fn cycle_fleet_preset(&mut self, delta: isize) {
+        let presets = if self.fleet_presets.is_empty() {
+            swimmers::fleet_lens::build_fleet_lens_presets(Vec::new())
+        } else {
+            self.fleet_presets.clone()
+        };
+        if presets.is_empty() {
+            self.set_message("no fleet lenses configured".to_string());
+            return;
+        }
+        let active_id = self
+            .thought_filter
+            .preset
+            .as_ref()
+            .map(|preset| preset.id.as_str());
+        let current = active_id
+            .and_then(|id| presets.iter().position(|preset| preset.id == id))
+            .unwrap_or(0);
+        for step in 1..=presets.len() {
+            let offset = if delta >= 0 {
+                step
+            } else {
+                presets.len() - step
+            };
+            let index = (current + offset) % presets.len();
+            if self.set_thought_filter_preset(presets[index].clone()) {
+                return;
+            }
+        }
+    }
+
+    fn thought_active_preset_for(&self, preset: &FleetLensPreset) -> Option<ThoughtActivePreset> {
+        let mut matchers = Vec::new();
+        for matcher in &preset.matchers {
+            match matcher {
+                FleetLensPresetMatcher::CurrentRepo => {
+                    matchers.push(FleetLensPresetMatcher::Repo {
+                        key: self.current_repo_key_for_preset()?,
+                    });
+                }
+                other => matchers.push(other.clone()),
+            }
+        }
+        Some(ThoughtActivePreset {
+            id: preset.id.clone(),
+            label: preset.label.clone(),
+            matchers,
+        })
+    }
+
+    fn current_repo_key_for_preset(&self) -> Option<String> {
+        self.selected_id
+            .as_deref()
+            .and_then(|id| {
+                self.entities
+                    .iter()
+                    .find(|entity| entity.session.session_id == id)
+            })
+            .or_else(|| self.entities.first())
+            .map(|entity| session_repo_key(&entity.session))
+            .filter(|key| !key.trim().is_empty())
+    }
+
     pub(crate) fn toggle_thought_filter_out_mode(&mut self) {
         self.thought_filter.filter_out_mode = !self.thought_filter.filter_out_mode;
         if self.thought_filter.filter_out_mode {
             self.thought_filter.cwd = None;
+            self.thought_filter.preset = None;
         } else {
             self.thought_filter.excluded_cwds.clear();
         }
@@ -124,6 +203,7 @@ impl<C: TuiApi> App<C> {
 
     pub(crate) fn toggle_thought_filter_out_cwd(&mut self, cwd: String) {
         self.thought_filter.cwd = None;
+        self.thought_filter.preset = None;
         self.thought_filter.filter_out_mode = true;
         if !self.thought_filter.excluded_cwds.insert(cwd.clone()) {
             self.thought_filter.excluded_cwds.remove(&cwd);
@@ -174,8 +254,10 @@ impl<C: TuiApi> App<C> {
             entry.tmux_name = session.tmux_name.clone();
             entry.cwd = session_canonical_cwd_key(session);
             entry.pwd_label = session_cwd_label(session);
+            entry.repo_key = session_repo_key(session);
             entry.target_key = thought_filter_target_key(session);
             entry.target_label = session_target_label(session);
+            entry.target_kind = session.environment.target_kind.clone();
             entry.state_key = thought_filter_state_key(session.state).to_string();
             entry.readiness_key = thought_filter_readiness_key(session).to_string();
             entry.transport_key =

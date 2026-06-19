@@ -6,7 +6,10 @@ use std::time::SystemTime;
 use chrono::{DateTime, Utc};
 use serde::Deserialize;
 
-use crate::types::{DependencyHealthSnapshot, LaunchPathMapping, LaunchTargetSummary};
+use crate::types::{
+    DependencyHealthSnapshot, FleetLensPreset, FleetLensPresetMatcher, LaunchPathMapping,
+    LaunchTargetSummary,
+};
 
 /// Cached skillbox overlay, loaded once from disk.
 pub fn default_overlay() -> Option<&'static SkillboxOverlay> {
@@ -140,6 +143,7 @@ struct ClientOverlay {
     plan_root: Option<PathBuf>,
     plan_draft: Option<PathBuf>,
     dir_config: Option<OverlayDirConfig>,
+    fleet_presets: Vec<FleetLensPreset>,
 }
 
 impl SkillboxOverlay {
@@ -232,6 +236,21 @@ impl SkillboxOverlay {
                 .filter_map(|client| client.dir_config.as_ref())
                 .flat_map(|config| config.launch.targets.iter()),
         )
+    }
+
+    pub fn all_fleet_presets(&self) -> Vec<FleetLensPreset> {
+        let mut seen = BTreeSet::new();
+        let mut presets = Vec::new();
+        for preset in self
+            .clients
+            .iter()
+            .flat_map(|client| client.fleet_presets.iter())
+        {
+            if seen.insert(preset.id.clone()) {
+                presets.push(preset.clone());
+            }
+        }
+        presets
     }
 
     /// Given a session CWD, find the matching client's plan directories.
@@ -549,6 +568,18 @@ struct DevSanitySection {
     services: Option<DevSanityServices>,
     #[serde(default)]
     groups: Vec<DevSanityGroup>,
+    #[serde(default)]
+    fleet_lenses: Vec<DevSanityFleetLens>,
+}
+
+#[derive(Deserialize, Default)]
+struct DevSanityFleetLens {
+    #[serde(default)]
+    id: Option<String>,
+    #[serde(default)]
+    label: Option<String>,
+    #[serde(default)]
+    matchers: Vec<FleetLensPresetMatcher>,
 }
 
 #[derive(Deserialize, Default)]
@@ -629,9 +660,13 @@ fn parse_client_overlay(client_dir: &Path, overlay_path: &Path) -> Option<Client
     let cwd_patterns = cwd_patterns_from_context(&context);
     let scan_roots = scan_roots_from_context(&context);
     let (plan_root, plan_draft) = plan_dirs_from_context(client_dir, context.plans);
-    let dir_config = file
-        .dev_sanity
-        .and_then(|ds| parse_dir_config(ds, &client_label, client_repos, &scan_roots));
+    let dev_sanity = file.dev_sanity;
+    let fleet_presets = dev_sanity
+        .as_ref()
+        .map(|section| parse_fleet_lenses(&section.fleet_lenses))
+        .unwrap_or_default();
+    let dir_config =
+        dev_sanity.and_then(|ds| parse_dir_config(ds, &client_label, client_repos, &scan_roots));
 
     Some(ClientOverlay {
         label: client_label,
@@ -640,6 +675,7 @@ fn parse_client_overlay(client_dir: &Path, overlay_path: &Path) -> Option<Client
         plan_root,
         plan_draft,
         dir_config,
+        fleet_presets,
     })
 }
 
@@ -733,6 +769,26 @@ fn parse_dir_config(
 
 fn parse_dir_groups(groups: Vec<DevSanityGroup>) -> Vec<OverlayDirGroup> {
     groups.into_iter().filter_map(parse_dir_group).collect()
+}
+
+fn parse_fleet_lenses(entries: &[DevSanityFleetLens]) -> Vec<FleetLensPreset> {
+    entries
+        .iter()
+        .filter_map(|entry| {
+            let id = nonempty_launch_metadata(entry.id.clone()?)?;
+            let label = entry
+                .label
+                .clone()
+                .and_then(nonempty_launch_metadata)
+                .unwrap_or_else(|| id.clone());
+            (!entry.matchers.is_empty()).then(|| FleetLensPreset {
+                id,
+                label,
+                source: "overlay".to_string(),
+                matchers: entry.matchers.clone(),
+            })
+        })
+        .collect()
 }
 
 fn parse_dir_group(group: DevSanityGroup) -> Option<OverlayDirGroup> {

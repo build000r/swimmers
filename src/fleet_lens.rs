@@ -2,8 +2,10 @@ use std::collections::BTreeMap;
 
 use crate::session_labels::{repo_label_for_key, session_repo_key};
 use crate::types::{
-    ActionCueKind, AdvisoryMetadataSummary, FleetLensBucket, FleetLensBucketKind, FleetLensSummary,
-    RestState, SessionEnvironmentScope, SessionState, SessionSummary, TransportHealth,
+    ActionCueKind, AdvisoryMetadataSummary, DependencyHealthStatus, EnvironmentCapabilitySummary,
+    EnvironmentSummary, FleetLensBucket, FleetLensBucketKind, FleetLensPreset,
+    FleetLensPresetMatcher, FleetLensSummary, RestState, SessionEnvironmentScope, SessionState,
+    SessionSummary, TransportHealth,
 };
 
 pub fn build_fleet_lens_summary(sessions: &[SessionSummary]) -> FleetLensSummary {
@@ -70,6 +72,308 @@ pub fn build_fleet_lens_summary(sessions: &[SessionSummary]) -> FleetLensSummary
         total_sessions: sessions.len(),
         buckets,
     }
+}
+
+pub fn build_fleet_lens_presets(overlay_presets: Vec<FleetLensPreset>) -> Vec<FleetLensPreset> {
+    let mut presets = built_in_fleet_lens_presets();
+    let mut seen = presets
+        .iter()
+        .map(|preset| preset.id.clone())
+        .collect::<std::collections::BTreeSet<_>>();
+    for preset in overlay_presets
+        .into_iter()
+        .filter_map(sanitize_overlay_preset)
+    {
+        if seen.insert(preset.id.clone()) {
+            presets.push(preset);
+        }
+    }
+    presets
+}
+
+fn built_in_fleet_lens_presets() -> Vec<FleetLensPreset> {
+    vec![
+        preset(
+            "all",
+            "All environments",
+            "builtin",
+            vec![FleetLensPresetMatcher::All],
+        ),
+        preset(
+            "local",
+            "Local",
+            "builtin",
+            vec![FleetLensPresetMatcher::TargetId {
+                id: "local".to_string(),
+            }],
+        ),
+        preset(
+            "remote-api",
+            "Remote API",
+            "builtin",
+            vec![FleetLensPresetMatcher::TargetKind {
+                kind: "swimmers_api".to_string(),
+            }],
+        ),
+        preset(
+            "ssh-handoff",
+            "SSH handoff",
+            "builtin",
+            vec![FleetLensPresetMatcher::TargetKind {
+                kind: "ssh_only".to_string(),
+            }],
+        ),
+        preset(
+            "current-repo",
+            "Current repo",
+            "builtin",
+            vec![FleetLensPresetMatcher::CurrentRepo],
+        ),
+        preset(
+            "needs-attention",
+            "Needs attention",
+            "builtin",
+            vec![FleetLensPresetMatcher::NeedsAttention],
+        ),
+        preset(
+            "degraded",
+            "Degraded",
+            "builtin",
+            vec![FleetLensPresetMatcher::Degraded],
+        ),
+    ]
+}
+
+fn preset(
+    id: &str,
+    label: &str,
+    source: &str,
+    matchers: Vec<FleetLensPresetMatcher>,
+) -> FleetLensPreset {
+    FleetLensPreset {
+        id: id.to_string(),
+        label: label.to_string(),
+        source: source.to_string(),
+        matchers,
+    }
+}
+
+fn sanitize_overlay_preset(mut preset: FleetLensPreset) -> Option<FleetLensPreset> {
+    preset.id = normalize_preset_id(&preset.id)?;
+    preset.label = sanitize_preset_label(&preset.label)?;
+    preset.source = "overlay".to_string();
+    preset.matchers = preset
+        .matchers
+        .into_iter()
+        .filter_map(sanitize_preset_matcher)
+        .collect();
+    (!preset.matchers.is_empty()).then_some(preset)
+}
+
+fn normalize_preset_id(raw: &str) -> Option<String> {
+    let normalized = raw
+        .trim()
+        .to_ascii_lowercase()
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' {
+                ch
+            } else {
+                '-'
+            }
+        })
+        .collect::<String>()
+        .trim_matches('-')
+        .to_string();
+    (!normalized.is_empty()).then_some(normalized)
+}
+
+fn sanitize_preset_label(raw: &str) -> Option<String> {
+    let label = raw
+        .chars()
+        .filter(|ch| !ch.is_control())
+        .collect::<String>()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    (!label.is_empty()).then(|| label.chars().take(64).collect())
+}
+
+fn sanitize_preset_matcher(matcher: FleetLensPresetMatcher) -> Option<FleetLensPresetMatcher> {
+    match matcher {
+        FleetLensPresetMatcher::All => Some(FleetLensPresetMatcher::All),
+        FleetLensPresetMatcher::FleetBucket { kind, key } => {
+            nonempty_preset_value(&key).map(|key| FleetLensPresetMatcher::FleetBucket { kind, key })
+        }
+        FleetLensPresetMatcher::TargetId { id } => {
+            nonempty_preset_value(&id).map(|id| FleetLensPresetMatcher::TargetId { id })
+        }
+        FleetLensPresetMatcher::TargetKind { kind } => {
+            nonempty_preset_value(&kind).map(|kind| FleetLensPresetMatcher::TargetKind { kind })
+        }
+        FleetLensPresetMatcher::Repo { key } => {
+            nonempty_preset_value(&key).map(|key| FleetLensPresetMatcher::Repo { key })
+        }
+        FleetLensPresetMatcher::CurrentRepo => Some(FleetLensPresetMatcher::CurrentRepo),
+        FleetLensPresetMatcher::Readiness { key } => {
+            nonempty_preset_value(&key).map(|key| FleetLensPresetMatcher::Readiness { key })
+        }
+        FleetLensPresetMatcher::Transport { key } => {
+            nonempty_preset_value(&key).map(|key| FleetLensPresetMatcher::Transport { key })
+        }
+        FleetLensPresetMatcher::Capability { key } => {
+            nonempty_preset_value(&key).map(|key| FleetLensPresetMatcher::Capability { key })
+        }
+        FleetLensPresetMatcher::Degraded => Some(FleetLensPresetMatcher::Degraded),
+        FleetLensPresetMatcher::NeedsAttention => Some(FleetLensPresetMatcher::NeedsAttention),
+    }
+}
+
+fn nonempty_preset_value(raw: &str) -> Option<String> {
+    let value = raw.trim();
+    (!value.is_empty()).then(|| value.to_string())
+}
+
+pub fn fleet_preset_matches_session(
+    preset: &FleetLensPreset,
+    session: &SessionSummary,
+    current_repo_key: Option<&str>,
+) -> bool {
+    preset
+        .matchers
+        .iter()
+        .all(|matcher| preset_matcher_matches_session(matcher, session, current_repo_key))
+}
+
+fn preset_matcher_matches_session(
+    matcher: &FleetLensPresetMatcher,
+    session: &SessionSummary,
+    current_repo_key: Option<&str>,
+) -> bool {
+    match matcher {
+        FleetLensPresetMatcher::All => true,
+        FleetLensPresetMatcher::FleetBucket { kind, key } => {
+            session_matches_bucket(session, *kind, key)
+        }
+        FleetLensPresetMatcher::TargetId { id } => target_key(session) == *id,
+        FleetLensPresetMatcher::TargetKind { kind } => {
+            normalized_eq(&session.environment.target_kind, kind)
+        }
+        FleetLensPresetMatcher::Repo { key } => session_repo_key(session) == *key,
+        FleetLensPresetMatcher::CurrentRepo => {
+            current_repo_key.is_some_and(|key| session_repo_key(session) == key)
+        }
+        FleetLensPresetMatcher::Readiness { key } => readiness_key(session) == key,
+        FleetLensPresetMatcher::Transport { key } => transport_key(session.transport_health) == key,
+        FleetLensPresetMatcher::Capability { key } => session_capability_summary(session)
+            .is_some_and(|capabilities| capability_enabled(&capabilities, key)),
+        FleetLensPresetMatcher::Degraded => session_is_degraded(session),
+        FleetLensPresetMatcher::NeedsAttention => session_needs_attention(session),
+    }
+}
+
+pub fn fleet_preset_matches_environment(
+    preset: &FleetLensPreset,
+    environment: &EnvironmentSummary,
+    current_repo_key: Option<&str>,
+) -> bool {
+    preset
+        .matchers
+        .iter()
+        .all(|matcher| preset_matcher_matches_environment(matcher, environment, current_repo_key))
+}
+
+fn preset_matcher_matches_environment(
+    matcher: &FleetLensPresetMatcher,
+    environment: &EnvironmentSummary,
+    current_repo_key: Option<&str>,
+) -> bool {
+    match matcher {
+        FleetLensPresetMatcher::All => true,
+        FleetLensPresetMatcher::FleetBucket { kind, key } => match kind {
+            FleetLensBucketKind::Target => environment_target_key(environment) == *key,
+            _ => false,
+        },
+        FleetLensPresetMatcher::TargetId { id } => environment_target_key(environment) == *id,
+        FleetLensPresetMatcher::TargetKind { kind } => normalized_eq(&environment.kind, kind),
+        FleetLensPresetMatcher::Repo { .. } | FleetLensPresetMatcher::CurrentRepo => {
+            current_repo_key.is_none()
+        }
+        FleetLensPresetMatcher::Readiness { .. } | FleetLensPresetMatcher::Transport { .. } => {
+            false
+        }
+        FleetLensPresetMatcher::Capability { key } => {
+            capability_enabled(&environment.capabilities, key)
+        }
+        FleetLensPresetMatcher::Degraded => matches!(
+            environment.status,
+            DependencyHealthStatus::Degraded
+                | DependencyHealthStatus::Unavailable
+                | DependencyHealthStatus::Unknown
+        ),
+        FleetLensPresetMatcher::NeedsAttention => false,
+    }
+}
+
+fn session_matches_bucket(session: &SessionSummary, kind: FleetLensBucketKind, key: &str) -> bool {
+    match kind {
+        FleetLensBucketKind::Target => target_key(session) == key,
+        FleetLensBucketKind::Repo => session_repo_key(session) == key,
+        FleetLensBucketKind::Advisory => session
+            .environment
+            .advisory
+            .iter()
+            .filter_map(advisory_key)
+            .any(|advisory_key| advisory_key == key),
+        FleetLensBucketKind::State => session_state_key(session.state) == key,
+        FleetLensBucketKind::Readiness => readiness_key(session) == key,
+        FleetLensBucketKind::Transport => transport_key(session.transport_health) == key,
+    }
+}
+
+fn session_capability_summary(session: &SessionSummary) -> Option<EnvironmentCapabilitySummary> {
+    match session.environment.scope {
+        SessionEnvironmentScope::Local => Some(EnvironmentCapabilitySummary::local()),
+        SessionEnvironmentScope::Remote => match session.environment.target_kind.as_str() {
+            "swimmers_api" => Some(EnvironmentCapabilitySummary::remote_swimmers_api(
+                session.transport_health == TransportHealth::Healthy,
+                session.environment.local_cwd.is_some() || session.environment.remote_cwd.is_some(),
+                false,
+            )),
+            "ssh_only" => Some(EnvironmentCapabilitySummary::ssh_handoff(false)),
+            _ => None,
+        },
+    }
+}
+
+fn capability_enabled(capabilities: &EnvironmentCapabilitySummary, key: &str) -> bool {
+    match key.trim().to_ascii_lowercase().as_str() {
+        "observe" | "observe_sessions" => capabilities.observe_sessions,
+        "launch" | "launch_session" => capabilities.launch_session,
+        "send" | "send_input" => capabilities.send_input,
+        "group" | "group_input" => capabilities.group_input,
+        "dirs" | "remote_dir_inventory" => capabilities.remote_dir_inventory,
+        "native_attach" => capabilities.native_attach,
+        "ssh" | "ssh_attach_hint" => capabilities.ssh_attach_hint,
+        "bootstrap" | "bootstrap_hint" => capabilities.bootstrap_hint,
+        "external" | "advisory" | "advisory_metadata" => capabilities.advisory_metadata,
+        "health" | "health_probe" => capabilities.health_probe,
+        _ => false,
+    }
+}
+
+fn environment_target_key(environment: &EnvironmentSummary) -> String {
+    first_non_empty(&[
+        environment.id.as_str(),
+        environment.display_host.as_str(),
+        environment.label.as_str(),
+    ])
+    .unwrap_or_default()
+    .to_string()
+}
+
+fn normalized_eq(left: &str, right: &str) -> bool {
+    left.trim().eq_ignore_ascii_case(right.trim())
 }
 
 fn insert_bucket(

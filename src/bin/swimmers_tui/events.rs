@@ -571,6 +571,14 @@ fn handle_global_toggle_key<C: TuiApi>(
             app.toggle_thought_show_all();
             Some(true)
         }
+        KeyCode::Char('f') => {
+            app.cycle_fleet_preset(1);
+            Some(true)
+        }
+        KeyCode::Char('F') => {
+            app.cycle_fleet_preset(-1);
+            Some(true)
+        }
         KeyCode::Char('t') => {
             app.open_thought_config_editor();
             Some(true)
