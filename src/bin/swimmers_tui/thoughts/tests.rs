@@ -58,6 +58,7 @@ fn thought_entry(session_id: &str, label: &str, thought: &str) -> ThoughtPanelEn
         cwd: format!("/repo/{label}"),
         target_key: "local".to_string(),
         target_label: "local".to_string(),
+        readiness_key: "quiet".to_string(),
         batch: None,
         state: SessionState::Idle,
         current_command: None,

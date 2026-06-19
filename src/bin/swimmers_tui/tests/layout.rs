@@ -36,6 +36,42 @@ fn app_layout_hides_thought_rail_until_a_session_needs_input() {
 }
 
 #[test]
+fn app_layout_shows_thought_rail_for_remote_attention_inbox() {
+    let api = MockApi::new();
+    let mut app = make_app(api);
+    let full_layout = WorkspaceLayout::for_terminal_without_thought_panel(120, 32);
+    let mut remote = session_summary_with_thought(
+        &remote_sessions::namespace_session_id("skillbox", "sess-remote"),
+        "9",
+        "/srv/skillbox/repos/swimmers",
+        "remote needs review",
+        "2026-03-08T14:00:06Z",
+    );
+    remote.state = SessionState::Attention;
+    remote.rest_state = RestState::Drowsy;
+    remote.environment = swimmers::types::SessionEnvironmentSummary::remote(
+        &LaunchTargetSummary {
+            id: "skillbox".to_string(),
+            label: "Skillbox devbox".to_string(),
+            kind: "swimmers_api".to_string(),
+            base_url: None,
+            auth_token_env: None,
+            path_mappings: Vec::new(),
+        },
+        "sess-remote",
+        "/srv/skillbox/repos/swimmers".to_string(),
+        Some(TEST_REPO_SWIMMERS.to_string()),
+        "remote_swimmers_api",
+    );
+
+    app.merge_sessions(vec![remote], full_layout.overview_field);
+
+    let layout = app.layout_for_terminal(120, 32);
+    assert!(layout.thought_box.is_some());
+    assert!(layout.overview_box.x > layout.workspace_box.x);
+}
+
+#[test]
 fn app_layout_shows_thought_rail_for_sendable_local_batch() {
     let api = MockApi::new();
     let mut app = App::new(test_runtime(), api);

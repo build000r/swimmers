@@ -946,6 +946,7 @@ pub(crate) struct ThoughtPanelEntryView {
     pub(crate) cwd: String,
     pub(crate) target_key: String,
     pub(crate) target_label: String,
+    pub(crate) readiness_key: String,
     pub(crate) batch: Option<SessionBatchMembership>,
     pub(crate) state: SessionState,
     pub(crate) current_command: Option<String>,
@@ -964,6 +965,7 @@ pub(crate) struct ThoughtPanelEntryView {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ThoughtWorkStatus {
     Working,
+    NeedsAttention,
     Asleep,
     Stopped,
 }
@@ -972,6 +974,7 @@ impl ThoughtWorkStatus {
     fn label(self) -> &'static str {
         match self {
             Self::Working => "[work]",
+            Self::NeedsAttention => "[attn]",
             Self::Asleep => "[asleep]",
             Self::Stopped => "[done]",
         }
@@ -981,7 +984,8 @@ impl ThoughtWorkStatus {
         match self {
             Self::Working => 0,
             Self::Stopped => 1,
-            Self::Asleep => 2,
+            Self::NeedsAttention => 2,
+            Self::Asleep => 3,
         }
     }
 }
@@ -989,6 +993,8 @@ impl ThoughtWorkStatus {
 fn thought_work_status(entry: &ThoughtPanelEntryView) -> ThoughtWorkStatus {
     if thought_entry_needs_input(entry) {
         ThoughtWorkStatus::Asleep
+    } else if entry.state == SessionState::Attention {
+        ThoughtWorkStatus::NeedsAttention
     } else if entry.state == SessionState::Exited
         || entry.is_stale
         || entry.transport_health == TransportHealth::Disconnected
@@ -1004,6 +1010,14 @@ pub(crate) fn thought_entry_needs_input(entry: &ThoughtPanelEntryView) -> bool {
     entry.rest_state == RestState::Sleeping
 }
 
+pub(crate) fn thought_entry_needs_attention(entry: &ThoughtPanelEntryView) -> bool {
+    entry.readiness_key == "needs_attention"
+}
+
+pub(crate) fn thought_entry_visible_by_default(entry: &ThoughtPanelEntryView) -> bool {
+    thought_entry_needs_input(entry) || thought_entry_needs_attention(entry)
+}
+
 pub(crate) fn thought_panel_needs_input<C: TuiApi>(app: &App<C>) -> bool {
     if app.daemon_defaults_status.is_unavailable() {
         return true;
@@ -1012,7 +1026,7 @@ pub(crate) fn thought_panel_needs_input<C: TuiApi>(app: &App<C>) -> bool {
         return true;
     }
     let entries = build_thought_panel_entries(app);
-    entries.iter().any(thought_entry_needs_input)
+    entries.iter().any(thought_entry_visible_by_default)
         || thought_panel_entries_have_sendable_batch(&entries)
 }
 
@@ -1195,6 +1209,7 @@ pub(crate) fn build_thought_panel_entries<C: TuiApi>(app: &App<C>) -> Vec<Though
             cwd: entry.cwd.clone(),
             target_key: entry.target_key.clone(),
             target_label: entry.target_label.clone(),
+            readiness_key: entry.readiness_key.clone(),
             batch: entry.batch.clone(),
             state: entry.state,
             current_command: entry.current_command.clone(),
@@ -1229,6 +1244,7 @@ pub(crate) fn build_thought_panel_entries<C: TuiApi>(app: &App<C>) -> Vec<Though
             cwd: session_canonical_cwd_key(&entity.session),
             target_key: thought_filter_target_key(&entity.session),
             target_label: session_target_label(&entity.session),
+            readiness_key: thought_filter_readiness_key(&entity.session).to_string(),
             batch: entity.session.batch.clone(),
             state: entity.session.state,
             current_command: entity.session.current_command.clone(),
@@ -2044,7 +2060,7 @@ fn thought_panel_visible_entries(
 
     all_entries
         .iter()
-        .filter(|entry| thought_entry_needs_input(entry))
+        .filter(|entry| thought_entry_visible_by_default(entry))
         .cloned()
         .collect()
 }

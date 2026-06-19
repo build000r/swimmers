@@ -922,6 +922,20 @@ fn thought_panel_header_summarizes_cross_host_inbox() {
         thought_panel_header(&app),
         "clawgs / pwd / asleep · 0/2 asleep · > all · fleet 2 hosts / 1 project · inbox 1"
     );
+
+    let thought_content = layout
+        .thought_content
+        .expect("wide layout enables thought rail");
+    let panel = build_thought_panel(&app, thought_content, layout.thought_entry_capacity());
+    let rows = panel
+        .rows
+        .iter()
+        .map(|row| row.line.as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(rows.len(), 2);
+    assert!(rows[0].starts_with("[attn]"));
+    assert!(rows[0].contains("Skillbox devbox"));
+    assert_eq!(rows[1], "  remote needs review");
 }
 
 #[test]
