@@ -791,7 +791,9 @@ fn sanitize_vite_asset_path(route_path: &str) -> Option<PathBuf> {
     let route_path = route_path.trim_start_matches('/');
     if !route_path.starts_with("assets/")
         || route_path.ends_with(".map")
-        || route_path.contains('\\')
+        || route_path
+            .bytes()
+            .any(|byte| matches!(byte, b'\\' | b'?' | b'#'))
     {
         return None;
     }
