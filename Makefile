@@ -1,7 +1,7 @@
 SHELL := /bin/bash
 .DEFAULT_GOAL := help
 
-.PHONY: help server up tailnet kill up-smoke web web-smoke web-workbench-smoke tui tui-check tui-smoke tui-stress glance-smoke remote-auth-smoke multi-env-smoke multi-ssh-env-smoke release-acceptance release-acceptance-default release-acceptance-source release-acceptance-native release-acceptance-thought release-acceptance-voice release-acceptance-all ci-perf-gates cargo-cov-lcov
+.PHONY: help server up tailnet kill up-smoke web web-smoke web-workbench-smoke tui tui-check tui-smoke tui-stress glance-smoke remote-auth-smoke multi-env-smoke multi-ssh-env-smoke multi-ssh-env-live-dry-run release-acceptance release-acceptance-default release-acceptance-source release-acceptance-native release-acceptance-thought release-acceptance-voice release-acceptance-all ci-perf-gates cargo-cov-lcov
 
 help:
 	@printf '%s\n' \
@@ -23,6 +23,7 @@ help:
 	'  make remote-auth-smoke      Verify fake remote API launch/read auth and redaction paths' \
 	'  make multi-env-smoke        Verify configured local+remote cockpit fixture contracts' \
 	'  make multi-ssh-env-smoke    Verify v2 local+API+SSH-only fixture contracts' \
+	'  make multi-ssh-env-live-dry-run Print the opt-in live devbox proof plan' \
 	'  make release-acceptance     Verify default installed-binary release smoke' \
 	'  make release-acceptance-all Run default, source, native asset, and thought profiles' \
 	'  make release-acceptance-voice Run optional voice-feature acceptance profile' \
@@ -77,6 +78,9 @@ multi-env-smoke:
 
 multi-ssh-env-smoke:
 	bash ./scripts/test-multi-ssh-env-v2.sh
+
+multi-ssh-env-live-dry-run:
+	bash ./scripts/test-multi-ssh-env-live.sh --dry-run
 
 release-acceptance: release-acceptance-default
 
