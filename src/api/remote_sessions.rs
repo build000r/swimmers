@@ -95,18 +95,7 @@ pub fn namespace_session_id(target_id: &str, remote_session_id: &str) -> String 
 }
 
 fn namespace_response_session_id(target: &LaunchTargetSummary, session_id: &str) -> String {
-    if session_id_has_target_namespace(session_id, &target.id) {
-        session_id.to_string()
-    } else {
-        namespace_session_id(&target.id, session_id)
-    }
-}
-
-fn session_id_has_target_namespace(session_id: &str, target_id: &str) -> bool {
-    session_id
-        .strip_prefix(target_id)
-        .and_then(|suffix| suffix.strip_prefix(REMOTE_SESSION_SEPARATOR))
-        .is_some_and(|remote_session_id| !remote_session_id.is_empty())
+    namespace_session_id(&target.id, session_id)
 }
 
 pub fn encode_path_segment(segment: &str) -> String {
@@ -131,14 +120,11 @@ pub fn namespace_session_summary(
     target: &LaunchTargetSummary,
     mut session: SessionSummary,
 ) -> SessionSummary {
-    let remote_session_id = remote_session_id_for_target(&session.session_id, &target.id)
-        .unwrap_or_else(|| session.session_id.clone());
+    let remote_session_id = session.session_id.clone();
     let remote_cwd = session.cwd.clone();
     let local_cwd = map_remote_cwd_to_local(target, &remote_cwd);
     session.cwd = local_cwd.clone().unwrap_or_else(|| remote_cwd.clone());
-    if !session_id_has_target_namespace(&session.session_id, &target.id) {
-        session.session_id = namespace_session_id(&target.id, &session.session_id);
-    }
+    session.session_id = namespace_session_id(&target.id, &session.session_id);
     if !session.tmux_name.starts_with('[') {
         session.tmux_name = format!("[{}] {}", target.label, session.tmux_name);
     }
@@ -150,14 +136,6 @@ pub fn namespace_session_summary(
         "remote_swimmers_api",
     );
     session
-}
-
-fn remote_session_id_for_target(session_id: &str, target_id: &str) -> Option<String> {
-    session_id
-        .strip_prefix(target_id)
-        .and_then(|suffix| suffix.strip_prefix(REMOTE_SESSION_SEPARATOR))
-        .filter(|remote_session_id| !remote_session_id.is_empty())
-        .map(str::to_string)
 }
 
 pub fn environment_summaries(include_remote: bool) -> Vec<EnvironmentSummary> {

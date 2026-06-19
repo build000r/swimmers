@@ -745,14 +745,21 @@ fn namespace_session_summary_preserves_unmapped_remote_cwd_as_display_cwd() {
 }
 
 #[test]
-fn namespace_session_summary_preserves_current_target_namespace_only() {
+fn namespace_session_summary_namespaces_target_prefixed_remote_ids() {
     let target = target();
 
     let same_target = namespace_session_summary(&target, summary("jeremy-skillbox::sess_nested"));
-    assert_eq!(same_target.session_id, "jeremy-skillbox::sess_nested");
+    assert_eq!(
+        same_target.session_id,
+        "jeremy-skillbox::jeremy-skillbox::sess_nested"
+    );
+    assert_eq!(
+        split_remote_session_id(&same_target.session_id),
+        Some(("jeremy-skillbox", "jeremy-skillbox::sess_nested"))
+    );
     assert_eq!(
         same_target.environment.remote_session_id.as_deref(),
-        Some("sess_nested")
+        Some("jeremy-skillbox::sess_nested")
     );
 
     let other_target = namespace_session_summary(&target, summary("other-target::sess_nested"));
@@ -771,16 +778,19 @@ fn namespace_session_summary_preserves_current_target_namespace_only() {
 }
 
 #[test]
-fn namespace_session_summary_matches_full_target_id_with_separator() {
+fn namespace_session_summary_namespaces_full_target_id_with_separator() {
     let mut target = target();
     target.id = "zone::west".to_string();
     target.label = "West Zone".to_string();
 
     let same_target = namespace_session_summary(&target, summary("zone::west::sess_nested"));
-    assert_eq!(same_target.session_id, "zone::west::sess_nested");
+    assert_eq!(
+        same_target.session_id,
+        "zone::west::zone::west::sess_nested"
+    );
     assert_eq!(
         same_target.environment.remote_session_id.as_deref(),
-        Some("sess_nested")
+        Some("zone::west::sess_nested")
     );
 
     let other_target = namespace_session_summary(&target, summary("zone::east::sess_nested"));
@@ -791,6 +801,16 @@ fn namespace_session_summary_matches_full_target_id_with_separator() {
     assert_eq!(
         other_target.environment.remote_session_id.as_deref(),
         Some("zone::east::sess_nested")
+    );
+}
+
+#[test]
+fn namespace_response_session_id_preserves_target_prefixed_remote_id_as_payload() {
+    let target = target();
+
+    assert_eq!(
+        namespace_response_session_id(&target, "jeremy-skillbox::sess_nested"),
+        "jeremy-skillbox::jeremy-skillbox::sess_nested"
     );
 }
 
