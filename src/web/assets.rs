@@ -750,7 +750,32 @@ pub(super) async fn serve_vite_dist_asset(dist_dir: &Path, route_path: &str) -> 
             "The requested Vite asset is not available",
         );
     };
-    let path = dist_dir.join(&relative_path);
+    let path = match resolve_vite_dist_asset_path(dist_dir, &relative_path).await {
+        Ok(Some(path)) => path,
+        Ok(None) => {
+            tracing::debug!(
+                vite_path = %dist_dir.join(&relative_path).display(),
+                "requested Vite asset was not found"
+            );
+            return super::json_error(
+                StatusCode::NOT_FOUND,
+                "VITE_ASSET_NOT_FOUND",
+                "Vite asset was not found",
+            );
+        }
+        Err(err) => {
+            tracing::warn!(
+                vite_path = %dist_dir.join(&relative_path).display(),
+                error = %err,
+                "failed to resolve Vite asset"
+            );
+            return super::json_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "VITE_ASSET_READ_FAILED",
+                "failed to read Vite asset",
+            );
+        }
+    };
 
     match tokio::fs::read(&path).await {
         Ok(bytes) => (
@@ -784,6 +809,38 @@ pub(super) async fn serve_vite_dist_asset(dist_dir: &Path, route_path: &str) -> 
                 "failed to read Vite asset",
             )
         }
+    }
+}
+
+async fn resolve_vite_dist_asset_path(
+    dist_dir: &Path,
+    relative_path: &Path,
+) -> Result<Option<PathBuf>, std::io::Error> {
+    let dist_root = match tokio::fs::canonicalize(dist_dir).await {
+        Ok(path) => path,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(err) => return Err(err),
+    };
+    let assets_root = match tokio::fs::canonicalize(dist_dir.join("assets")).await {
+        Ok(path) => path,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(err) => return Err(err),
+    };
+    if !assets_root.starts_with(&dist_root)
+        || assets_root.file_name() != Some(std::ffi::OsStr::new("assets"))
+    {
+        return Ok(None);
+    }
+
+    let asset_path = match tokio::fs::canonicalize(dist_dir.join(relative_path)).await {
+        Ok(path) => path,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(err) => return Err(err),
+    };
+    if asset_path.starts_with(&assets_root) {
+        Ok(Some(asset_path))
+    } else {
+        Ok(None)
     }
 }
 

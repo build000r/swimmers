@@ -592,6 +592,30 @@ async fn vite_dist_asset_route_serves_built_js_css_and_chunks_with_cache_policy(
         .contains(dir.path().to_str().expect("temp path")));
 }
 
+#[cfg(unix)]
+#[tokio::test]
+async fn vite_dist_asset_route_rejects_symlink_escape_from_assets_dir() {
+    let dir = tempdir().expect("tempdir");
+    let assets_dir = dir.path().join("assets");
+    std::fs::create_dir_all(&assets_dir).expect("assets dir");
+    std::fs::write(dir.path().join("private.js"), "secret outside assets")
+        .expect("write private asset");
+    std::os::unix::fs::symlink(
+        dir.path().join("private.js"),
+        assets_dir.join("leak-12345678.js"),
+    )
+    .expect("asset symlink");
+
+    let response = serve_vite_dist_asset(dir.path(), "assets/leak-12345678.js").await;
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    let body = response_json(response).await;
+    assert_eq!(body["code"], "VITE_ASSET_NOT_FOUND");
+    assert!(!body["message"]
+        .as_str()
+        .expect("message")
+        .contains("secret outside assets"));
+}
+
 #[test]
 fn vite_manifest_tags_reject_backslash_asset_paths() {
     let manifest = serde_json::from_str::<std::collections::BTreeMap<String, ViteManifestEntry>>(
