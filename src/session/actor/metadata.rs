@@ -1,3 +1,5 @@
+use std::collections::BTreeSet;
+use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
 use chrono::Utc;
@@ -337,13 +339,111 @@ pub(super) fn find_osc_payload_end(text: &str) -> Option<(usize, usize)> {
 }
 
 pub(super) fn cwd_from_osc7_payload(payload: &str) -> Option<String> {
-    let path = payload.strip_prefix("file://")?;
-    let path = if let Some(slash_pos) = path.find('/') {
-        &path[slash_pos..]
-    } else {
-        path
+    cwd_from_osc7_payload_with_local_hosts(payload, local_osc7_host_aliases())
+}
+
+pub(super) fn cwd_from_osc7_payload_with_local_hosts(
+    payload: &str,
+    local_hosts: &BTreeSet<String>,
+) -> Option<String> {
+    let file_uri = parse_osc7_file_uri(payload)?;
+    let path = percent_decode(file_uri.path);
+    let Some(host) = file_uri.host else {
+        return Some(path);
     };
-    Some(percent_decode(path))
+
+    let normalized_host = normalize_osc7_host(host)?;
+    if osc7_host_is_local(&normalized_host, local_hosts) {
+        Some(path)
+    } else {
+        Some(format!("{normalized_host}:{path}"))
+    }
+}
+
+struct Osc7FileUri<'a> {
+    host: Option<&'a str>,
+    path: &'a str,
+}
+
+fn parse_osc7_file_uri(payload: &str) -> Option<Osc7FileUri<'_>> {
+    let body = payload.strip_prefix("file://")?;
+    if body.starts_with('/') {
+        return Some(Osc7FileUri {
+            host: None,
+            path: body,
+        });
+    }
+
+    let slash_pos = body.find('/')?;
+    let (host, path) = body.split_at(slash_pos);
+    (!path.is_empty()).then_some(Osc7FileUri {
+        host: Some(host),
+        path,
+    })
+}
+
+fn osc7_host_is_local(normalized_host: &str, local_hosts: &BTreeSet<String>) -> bool {
+    matches!(normalized_host, "localhost" | "127.0.0.1" | "::1")
+        || local_hosts.contains(normalized_host)
+}
+
+fn local_osc7_host_aliases() -> &'static BTreeSet<String> {
+    static LOCAL_HOST_ALIASES: OnceLock<BTreeSet<String>> = OnceLock::new();
+    LOCAL_HOST_ALIASES.get_or_init(compute_local_osc7_host_aliases)
+}
+
+fn compute_local_osc7_host_aliases() -> BTreeSet<String> {
+    let mut aliases = BTreeSet::new();
+    for key in ["HOSTNAME", "COMPUTERNAME"] {
+        if let Ok(value) = std::env::var(key) {
+            insert_osc7_host_aliases(&mut aliases, &value);
+        }
+    }
+    if let Some(hostname) = system_hostname() {
+        insert_osc7_host_aliases(&mut aliases, &hostname);
+    }
+    aliases
+}
+
+fn insert_osc7_host_aliases(aliases: &mut BTreeSet<String>, host: &str) {
+    let Some(normalized) = normalize_osc7_host(host) else {
+        return;
+    };
+    aliases.insert(normalized.clone());
+    if let Some(short) = normalized.split('.').next() {
+        if !short.is_empty() {
+            aliases.insert(short.to_string());
+        }
+    }
+}
+
+fn normalize_osc7_host(host: &str) -> Option<String> {
+    let host = host
+        .trim()
+        .trim_start_matches('[')
+        .trim_end_matches(']')
+        .trim_end_matches('.')
+        .to_ascii_lowercase();
+    (!host.is_empty()).then_some(host)
+}
+
+#[cfg(unix)]
+fn system_hostname() -> Option<String> {
+    let mut buffer = [0_u8; 256];
+    let rc = unsafe { libc::gethostname(buffer.as_mut_ptr().cast::<libc::c_char>(), buffer.len()) };
+    if rc != 0 {
+        return None;
+    }
+    let len = buffer
+        .iter()
+        .position(|byte| *byte == 0)
+        .unwrap_or(buffer.len());
+    String::from_utf8(buffer[..len].to_vec()).ok()
+}
+
+#[cfg(not(unix))]
+fn system_hostname() -> Option<String> {
+    None
 }
 
 /// Try to extract a cwd path from an OSC 0/2 window title.

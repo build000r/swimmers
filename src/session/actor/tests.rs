@@ -4,18 +4,18 @@ use super::process_tree::{
 use super::{build_tmux_spawn_command, build_tmux_spawn_command_args};
 use super::{
     capture_pane_tail_with_command, compare_session_state_change, cwd_from_osc7_payload,
-    cwd_update, deadline_sleep, deadline_sleep_after, extract_cwd_from_title, find_osc_payload_end,
-    initial_spawn_pty_size, normalize_submit_line_text, osc7_cwd_update_plan, osc_payloads,
-    pty_read_error_log, pty_read_step, query_tmux_session_created, resolve_tmux_colorterm,
-    resolve_tmux_term, resolve_tmux_terminal_env, run_bounded_tmux_command,
-    should_clear_startup_replay, should_refresh_cwd_from_tmux, should_refresh_tool_from_tmux,
-    state_detector_for_initial_tool, submit_line_fallback_input, subscriber_cap_rejection,
-    title_cwd_update, title_tool_update, tmux_input_chunks, tool_refresh_changes_tool,
-    validate_spawn_start_cwd, write_and_flush_input, write_input_counts_as_activity, ControlEvent,
-    DeadlineSleep, LivenessReconciliation, LivenessRefresh, OutputFrame, PaneLiveness,
-    PtyReadErrorLog, PtyReadLoopStep, SessionActor, SessionCommand, SubscribeOutcome,
-    TmuxInputChunk, TmuxSpawnMode, CWD_REFRESH_MIN_INTERVAL, MAX_OUTPUT_SUBSCRIBERS_PER_SESSION,
-    TOOL_REFRESH_MIN_INTERVAL,
+    cwd_from_osc7_payload_with_local_hosts, cwd_update, deadline_sleep, deadline_sleep_after,
+    extract_cwd_from_title, find_osc_payload_end, initial_spawn_pty_size,
+    normalize_submit_line_text, osc7_cwd_update_plan, osc_payloads, pty_read_error_log,
+    pty_read_step, query_tmux_session_created, resolve_tmux_colorterm, resolve_tmux_term,
+    resolve_tmux_terminal_env, run_bounded_tmux_command, should_clear_startup_replay,
+    should_refresh_cwd_from_tmux, should_refresh_tool_from_tmux, state_detector_for_initial_tool,
+    submit_line_fallback_input, subscriber_cap_rejection, title_cwd_update, title_tool_update,
+    tmux_input_chunks, tool_refresh_changes_tool, validate_spawn_start_cwd, write_and_flush_input,
+    write_input_counts_as_activity, ControlEvent, DeadlineSleep, LivenessReconciliation,
+    LivenessRefresh, OutputFrame, PaneLiveness, PtyReadErrorLog, PtyReadLoopStep, SessionActor,
+    SessionCommand, SubscribeOutcome, TmuxInputChunk, TmuxSpawnMode, CWD_REFRESH_MIN_INTERVAL,
+    MAX_OUTPUT_SUBSCRIBERS_PER_SESSION, TOOL_REFRESH_MIN_INTERVAL,
 };
 use crate::config::Config;
 use crate::scroll::guard::ScrollGuard;
@@ -23,7 +23,7 @@ use crate::session::replay_ring::ReplayRing;
 use crate::types::{SessionState, SessionStatePayload, StateEvidence, TransportHealth};
 use chrono::{TimeZone, Utc};
 use portable_pty::{native_pty_system, PtySize};
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::io::{self, Write};
 use std::os::unix::fs::PermissionsExt;
 use std::sync::{Arc, Mutex};
@@ -762,13 +762,13 @@ fn cwd_update_trims_rejects_empty_and_skips_unchanged_paths() {
 #[test]
 fn osc7_cwd_update_plan_preserves_payload_order_and_update_semantics() {
     let text = concat!(
-        "\x1b]7;file://host/tmp/project\x07",
-        "\x1b]7;file://host/tmp/one\x07",
-        "\x1b]7;http://host/tmp/ignored\x07",
+        "\x1b]7;file://localhost/tmp/project\x07",
+        "\x1b]7;file://localhost/tmp/one\x07",
+        "\x1b]7;http://localhost/tmp/ignored\x07",
         "\x1b]7;\x07",
-        "\x1b]7;file://host/tmp/one\x07",
-        "\x1b]7;file://host/tmp/two\x1b\\",
-        "\x1b]7;file://host/tmp/one\x07",
+        "\x1b]7;file://localhost/tmp/one\x07",
+        "\x1b]7;file://localhost/tmp/two\x1b\\",
+        "\x1b]7;file://localhost/tmp/one\x07",
     );
 
     assert_eq!(
@@ -787,11 +787,11 @@ fn apply_osc7_payloads_updates_cwd_and_emits_events_in_order() {
     let mut rx = actor.event_tx.subscribe();
 
     actor.apply_osc7_payloads(concat!(
-        "\x1b]7;file://host/tmp/project\x07",
-        "\x1b]7;file://host/tmp/one\x07",
+        "\x1b]7;file://localhost/tmp/project\x07",
+        "\x1b]7;file://localhost/tmp/one\x07",
         "\x1b]7;not-file-uri\x07",
-        "\x1b]7;file://host/tmp/one\x07",
-        "\x1b]7;file://host/tmp/two\x1b\\",
+        "\x1b]7;file://localhost/tmp/one\x07",
+        "\x1b]7;file://localhost/tmp/two\x1b\\",
     ));
 
     assert_eq!(actor.cwd, "/tmp/two");
@@ -1070,7 +1070,7 @@ fn extract_cwd_from_title_ignores_invalid_prefix_shapes() {
 
 #[test]
 fn osc_payload_helpers_extract_bel_and_st_terminated_sequences() {
-    let text = "\x1b]7;file://host/tmp/project\x1b\\ middle \x1b]2;codex\x07";
+    let text = "\x1b]7;file://localhost/tmp/project\x1b\\ middle \x1b]2;codex\x07";
     assert_eq!(find_osc_payload_end("title\x07tail"), Some((5, 1)));
     assert_eq!(find_osc_payload_end("title\x1b\\tail"), Some((5, 2)));
     assert_eq!(
@@ -1084,16 +1084,59 @@ fn osc_payload_helpers_extract_bel_and_st_terminated_sequences() {
     assert_eq!(find_osc_payload_end("unterminated title"), None);
     assert_eq!(
         osc_payloads(text, "\x1b]7;"),
-        vec!["file://host/tmp/project"]
+        vec!["file://localhost/tmp/project"]
     );
     assert_eq!(osc_payloads(text, "\x1b]2;"), vec!["codex"]);
     assert_eq!(
-        cwd_from_osc7_payload("file://host/tmp/My%20Repo"),
+        cwd_from_osc7_payload("file://localhost/tmp/My%20Repo"),
         Some("/tmp/My Repo".to_string())
     );
     assert_eq!(
-        cwd_from_osc7_payload("file://host/tmp/caf%C3%A9"),
+        cwd_from_osc7_payload("file://localhost/tmp/caf%C3%A9"),
         Some("/tmp/caf\u{e9}".to_string())
+    );
+}
+
+#[test]
+fn osc7_cwd_payload_preserves_non_local_host_identity() {
+    let local_hosts = BTreeSet::new();
+
+    assert_eq!(
+        cwd_from_osc7_payload_with_local_hosts(
+            "file://devbox.example.com/srv/repos/swimmers",
+            &local_hosts,
+        ),
+        Some("devbox.example.com:/srv/repos/swimmers".to_string())
+    );
+    assert_eq!(
+        cwd_from_osc7_payload_with_local_hosts("file://DevBox/srv/repos/swimmers", &local_hosts),
+        Some("devbox:/srv/repos/swimmers".to_string())
+    );
+    assert_eq!(
+        cwd_from_osc7_payload_with_local_hosts("file://devbox", &local_hosts),
+        None
+    );
+}
+
+#[test]
+fn osc7_cwd_payload_accepts_configured_local_host_aliases() {
+    let local_hosts = BTreeSet::from(["workstation".to_string(), "macbook.local".to_string()]);
+
+    assert_eq!(
+        cwd_from_osc7_payload_with_local_hosts("file://workstation/tmp/project", &local_hosts),
+        Some("/tmp/project".to_string())
+    );
+    assert_eq!(
+        cwd_from_osc7_payload_with_local_hosts("file://macbook.local/tmp/project", &local_hosts),
+        Some("/tmp/project".to_string())
+    );
+    assert_eq!(
+        cwd_from_osc7_payload_with_local_hosts("file:///tmp/project", &local_hosts),
+        Some("/tmp/project".to_string())
+    );
+    assert_eq!(
+        cwd_from_osc7_payload_with_local_hosts("file://remote/tmp/project", &local_hosts),
+        Some("remote:/tmp/project".to_string())
     );
 }
 

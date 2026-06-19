@@ -37,10 +37,11 @@ mod tmux_input;
 use self::activity::output_counts_as_meaningful_activity;
 #[cfg(test)]
 use self::metadata::{
-    cwd_from_osc7_payload, cwd_update, extract_cwd_from_title, find_osc_payload_end,
-    osc7_cwd_update_plan, osc_payloads, should_refresh_cwd_from_tmux,
-    should_refresh_tool_from_tmux, title_cwd_update, title_tool_update, tool_refresh_changes_tool,
-    CWD_REFRESH_MIN_INTERVAL, TOOL_REFRESH_MIN_INTERVAL,
+    cwd_from_osc7_payload, cwd_from_osc7_payload_with_local_hosts, cwd_update,
+    extract_cwd_from_title, find_osc_payload_end, osc7_cwd_update_plan, osc_payloads,
+    should_refresh_cwd_from_tmux, should_refresh_tool_from_tmux, title_cwd_update,
+    title_tool_update, tool_refresh_changes_tool, CWD_REFRESH_MIN_INTERVAL,
+    TOOL_REFRESH_MIN_INTERVAL,
 };
 use self::metadata::{query_tmux_display_message, state_detector_for_initial_tool};
 use self::process_tree::query_pane_liveness;
