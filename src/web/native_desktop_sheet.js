@@ -33,7 +33,10 @@ function sessionEnvironment(session) {
 }
 
 function environmentSummaryForSession(session, environments = []) {
-  const targetId = nonEmptyString(sessionEnvironment(session).target_id);
+  const targetId = nonEmptyString(
+    sessionEnvironment(session).target_id,
+    splitRemoteSessionId(session)?.targetId,
+  );
   if (!targetId || !Array.isArray(environments)) {
     return null;
   }
@@ -48,8 +51,34 @@ function backendModeLabel(value) {
   return text.replace(/[_-]+/g, " ");
 }
 
+function splitRemoteSessionId(session) {
+  const sessionId = nonEmptyString(session?.session_id);
+  const separatorIndex = sessionId.indexOf("::");
+  if (separatorIndex <= 0 || separatorIndex + 2 >= sessionId.length) {
+    return null;
+  }
+  return {
+    targetId: sessionId.slice(0, separatorIndex),
+    sessionId: sessionId.slice(separatorIndex + 2),
+  };
+}
+
+function handoffCwdLine(session, environment) {
+  const remoteCwd = nonEmptyString(environment.remote_cwd);
+  if (remoteCwd) {
+    return `remote cwd: ${remoteCwd}`;
+  }
+  const localCwd = nonEmptyString(environment.local_cwd);
+  if (localCwd) {
+    return `local mapped cwd: ${localCwd}`;
+  }
+  const cwd = nonEmptyString(environment.canonical_cwd, session?.cwd);
+  return cwd ? `cwd: ${cwd}` : "";
+}
+
 export function remoteNativeHandoffAvailable(session) {
-  return String(sessionEnvironment(session).scope || "local").toLowerCase() === "remote";
+  const scope = String(sessionEnvironment(session).scope || "local").trim().toLowerCase();
+  return scope === "remote" || Boolean(splitRemoteSessionId(session));
 }
 
 export function remoteNativeHandoffMessage(session, environments = []) {
@@ -57,29 +86,37 @@ export function remoteNativeHandoffMessage(session, environments = []) {
     return "";
   }
   const environment = sessionEnvironment(session);
+  const remoteSession = splitRemoteSessionId(session);
   const summary = environmentSummaryForSession(session, environments);
   const targetLabel = nonEmptyString(
     environment.display_host,
     environment.target_label,
+    summary?.label,
     environment.target_id,
+    remoteSession?.targetId,
     "remote target",
   );
-  const targetId = nonEmptyString(environment.target_id);
-  const mode = backendModeLabel(nonEmptyString(summary?.backend_mode, environment.launch_source, "remote"));
+  const targetId = nonEmptyString(environment.target_id, remoteSession?.targetId);
+  const mode = backendModeLabel(nonEmptyString(
+    summary?.backend_mode,
+    environment.launch_source,
+    "remote",
+  ));
   const remoteSessionId = nonEmptyString(
     environment.remote_session_id,
+    remoteSession?.sessionId,
     session?.session_id,
     session?.tmux_name,
     "selected session",
   );
-  const cwd = nonEmptyString(environment.remote_cwd, environment.canonical_cwd, session?.cwd);
+  const cwdLine = handoffCwdLine(session, environment);
   const targetSuffix = targetId && targetId !== targetLabel ? ` (${targetId})` : "";
   return [
     `Remote handoff: local native open cannot open this remote terminal.`,
     `Open Swimmers on ${targetLabel}${targetSuffix} to attach.`,
     `backend: ${mode}`,
     `remote session: ${remoteSessionId}`,
-    cwd ? `remote cwd: ${cwd}` : null,
+    cwdLine,
   ].filter(Boolean).join("\n");
 }
 

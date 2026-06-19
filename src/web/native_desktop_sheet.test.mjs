@@ -132,6 +132,61 @@ test("remote handoff copy uses non-secret session environment metadata", () => {
   );
 });
 
+test("remote handoff availability trims scope metadata", async () => {
+  const { calls, controller, state } = fixture({
+    environments: [{ id: "skillbox", backend_mode: "remote_swimmers_api" }],
+    session: {
+      session_id: "sess_7",
+      environment: {
+        scope: " remote ",
+        target_id: "skillbox",
+        target_label: "Skillbox devbox",
+        remote_session_id: "sess_7",
+        remote_cwd: "/srv/skillbox/repos/swimmers",
+      },
+    },
+  });
+
+  assert.equal(remoteNativeHandoffAvailable({
+    session_id: "sess_7",
+    environment: { scope: " remote " },
+  }), true);
+
+  await controller.openSelectedNativeSession();
+
+  assert.equal(calls.fetches.length, 0);
+  assert.match(state.nativeDesktop.error, /local native open cannot open this remote terminal/);
+  assert.match(state.nativeDesktop.error, /remote cwd: \/srv\/skillbox\/repos\/swimmers/);
+});
+
+test("remote handoff falls back to namespaced session id and avoids false remote cwd labels", () => {
+  const session = {
+    session_id: "skillbox::sess_7",
+    cwd: "/Users/b/repos/opensource/swimmers",
+    environment: {
+      local_cwd: "/Users/b/repos/opensource/swimmers",
+      canonical_cwd: "/Users/b/repos/opensource/swimmers",
+    },
+  };
+  const environments = [{
+    id: "skillbox",
+    label: "Skillbox devbox",
+    backend_mode: "remote_swimmers_api",
+  }];
+
+  assert.equal(remoteNativeHandoffAvailable(session), true);
+  assert.equal(
+    remoteNativeHandoffMessage(session, environments),
+    [
+      "Remote handoff: local native open cannot open this remote terminal.",
+      "Open Swimmers on Skillbox devbox (skillbox) to attach.",
+      "backend: remote Swimmers API",
+      "remote session: sess_7",
+      "local mapped cwd: /Users/b/repos/opensource/swimmers",
+    ].join("\n"),
+  );
+});
+
 test("renderNativeStatusForm writes status, form fields, copy, diagnostics, and availability", () => {
   const { calls, controller, el, state } = fixture();
 
