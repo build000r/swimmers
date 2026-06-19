@@ -1776,6 +1776,8 @@ pub struct ThoughtConfigBackendMetadata {
 pub struct ThoughtConfigResponse {
     #[serde(flatten)]
     pub config: ThoughtConfig,
+    #[serde(default)]
+    pub version: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub daemon_defaults: Option<DaemonDefaults>,
     #[serde(default, skip_serializing_if = "is_default_thought_config_ui")]

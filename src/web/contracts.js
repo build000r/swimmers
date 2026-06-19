@@ -25,6 +25,13 @@ function finiteNumber(value, fallback = 0) {
   return Number.isFinite(numeric) ? numeric : fallback;
 }
 
+function optionalFiniteNumber(value) {
+  if (value === null || value === undefined || value === "") {
+    return null;
+  }
+  return finiteNumber(value, null);
+}
+
 function booleanValue(value, fallback = false) {
   return typeof value === "boolean" ? value : fallback;
 }
@@ -711,13 +718,14 @@ export function normalizeThoughtConfigResponse(value) {
       config: normalizeThoughtConfig(nestedConfig),
       daemon_defaults: normalizeDaemonDefaults(payload.daemon_defaults),
       ui: normalizeThoughtConfigUiMetadata(payload.ui),
+      version: optionalFiniteNumber(payload.version),
     };
   }
   return {
     ...normalizeThoughtConfig(payload),
     daemon_defaults: normalizeDaemonDefaults(payload.daemon_defaults),
     ui: normalizeThoughtConfigUiMetadata(payload.ui),
-    version: finiteNumber(payload.version),
+    version: optionalFiniteNumber(payload.version),
   };
 }
 

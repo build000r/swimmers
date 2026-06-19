@@ -60,6 +60,7 @@ function fixture(overrides = {}) {
       loading: false,
       config: null,
       ui: null,
+      version: null,
       result: "",
       error: "",
     },
@@ -139,6 +140,7 @@ test("applyToForm normalizes config, renders presets, daemon defaults, and actio
   controller.applyToForm({
     config: { enabled: false, backend: "claude-cli", model: " grok-fast " },
     daemon_defaults: { backend: "codex", model: "daemon-model" },
+    version: "4",
   });
 
   assert.deepEqual(state.thoughtConfig.config, {
@@ -153,6 +155,7 @@ test("applyToForm normalizes config, renders presets, daemon defaults, and actio
   assert.equal(el.thoughtConfigDaemon.textContent, "daemon default: grok / daemon-model");
   assert.equal(el.thoughtConfigHint.textContent, "uses Grok CLI default unless a model is set");
   assert.deepEqual(el.thoughtConfigModelPresets.children.map((option) => option.value), [""]);
+  assert.equal(state.thoughtConfig.version, 4);
   assert.equal(calls.sync, 1);
 });
 
@@ -184,6 +187,7 @@ test("refresh loads config endpoint, clears loading, and updates result text", a
   const { calls, controller, el, state } = fixture({
     responses: [{
       config: { enabled: true, backend: "openrouter", model: "openrouter/free" },
+      version: "12",
     }],
   });
 
@@ -191,6 +195,7 @@ test("refresh loads config endpoint, clears loading, and updates result text", a
 
   assert.equal(calls.fetches[0][0], "/v1/thought-config");
   assert.equal(state.thoughtConfig.loading, false);
+  assert.equal(state.thoughtConfig.version, 12);
   assert.equal(state.thoughtConfig.result, "Thought config loaded.");
   assert.equal(el.thoughtConfigResult.textContent, "Thought config loaded.");
   assert.equal(el.thoughtConfigResult.classList.contains("error"), false);
@@ -221,8 +226,9 @@ test("test posts draft config and reports probe result details", async () => {
 });
 
 test("save puts draft config, refreshes sessions, and preserves save result state", async () => {
-  const { calls, controller, el, state } = fixture({ responses: [{}] });
+  const { calls, controller, el, state } = fixture({ responses: [{ version: 6 }] });
   state.thoughtConfig.config = { enabled: true, backend: "grok", model: "old" };
+  state.thoughtConfig.version = 5;
   el.thoughtConfigEnabled.checked = false;
   el.thoughtConfigBackend.value = "grok";
   el.thoughtConfigModel.value = "grok-fast";
@@ -231,6 +237,8 @@ test("save puts draft config, refreshes sessions, and preserves save result stat
 
   assert.equal(calls.fetches[0][0], "/v1/thought-config");
   assert.equal(calls.fetches[0][1].method, "PUT");
+  assert.equal(calls.fetches[0][1].headers["Content-Type"], "application/json");
+  assert.equal(calls.fetches[0][1].headers["If-Match"], "\"5\"");
   assert.deepEqual(JSON.parse(calls.fetches[0][1].body), {
     enabled: false,
     backend: "grok",
@@ -241,9 +249,24 @@ test("save puts draft config, refreshes sessions, and preserves save result stat
     backend: "grok",
     model: "grok-fast",
   });
+  assert.equal(state.thoughtConfig.version, 6);
   assert.equal(state.thoughtConfig.result, "Thought config saved.");
   assert.equal(calls.refreshSessions, 1);
   assert.equal(state.thoughtConfig.loading, false);
+});
+
+test("save omits If-Match when no version is known", async () => {
+  const { calls, controller, el, state } = fixture({ responses: [{ version: 1 }] });
+  state.thoughtConfig.config = { enabled: true, backend: "grok", model: "old" };
+  state.thoughtConfig.version = null;
+  el.thoughtConfigEnabled.checked = true;
+  el.thoughtConfigBackend.value = "grok";
+  el.thoughtConfigModel.value = "grok-fast";
+
+  await controller.save();
+
+  assert.equal(calls.fetches[0][1].headers["If-Match"], undefined);
+  assert.equal(state.thoughtConfig.version, 1);
 });
 
 test("load and save errors set result error class without refreshing sessions", async () => {
@@ -258,6 +281,21 @@ test("load and save errors set result error class without refreshing sessions", 
   save.el.thoughtConfigBackend.value = "grok";
   await save.controller.save();
   assert.equal(save.state.thoughtConfig.error, "Thought config save failed: denied");
+  assert.equal(save.calls.refreshSessions, 0);
+  assert.equal(save.el.thoughtConfigResult.classList.contains("error"), true);
+});
+
+test("stale save reports the conflict and keeps the prior version", async () => {
+  const save = fixture({ responses: [new Error("VERSION_CONFLICT")] });
+  save.state.thoughtConfig.config = { enabled: true, backend: "grok", model: "" };
+  save.state.thoughtConfig.version = 9;
+  save.el.thoughtConfigBackend.value = "grok";
+
+  await save.controller.save();
+
+  assert.equal(save.calls.fetches[0][1].headers["If-Match"], "\"9\"");
+  assert.equal(save.state.thoughtConfig.version, 9);
+  assert.equal(save.state.thoughtConfig.error, "Thought config save failed: VERSION_CONFLICT");
   assert.equal(save.calls.refreshSessions, 0);
   assert.equal(save.el.thoughtConfigResult.classList.contains("error"), true);
 });

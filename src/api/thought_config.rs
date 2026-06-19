@@ -1,4 +1,4 @@
-use std::sync::atomic::AtomicU64;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use axum::extract::State;
@@ -29,7 +29,9 @@ async fn get_thought_config(
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<ThoughtConfigResponse>, Response> {
     auth.require_scope(AuthScope::SessionsRead)?;
-    Ok(Json(thought_config_response(&state).await))
+    let mut response = thought_config_response(&state).await;
+    response.version = current_thought_config_version();
+    Ok(Json(response))
 }
 
 async fn get_thought_sync_preview(
@@ -115,6 +117,10 @@ fn reserve_thought_config_version(
         .ok_or_else(|| api_error(&VERSION_CONFLICT))
 }
 
+fn current_thought_config_version() -> u64 {
+    THOUGHT_CONFIG_VERSION.load(Ordering::Acquire)
+}
+
 fn success_thought_config_response(config: &ThoughtConfig, version: u64) -> Response {
     let mut body = thought_config_response_body(config);
     insert_thought_config_version(&mut body, version);
@@ -178,7 +184,6 @@ mod tests {
     use axum::response::IntoResponse;
     use chrono::Utc;
     use serde_json::Value;
-    use std::sync::atomic::Ordering;
     use std::sync::LazyLock;
     use tokio::sync::mpsc;
     use tokio::sync::Mutex;
@@ -474,6 +479,23 @@ mod tests {
         )
         .await
         .into_response()
+    }
+
+    #[tokio::test]
+    async fn get_thought_config_includes_current_version() {
+        let _guard = VERSION_TEST_LOCK.lock().await;
+        THOUGHT_CONFIG_VERSION.store(7, Ordering::Release);
+        let state = test_state(None);
+
+        let response = get_thought_config(
+            Extension(AuthInfo::new(OBSERVER_SCOPES.to_vec())),
+            State(state),
+        )
+        .await
+        .expect("read-scope client should fetch thought config");
+
+        assert_eq!(response.0.version, 7);
+        THOUGHT_CONFIG_VERSION.store(0, Ordering::Release);
     }
 
     #[tokio::test]

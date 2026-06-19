@@ -455,6 +455,7 @@ impl TuiApi for MockApi {
                     Ok(ThoughtConfigResponse {
                         config: ThoughtConfig::default(),
                         daemon_defaults: None,
+                        version: 0,
                         ui: swimmers::types::ThoughtConfigUiMetadata::default(),
                     })
                 })

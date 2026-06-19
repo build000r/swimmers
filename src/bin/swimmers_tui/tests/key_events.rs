@@ -319,6 +319,7 @@ fn handle_key_event_opens_thought_config_editor() {
             agent_prompt: "agent".to_string(),
             terminal_prompt: "terminal".to_string(),
         }),
+        version: 0,
         ui: swimmers::types::ThoughtConfigUiMetadata::default(),
     }));
     let layout = test_layout(120, 32);
@@ -446,6 +447,7 @@ fn thought_config_editor_updates_backend_and_model_then_saves() {
             agent_prompt: "agent".to_string(),
             terminal_prompt: "terminal".to_string(),
         }),
+        version: 0,
         ui: swimmers::types::ThoughtConfigUiMetadata::default(),
     }));
     api.push_update_thought_config(Ok(ThoughtConfig {

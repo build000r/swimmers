@@ -217,6 +217,7 @@ pub async fn thought_config_response(state: &Arc<AppState>) -> ThoughtConfigResp
     let config = state.thought_config.read().await.clone();
     ThoughtConfigResponse {
         config,
+        version: 0,
         daemon_defaults: state.current_daemon_defaults(),
         ui: thought_config_ui_metadata(&cached_or_default_openrouter_candidates()),
     }

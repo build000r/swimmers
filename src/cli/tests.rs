@@ -973,6 +973,7 @@ fn write_executable_script(dir: &std::path::Path, name: &str, body: &str) -> Pat
         let mut file = std::fs::File::create(&tmp).expect("create script");
         file.write_all(body.as_bytes()).expect("write script");
         file.flush().expect("flush script");
+        file.sync_all().expect("sync script");
     }
     let mut perms = std::fs::metadata(&tmp).expect("metadata").permissions();
     perms.set_mode(0o755);

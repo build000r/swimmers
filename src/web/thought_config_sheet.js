@@ -66,6 +66,30 @@ export function selectedThoughtBackendMetadata(thoughtConfig = {}, backendValue 
   return backends.find((entry) => normalizeBackendKey(entry.key) === backend) ?? backends[0] ?? null;
 }
 
+function objectRecord(value) {
+  return value && typeof value === "object" && !Array.isArray(value) ? value : null;
+}
+
+function knownThoughtConfigVersion(value) {
+  if (value === null || value === undefined || value === "") {
+    return null;
+  }
+  const version = Number(value);
+  return Number.isSafeInteger(version) && version >= 0 ? version : null;
+}
+
+function responseConfigPayload(payload) {
+  const record = objectRecord(payload);
+  if (!record) {
+    return null;
+  }
+  if (objectRecord(record.config)) {
+    return record.config;
+  }
+  const { daemon_defaults: _daemonDefaults, ui: _ui, version: _version, ...config } = record;
+  return config;
+}
+
 export function createThoughtConfigSheetController(runtime = {}) {
   const {
     state,
@@ -112,7 +136,7 @@ export function createThoughtConfigSheetController(runtime = {}) {
   }
 
   function applyToForm(payload) {
-    const rawConfig = payload?.config || payload || null;
+    const rawConfig = responseConfigPayload(payload);
     const daemonDefaults = payload?.daemon_defaults ?? null;
     const ui = payload?.ui ?? null;
     const backend = normalizeBackendKey(rawConfig?.backend || "");
@@ -126,6 +150,7 @@ export function createThoughtConfigSheetController(runtime = {}) {
 
     state.thoughtConfig.config = config;
     state.thoughtConfig.ui = ui;
+    state.thoughtConfig.version = knownThoughtConfigVersion(payload?.version);
     el.thoughtConfigEnabled.checked = Boolean(config?.enabled ?? true);
     el.thoughtConfigBackend.value = String(config?.backend || "");
     el.thoughtConfigModel.value = String(config?.model || "");
@@ -207,13 +232,19 @@ export function createThoughtConfigSheetController(runtime = {}) {
     state.thoughtConfig.loading = true;
     setResult("Saving thought config...");
     try {
+      const headers = { "Content-Type": "application/json" };
+      const version = knownThoughtConfigVersion(state.thoughtConfig.version);
+      if (version !== null) {
+        headers["If-Match"] = `"${version}"`;
+      }
       const response = await apiFetch("/v1/thought-config", {
         method: "PUT",
-        headers: { "Content-Type": "application/json" },
+        headers,
         body: JSON.stringify(nextDraft),
       });
-      await response.json();
+      const payload = await responseJson(response, normalizeThoughtConfigResponse);
       state.thoughtConfig.config = nextDraft;
+      state.thoughtConfig.version = knownThoughtConfigVersion(payload?.version);
       renderOptions();
       setResult("Thought config saved.");
       await refreshSessions();

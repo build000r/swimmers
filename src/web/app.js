@@ -267,6 +267,7 @@ const state = {
     loading: false,
     config: null,
     ui: null,
+    version: null,
     result: "",
     error: "",
   },
