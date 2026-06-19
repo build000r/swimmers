@@ -323,6 +323,38 @@ async fn spawn_delayed_create_api_server(
     (format!("http://{addr}"), handle)
 }
 
+async fn spawn_capturing_create_api_server() -> (
+    String,
+    tokio::task::JoinHandle<()>,
+    Arc<Mutex<Option<CreateSessionRequest>>>,
+) {
+    use axum::routing::post;
+    use axum::{Json, Router};
+
+    let captured_request = Arc::new(Mutex::new(None));
+    let route_captured_request = Arc::clone(&captured_request);
+    let app = Router::new().route(
+        "/v1/sessions",
+        post(move |Json(body): Json<CreateSessionRequest>| {
+            let captured_request = Arc::clone(&route_captured_request);
+            async move {
+                *captured_request.lock().expect("captured request lock") = Some(body);
+                Json(create_response("sess-1", "7", TEST_REPO_SWIMMERS))
+            }
+        }),
+    );
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind test server");
+    let addr = listener.local_addr().expect("server addr");
+    let handle = tokio::spawn(async move {
+        axum::serve(listener, app).await.expect("serve test api");
+    });
+
+    (format!("http://{addr}"), handle, captured_request)
+}
+
 async fn spawn_delayed_dirs_api_server(
     list_delay: Duration,
 ) -> (String, tokio::task::JoinHandle<()>) {
@@ -378,6 +410,36 @@ async fn api_client_create_session_allows_slower_session_creation_responses() {
     let session = response.session.as_ref().expect("created session");
     assert_eq!(session.session_id, "sess-1");
     assert_eq!(session.tmux_name, "7");
+}
+
+#[tokio::test]
+async fn api_client_create_session_sends_launch_target_and_initial_request() {
+    let (base_url, handle, captured_request) = spawn_capturing_create_api_server().await;
+    let client = test_api_client(base_url, None);
+
+    client
+        .create_session(
+            TEST_REPO_SWIMMERS,
+            SpawnTool::Grok,
+            Some("jeremy-skillbox".to_string()),
+            Some("move this off laptop".to_string()),
+        )
+        .await
+        .expect("create session should preserve remote launch metadata");
+
+    handle.abort();
+    let request = captured_request
+        .lock()
+        .expect("captured request lock")
+        .take()
+        .expect("captured create-session request");
+    assert_eq!(request.cwd.as_deref(), Some(TEST_REPO_SWIMMERS));
+    assert_eq!(request.spawn_tool, Some(SpawnTool::Grok));
+    assert_eq!(request.launch_target.as_deref(), Some("jeremy-skillbox"));
+    assert_eq!(
+        request.initial_request.as_deref(),
+        Some("move this off laptop")
+    );
 }
 
 #[tokio::test]
