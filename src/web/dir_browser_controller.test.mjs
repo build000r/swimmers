@@ -187,6 +187,38 @@ test("directory browser controller scopes listings to the selected remote target
   );
 });
 
+test("directory browser controller keeps local launch override for remote-only listings", () => {
+  const previousDocument = globalThis.document;
+  globalThis.document = {
+    createElement(tagName) {
+      return { tagName, value: "", textContent: "" };
+    },
+  };
+  try {
+    const { runtime, state, el } = createRuntime({
+      renderDirBrowserView() {
+        return true;
+      },
+    });
+    el.createLaunchTarget = selectElement("local");
+
+    const controller = createDirBrowserController(runtime);
+    controller.renderDirEntries({
+      path: "/workspace",
+      entries: [],
+      launch_targets: [devboxTarget()],
+      default_launch_target: "devbox",
+    });
+
+    assert.deepEqual(state.dirBrowser.launchTargets.map((target) => target.id), ["local", "devbox"]);
+    assert.deepEqual(el.createLaunchTarget.children.map((option) => option.value), ["local", "devbox"]);
+    assert.equal(state.dirBrowser.launchTarget, "devbox");
+    assert.equal(el.createLaunchTarget.value, "devbox");
+  } finally {
+    globalThis.document = previousDocument;
+  }
+});
+
 test("directory browser controller resets stale remote target for cockpit cwd launch", () => {
   const opened = [];
   const { runtime, state, el, syncCount } = createRuntime({

@@ -227,11 +227,21 @@ export function launchTargetPayload(el, dirBrowser) {
   return target && target !== "local" ? target : null;
 }
 
+function localLaunchTarget() {
+  return { id: "local", label: "Local machine", kind: "local", path_mappings: [] };
+}
+
+export function normalizeLaunchTargets(targets) {
+  const normalized = Array.isArray(targets) ? targets.filter(Boolean) : [];
+  const hasLocal = normalized.some((target) => String(target?.id || "") === "local");
+  return hasLocal ? normalized : [localLaunchTarget(), ...normalized];
+}
+
 export function launchTargetById(dirBrowser, targetId) {
   const normalizedId = String(targetId || "local").trim() || "local";
   const targets = Array.isArray(dirBrowser?.launchTargets) ? dirBrowser.launchTargets : [];
   return targets.find((target) => String(target?.id || "") === normalizedId)
-    || (normalizedId === "local" ? { id: "local", label: "Local machine", kind: "local", path_mappings: [] } : null);
+    || (normalizedId === "local" ? localLaunchTarget() : null);
 }
 
 export function selectedLaunchTargetSummary(el, dirBrowser) {
@@ -343,9 +353,7 @@ function renderLaunchTargetOptions(response, { el, dirBrowser, preferredLaunchTa
   if (!el.createLaunchTarget) {
     return;
   }
-  const targets = Array.isArray(response?.launch_targets) && response.launch_targets.length
-    ? response.launch_targets
-    : [{ id: "local", label: "Local machine", kind: "local" }];
+  const targets = normalizeLaunchTargets(response?.launch_targets);
   const preferredTarget = String(preferredLaunchTarget || "").trim();
   const defaultTarget = String(preferredTarget || response?.default_launch_target || dirBrowser.launchTarget || "local").trim() || "local";
   const hasDefault = targets.some((target) => String(target?.id || "") === defaultTarget);

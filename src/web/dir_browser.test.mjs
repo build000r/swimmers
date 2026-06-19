@@ -19,6 +19,7 @@ import {
   launchTargetStatusTextForPreview,
   launchTargetPreviewText,
   mapPathWithLaunchTarget,
+  normalizeLaunchTargets,
   renderCreateBatchBar,
   selectedLaunchTarget,
   selectedLaunchTargetSummary,
@@ -288,6 +289,22 @@ test("dirRowClickPlan preserves row path trimming, child detection, and ignores"
     path: "/srv/repos/a",
     hasChildren: false,
   });
+});
+
+test("normalizeLaunchTargets keeps local override available", () => {
+  const devbox = { id: "devbox", label: "Devbox", kind: "swimmers_api", path_mappings: [] };
+
+  assert.deepEqual(normalizeLaunchTargets([]), [{
+    id: "local",
+    label: "Local machine",
+    kind: "local",
+    path_mappings: [],
+  }]);
+  assert.deepEqual(normalizeLaunchTargets([devbox]).map((target) => target.id), ["local", "devbox"]);
+  assert.deepEqual(
+    normalizeLaunchTargets([devbox, { id: "local", label: "Local machine", kind: "local" }]).map((target) => target.id),
+    ["devbox", "local"],
+  );
 });
 
 test("launch target and batch bar helpers preserve payload and label semantics", () => {
