@@ -15,7 +15,7 @@ export function canonicalCwd(session) {
 
 export function sessionHostLabel(session) {
   const environment = session?.environment || {};
-  if (String(environment.scope || "local").toLowerCase() !== "remote") {
+  if (String(environment.scope || "local").trim().toLowerCase() !== "remote") {
     return "";
   }
   return firstNonEmpty(
@@ -62,7 +62,7 @@ export function sessionReadiness(session) {
 
 function sessionTarget(session) {
   const environment = session?.environment || {};
-  if (String(environment.scope || "local").toLowerCase() !== "remote") {
+  if (String(environment.scope || "local").trim().toLowerCase() !== "remote") {
     return { key: "local", label: "local" };
   }
   const key = firstNonEmpty(
@@ -425,7 +425,7 @@ export function surfaceSession(session, {
 } = {}) {
   const target = sessionTarget(session);
   const environment = session?.environment || {};
-  const remoteEnvironment = String(environment.scope || "local").toLowerCase() === "remote";
+  const remoteEnvironment = String(environment.scope || "local").trim().toLowerCase() === "remote";
   const launchCwd = remoteEnvironment ? String(environment.local_cwd || "") : String(session?.cwd || "");
   const launchTarget = remoteEnvironment && launchCwd ? String(environment.target_id || "") : "";
   const readiness = sessionReadiness(session);

@@ -204,7 +204,7 @@ test("normalizeSessionListResponse keeps partial remote identity remote", () => 
       state: "idle",
       cwd: "/srv/skillbox/repos/swimmers",
       environment: {
-        scope: "remote",
+        scope: " remote ",
         display_host: "Skillbox devbox",
       },
     }],

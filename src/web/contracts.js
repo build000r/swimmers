@@ -166,8 +166,8 @@ export function normalizeSessionSummary(value) {
 
 export function normalizeSessionEnvironmentSummary(value) {
   const environment = objectRecord(value) || {};
-  const scope = stringValue(environment.scope, "local");
-  const remote = scope.trim().toLowerCase() === "remote";
+  const scope = stringValue(environment.scope, "local").trim() || "local";
+  const remote = scope.toLowerCase() === "remote";
   return {
     scope,
     target_id: stringValue(environment.target_id, remote ? "" : "local"),

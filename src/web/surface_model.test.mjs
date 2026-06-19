@@ -137,7 +137,7 @@ test("surfaceSession separates raw cwd from mapped canonical cwd and host label"
   const session = surfaceSession(rawSession({
     cwd: "/srv/skillbox/repos/swimmers",
     environment: {
-      scope: "remote",
+      scope: " remote ",
       target_id: "skillbox",
       target_label: "Skillbox devbox",
       target_kind: "swimmers_api",
