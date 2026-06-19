@@ -135,6 +135,7 @@ pub fn namespace_session_summary(
         .unwrap_or_else(|| session.session_id.clone());
     let remote_cwd = session.cwd.clone();
     let local_cwd = map_remote_cwd_to_local(target, &remote_cwd);
+    session.cwd = local_cwd.clone().unwrap_or_else(|| remote_cwd.clone());
     if !session_id_has_target_namespace(&session.session_id, &target.id) {
         session.session_id = namespace_session_id(&target.id, &session.session_id);
     }

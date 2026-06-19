@@ -682,6 +682,7 @@ fn namespaces_remote_session_summary() {
         session.session_id,
         namespace_session_id("jeremy-skillbox", "sess_0")
     );
+    assert_eq!(session.cwd, "/workspace/repos/opensource/swimmers");
     assert_eq!(session.tmux_name, "[Jeremy Skillbox] 7");
     assert_eq!(
         session.environment.scope,
@@ -704,6 +705,26 @@ fn namespaces_remote_session_summary() {
     assert_eq!(
         session.environment.canonical_cwd.as_deref(),
         Some("/workspace/repos/opensource/swimmers")
+    );
+}
+
+#[test]
+fn namespace_session_summary_preserves_unmapped_remote_cwd_as_display_cwd() {
+    let target = target();
+    let mut remote_only = summary("sess_remote_only");
+    remote_only.cwd = "/srv/remote-only/project".to_string();
+
+    let session = namespace_session_summary(&target, remote_only);
+
+    assert_eq!(session.cwd, "/srv/remote-only/project");
+    assert_eq!(
+        session.environment.remote_cwd.as_deref(),
+        Some("/srv/remote-only/project")
+    );
+    assert_eq!(session.environment.local_cwd, None);
+    assert_eq!(
+        session.environment.canonical_cwd.as_deref(),
+        Some("/srv/remote-only/project")
     );
 }
 
