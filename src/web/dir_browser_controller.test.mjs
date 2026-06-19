@@ -338,6 +338,58 @@ test("directory browser controller reloads inventory when launch target changes"
   }
 });
 
+test("directory browser controller preserves batch selection when launch target changes", async () => {
+  const previousDocument = globalThis.document;
+  globalThis.document = {
+    createElement(tagName) {
+      return { tagName, value: "", textContent: "" };
+    },
+  };
+  try {
+    const calls = [];
+    const { runtime, state, el } = createRuntime({
+      apiFetch: async (url) => {
+        calls.push(url);
+        return {};
+      },
+      responseJson: async (_response, normalize) => normalize({
+        path: "/workspace",
+        entries: [
+          { name: "swimmers", full_path: "/workspace/swimmers" },
+          { name: "docs", full_path: "/workspace/docs" },
+        ],
+        launch_targets: [{ id: "local", label: "Local machine", kind: "local" }, devboxTarget()],
+        default_launch_target: "devbox",
+      }),
+      location: new URL("http://swimmers.test/"),
+      renderDirBrowserView() {
+        return true;
+      },
+    });
+    state.dirBrowser.path = "/workspace";
+    state.dirBrowser.entries = [
+      { name: "swimmers", full_path: "/workspace/swimmers" },
+      { name: "docs", full_path: "/workspace/docs" },
+    ];
+    state.dirBrowser.batchSelected = new Set(["/workspace/swimmers", "/workspace/docs"]);
+    state.dirBrowser.launchTargets = [{ id: "local", label: "Local machine", kind: "local" }, devboxTarget()];
+    state.dirBrowser.launchTarget = "local";
+    el.dirsPath.value = "/workspace";
+    el.createLaunchTarget = selectElement("devbox");
+
+    const controller = createDirBrowserController(runtime);
+    await controller.handleCreateLaunchTargetChange();
+
+    assert.equal(state.dirBrowser.launchTarget, "devbox");
+    assert.deepEqual(controller.selectedBatchDirs(), ["/workspace/swimmers", "/workspace/docs"]);
+    assert.deepEqual(state.dirBrowser.batchLaunchBlockers, []);
+    assert.equal(calls.length, 1);
+    assert.equal(calls[0], "/v1/dirs?path=%2Fworkspace&managed_only=false&target=devbox");
+  } finally {
+    globalThis.document = previousDocument;
+  }
+});
+
 test("directory browser controller preserves explicit local target during reload", async () => {
   const previousDocument = globalThis.document;
   globalThis.document = {

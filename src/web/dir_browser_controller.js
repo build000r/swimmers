@@ -458,7 +458,6 @@ export function createDirBrowserController(runtime) {
     const previousTarget = state.dirBrowser.launchTarget || "local";
     const nextTarget = selectedLaunchTarget();
     state.dirBrowser.launchTarget = nextTarget;
-    clearCreateBatchSelection();
     renderCreateBatchBar();
     batchLaunchBlockersForPaths(selectedBatchDirs());
     syncCreateLaunchTargetStatus();
