@@ -834,6 +834,42 @@ fn remote_targets_health_snapshot_characterizes_mixed_fleets() {
 }
 
 #[test]
+fn remote_targets_health_snapshot_keeps_first_error_on_equal_timestamps() {
+    let _guard = shared_remote_cache_test_guard();
+    reset_remote_target_session_cache_for_tests();
+
+    let mut first = target();
+    first.id = "first-degraded".to_string();
+    first.label = "First Degraded".to_string();
+    let mut second = target();
+    second.id = "second-degraded".to_string();
+    second.label = "Second Degraded".to_string();
+
+    record_remote_poll_success(&first.id, &[summary("sess_first")]);
+    record_remote_poll_success(&second.id, &[summary("sess_second")]);
+    record_remote_poll_failure(&first.id, "FIRST_FAILURE");
+    record_remote_poll_failure(&second.id, "SECOND_FAILURE");
+
+    let error_at = Utc::now();
+    with_remote_target_session_cache(|cache| {
+        let first_entry = cache.get_mut(&first.id).expect("first cache entry");
+        first_entry.last_error_at = Some(error_at);
+        first_entry.last_error = Some("FIRST_FAILURE".to_string());
+        let second_entry = cache.get_mut(&second.id).expect("second cache entry");
+        second_entry.last_error_at = Some(error_at);
+        second_entry.last_error = Some("SECOND_FAILURE".to_string());
+    });
+
+    let health = remote_targets_health_snapshot_for_targets(
+        vec![first, second],
+        &remote_health_test_config(),
+    );
+    assert_eq!(health.status, DependencyHealthStatus::Degraded);
+    assert_eq!(health.last_error.as_deref(), Some("FIRST_FAILURE"));
+    assert_eq!(health.last_error_at, Some(error_at));
+}
+
+#[test]
 fn remote_targets_health_keeps_cached_failure_degraded_after_backoff_expires() {
     let _guard = shared_remote_cache_test_guard();
     reset_remote_target_session_cache_for_tests();

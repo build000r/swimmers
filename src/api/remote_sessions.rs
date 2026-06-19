@@ -365,112 +365,152 @@ fn remote_targets_health_snapshot_for_targets(
             );
     }
 
-    let mut healthy = 0usize;
-    let mut degraded = 0usize;
-    let mut unavailable = 0usize;
-    let mut unknown = 0usize;
-    let mut auth_present = 0usize;
-    let mut auth_missing = 0usize;
-    let mut mappings_total = 0usize;
-    let mut missing_mappings = 0usize;
-    let mut missing_base_url = 0usize;
-    let mut last_seen_at: Option<DateTime<Utc>> = None;
-    let mut last_error_at: Option<DateTime<Utc>> = None;
-    let mut last_error: Option<String> = None;
-
+    let mut rollup = RemoteTargetHealthRollup::default();
     for target in &targets {
-        mappings_total += target.path_mappings.len();
+        rollup.observe_target(target);
+    }
+    rollup.into_snapshot(now, targets.len(), skipped_current_server_targets)
+}
+
+#[derive(Default)]
+struct RemoteTargetHealthRollup {
+    healthy: usize,
+    degraded: usize,
+    unavailable: usize,
+    unknown: usize,
+    auth_present: usize,
+    auth_missing: usize,
+    mappings_total: usize,
+    missing_mappings: usize,
+    missing_base_url: usize,
+    last_seen_at: Option<DateTime<Utc>>,
+    last_error_at: Option<DateTime<Utc>>,
+    last_error: Option<String>,
+}
+
+impl RemoteTargetHealthRollup {
+    fn observe_target(&mut self, target: &LaunchTargetSummary) {
+        self.observe_mapping_config(target);
+        self.observe_auth_config(target);
+        self.observe_health(remote_target_environment_health(target));
+    }
+
+    fn observe_mapping_config(&mut self, target: &LaunchTargetSummary) {
+        self.mappings_total += target.path_mappings.len();
         if target.path_mappings.is_empty() {
-            missing_mappings += 1;
+            self.missing_mappings += 1;
         }
         if remote_base_url_config_error(target).is_some() {
-            missing_base_url += 1;
+            self.missing_base_url += 1;
         }
-        if let Some(env_key) = target
+    }
+
+    fn observe_auth_config(&mut self, target: &LaunchTargetSummary) {
+        let Some(env_key) = target
             .auth_token_env
             .as_deref()
             .map(str::trim)
             .filter(|env_key| !env_key.is_empty())
-        {
-            if auth_env_value_present(env_key) {
-                auth_present += 1;
-            } else {
-                auth_missing += 1;
+        else {
+            return;
+        };
+        if auth_env_value_present(env_key) {
+            self.auth_present += 1;
+        } else {
+            self.auth_missing += 1;
+        }
+    }
+
+    fn observe_health(&mut self, health: RemoteTargetHealth) {
+        match health.status {
+            DependencyHealthStatus::Healthy => self.healthy += 1,
+            DependencyHealthStatus::Degraded => self.degraded += 1,
+            DependencyHealthStatus::Unavailable => self.unavailable += 1,
+            DependencyHealthStatus::Unknown | DependencyHealthStatus::NotConfigured => {
+                self.unknown += 1
             }
         }
-
-        let health = remote_target_environment_health(target);
-        match health.status {
-            DependencyHealthStatus::Healthy => healthy += 1,
-            DependencyHealthStatus::Degraded => degraded += 1,
-            DependencyHealthStatus::Unavailable => unavailable += 1,
-            DependencyHealthStatus::Unknown | DependencyHealthStatus::NotConfigured => unknown += 1,
+        if health.last_seen_at > self.last_seen_at {
+            self.last_seen_at = health.last_seen_at;
         }
-        if health.last_seen_at > last_seen_at {
-            last_seen_at = health.last_seen_at;
-        }
-        if health.last_error_at > last_error_at {
-            last_error_at = health.last_error_at;
-            last_error = health.last_error;
+        if health.last_error_at > self.last_error_at {
+            self.last_error_at = health.last_error_at;
+            self.last_error = health.last_error;
         }
     }
 
-    let status = aggregate_remote_target_status(
-        healthy,
-        degraded,
-        unavailable,
-        unknown,
-        missing_mappings > 0,
-    );
-    let mut snapshot = match status {
-        DependencyHealthStatus::Healthy => crate::types::DependencyHealthSnapshot::healthy(now),
-        DependencyHealthStatus::Degraded => crate::types::DependencyHealthSnapshot::degraded(
-            now,
-            last_error
-                .clone()
-                .unwrap_or_else(|| "remote target path mapping doctor warning".to_string()),
-        ),
-        DependencyHealthStatus::Unavailable => crate::types::DependencyHealthSnapshot::unavailable(
-            now,
-            last_error
-                .clone()
-                .unwrap_or_else(|| "remote target unavailable".to_string()),
-        ),
-        DependencyHealthStatus::Unknown => crate::types::DependencyHealthSnapshot::unknown(now),
-        DependencyHealthStatus::NotConfigured => {
-            crate::types::DependencyHealthSnapshot::not_configured(now)
+    fn status(&self) -> DependencyHealthStatus {
+        aggregate_remote_target_status(
+            self.healthy,
+            self.degraded,
+            self.unavailable,
+            self.unknown,
+            self.missing_mappings > 0,
+        )
+    }
+
+    fn into_snapshot(
+        self,
+        now: DateTime<Utc>,
+        configured_targets: usize,
+        skipped_current_server_targets: usize,
+    ) -> crate::types::DependencyHealthSnapshot {
+        let status = self.status();
+        let mut snapshot = match status {
+            DependencyHealthStatus::Healthy => crate::types::DependencyHealthSnapshot::healthy(now),
+            DependencyHealthStatus::Degraded => crate::types::DependencyHealthSnapshot::degraded(
+                now,
+                self.last_error
+                    .clone()
+                    .unwrap_or_else(|| "remote target path mapping doctor warning".to_string()),
+            ),
+            DependencyHealthStatus::Unavailable => {
+                crate::types::DependencyHealthSnapshot::unavailable(
+                    now,
+                    self.last_error
+                        .clone()
+                        .unwrap_or_else(|| "remote target unavailable".to_string()),
+                )
+            }
+            DependencyHealthStatus::Unknown => crate::types::DependencyHealthSnapshot::unknown(now),
+            DependencyHealthStatus::NotConfigured => {
+                crate::types::DependencyHealthSnapshot::not_configured(now)
+            }
         }
+        .with_detail("configured_targets", configured_targets.to_string())
+        .with_detail("healthy_targets", self.healthy.to_string())
+        .with_detail("degraded_targets", self.degraded.to_string())
+        .with_detail("unavailable_targets", self.unavailable.to_string())
+        .with_detail("unknown_targets", self.unknown.to_string())
+        .with_detail("auth_env_present", self.auth_present.to_string())
+        .with_detail("auth_env_missing", self.auth_missing.to_string())
+        .with_detail("path_mappings_total", self.mappings_total.to_string())
+        .with_detail(
+            "targets_without_path_mappings",
+            self.missing_mappings.to_string(),
+        )
+        .with_detail(
+            "targets_without_base_url",
+            self.missing_base_url.to_string(),
+        )
+        .with_detail(
+            "skipped_current_server_targets",
+            skipped_current_server_targets.to_string(),
+        )
+        .with_detail("probe", "session_list_cache");
+        snapshot.last_seen_at = self.last_seen_at;
+        snapshot.last_error_at = self.last_error_at.or(snapshot.last_error_at);
+        if snapshot.last_error.is_none() {
+            snapshot.last_error = self.last_error;
+        }
+        snapshot.freshness_ms = self.last_seen_at.and_then(|seen| {
+            now.signed_duration_since(seen)
+                .to_std()
+                .ok()
+                .map(|duration| duration.as_millis().min(u128::from(u64::MAX)) as u64)
+        });
+        snapshot
     }
-    .with_detail("configured_targets", targets.len().to_string())
-    .with_detail("healthy_targets", healthy.to_string())
-    .with_detail("degraded_targets", degraded.to_string())
-    .with_detail("unavailable_targets", unavailable.to_string())
-    .with_detail("unknown_targets", unknown.to_string())
-    .with_detail("auth_env_present", auth_present.to_string())
-    .with_detail("auth_env_missing", auth_missing.to_string())
-    .with_detail("path_mappings_total", mappings_total.to_string())
-    .with_detail(
-        "targets_without_path_mappings",
-        missing_mappings.to_string(),
-    )
-    .with_detail("targets_without_base_url", missing_base_url.to_string())
-    .with_detail(
-        "skipped_current_server_targets",
-        skipped_current_server_targets.to_string(),
-    )
-    .with_detail("probe", "session_list_cache");
-    snapshot.last_seen_at = last_seen_at;
-    snapshot.last_error_at = last_error_at.or(snapshot.last_error_at);
-    if snapshot.last_error.is_none() {
-        snapshot.last_error = last_error;
-    }
-    snapshot.freshness_ms = last_seen_at.and_then(|seen| {
-        now.signed_duration_since(seen)
-            .to_std()
-            .ok()
-            .map(|duration| duration.as_millis().min(u128::from(u64::MAX)) as u64)
-    });
-    snapshot
 }
 
 fn aggregate_remote_target_status(
