@@ -16,6 +16,7 @@ use uuid::Uuid;
 use super::{fetch_live_summary, remote_sessions, AppState};
 use crate::host_actions::{
     inspect_git_repo, RepoActionExecutor, RestartExecutor, SystemRepoActionExecutor,
+    RESTART_COMMAND_TIMEOUT,
 };
 use crate::native;
 use crate::openrouter_models::cached_or_default_openrouter_candidates;
@@ -1354,7 +1355,10 @@ pub async fn start_restart_action(
         commands,
     } = plan_restart_action(path)?;
 
-    let executor: Arc<dyn RepoActionExecutor> = Arc::new(RestartExecutor { commands });
+    let executor: Arc<dyn RepoActionExecutor> = Arc::new(RestartExecutor {
+        commands,
+        timeout: RESTART_COMMAND_TIMEOUT,
+    });
     state
         .repo_actions
         .start(canonical.clone(), kind, executor)
@@ -1562,7 +1566,7 @@ async fn restart_command_output(
     command: &RestartCommandRef<'_>,
 ) -> Result<std::process::Output, String> {
     tokio::time::timeout(
-        Duration::from_secs(240),
+        RESTART_COMMAND_TIMEOUT,
         // `kill_on_drop` ensures the timeout actually reaps the child: when
         // the timeout fires the `output()` future is dropped, and without
         // this the spawned `sh` (and its descendants' controlling process)
@@ -1574,7 +1578,13 @@ async fn restart_command_output(
             .output(),
     )
     .await
-    .map_err(|_| format!("restart of {} timed out after 240s", command.service_name))?
+    .map_err(|_| {
+        format!(
+            "restart of {} timed out after {}s",
+            command.service_name,
+            RESTART_COMMAND_TIMEOUT.as_secs()
+        )
+    })?
     .map_err(|error| error.to_string())
 }
 

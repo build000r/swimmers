@@ -1,8 +1,8 @@
 use std::collections::HashMap;
 use std::fs;
-use std::io;
+use std::io::{self, Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
-use std::process::{Command as ProcessCommand, Output, Stdio};
+use std::process::{Command as ProcessCommand, ExitStatus, Output, Stdio};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -17,6 +17,7 @@ use crate::types::{RepoActionKind, RepoActionState, RepoActionStatus, SessionSum
 const COMMIT_TMUX_PREFIX: &str = "commit";
 const COMMIT_TMUX_RUNTIME_DIR: &str = "swimmers-commit-tmux";
 const REPO_ACTION_STATUS_TTL: Duration = Duration::from_secs(15);
+pub const RESTART_COMMAND_TIMEOUT: Duration = Duration::from_secs(240);
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CommitGrokLaunch {
@@ -61,11 +62,13 @@ impl RepoActionExecutor for SystemRepoActionExecutor {
 pub struct RestartExecutor {
     /// Shell commands to execute in order.
     pub commands: Vec<(String, String)>, // (service_name, shell_command)
+    /// Maximum duration allowed for each restart command.
+    pub timeout: Duration,
 }
 
 impl RepoActionExecutor for RestartExecutor {
     fn execute(&self, _repo_root: PathBuf, _kind: RepoActionKind) -> io::Result<Option<String>> {
-        execute_restart_commands(&self.commands)
+        execute_restart_commands(&self.commands, self.timeout)
     }
 }
 
@@ -99,26 +102,115 @@ fn unsupported_repo_action_error(kind: RepoActionKind) -> io::Error {
     )
 }
 
-fn execute_restart_commands(commands: &[(String, String)]) -> io::Result<Option<String>> {
+fn execute_restart_commands(
+    commands: &[(String, String)],
+    timeout: Duration,
+) -> io::Result<Option<String>> {
     for (service_name, shell_command) in commands {
-        handle_restart_output(service_name, run_restart_command(shell_command)?)?;
+        handle_restart_output(
+            service_name,
+            run_restart_command(service_name, shell_command, timeout)?,
+        )?;
     }
 
     Ok(Some(restart_success_detail(commands)))
 }
 
-fn run_restart_command(shell_command: &str) -> io::Result<Output> {
-    build_restart_process_command(shell_command).output()
+fn run_restart_command(
+    service_name: &str,
+    shell_command: &str,
+    timeout: Duration,
+) -> io::Result<Output> {
+    let stdout = RestartOutputFile::create("stdout")?;
+    let stderr = RestartOutputFile::create("stderr")?;
+    let mut child = build_restart_process_command(shell_command)
+        .stdout(Stdio::from(stdout.try_clone()?))
+        .stderr(Stdio::from(stderr.try_clone()?))
+        .spawn()?;
+    let status = wait_restart_child(&mut child, service_name, timeout)?;
+
+    Ok(Output {
+        status,
+        stdout: stdout.into_bytes()?,
+        stderr: stderr.into_bytes()?,
+    })
+}
+
+struct RestartOutputFile {
+    path: PathBuf,
+    file: fs::File,
+}
+
+impl RestartOutputFile {
+    fn create(stream_name: &str) -> io::Result<Self> {
+        let path = std::env::temp_dir().join(format!(
+            "swimmers-restart-{}-{stream_name}.log",
+            Uuid::new_v4()
+        ));
+        let file = fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create_new(true)
+            .open(&path)?;
+        Ok(Self { path, file })
+    }
+
+    fn try_clone(&self) -> io::Result<fs::File> {
+        self.file.try_clone()
+    }
+
+    fn into_bytes(mut self) -> io::Result<Vec<u8>> {
+        self.file.seek(SeekFrom::Start(0))?;
+        let mut bytes = Vec::new();
+        self.file.read_to_end(&mut bytes)?;
+        Ok(bytes)
+    }
+}
+
+impl Drop for RestartOutputFile {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(&self.path);
+    }
 }
 
 fn build_restart_process_command(shell_command: &str) -> ProcessCommand {
     let mut command = ProcessCommand::new("sh");
+    command.arg("-c").arg(shell_command);
     command
-        .arg("-c")
-        .arg(shell_command)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-    command
+}
+
+fn wait_restart_child(
+    child: &mut std::process::Child,
+    service_name: &str,
+    timeout: Duration,
+) -> io::Result<ExitStatus> {
+    let deadline = Instant::now() + timeout;
+    loop {
+        if let Some(status) = child.try_wait()? {
+            return Ok(status);
+        }
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                format!(
+                    "{service_name}: restart timed out after {}",
+                    restart_timeout_detail(timeout)
+                ),
+            ));
+        }
+        std::thread::sleep(remaining.min(Duration::from_millis(25)));
+    }
+}
+
+fn restart_timeout_detail(timeout: Duration) -> String {
+    if timeout.as_millis() < 1_000 {
+        format!("{}ms", timeout.as_millis())
+    } else {
+        format!("{}s", timeout.as_secs())
+    }
 }
 
 fn handle_restart_output(service_name: &str, output: Output) -> io::Result<()> {
@@ -1142,6 +1234,45 @@ mod tests {
             "unexpected detail: {detail}"
         );
         assert!(detail.contains("panicked"), "unexpected detail: {detail}");
+    }
+
+    #[tokio::test]
+    async fn repo_action_tracker_finishes_timed_out_restart_actions() {
+        let temp = tempdir().expect("tempdir");
+        let repo = temp.path().join("repo");
+        fs::create_dir_all(&repo).expect("repo dir");
+        let tracker = RepoActionTracker::new();
+
+        tracker
+            .start(
+                repo.clone(),
+                RepoActionKind::Restart,
+                Arc::new(RestartExecutor {
+                    commands: vec![("slow-service".to_string(), "sleep 1".to_string())],
+                    timeout: Duration::from_millis(25),
+                }),
+            )
+            .await
+            .expect("start timed restart action");
+
+        let failed = wait_for_repo_action_state(&tracker, &repo, RepoActionState::Failed).await;
+        assert_eq!(failed.kind, RepoActionKind::Restart);
+        let detail = failed.detail.expect("timeout detail");
+        assert!(
+            detail.contains("slow-service: restart timed out after"),
+            "unexpected detail: {detail}"
+        );
+
+        tracker
+            .start(
+                repo.clone(),
+                RepoActionKind::Restart,
+                StaticRepoActionExecutor::new(Ok(Some("retry done".to_string()))),
+            )
+            .await
+            .expect("timed-out restart should not keep the repo locked");
+        let retry = wait_for_repo_action_state(&tracker, &repo, RepoActionState::Succeeded).await;
+        assert_eq!(retry.detail, Some("retry done".to_string()));
     }
 
     #[tokio::test]
