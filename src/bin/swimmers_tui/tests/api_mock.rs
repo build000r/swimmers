@@ -6,7 +6,7 @@ struct MockApiState {
     fetch_sessions_results: VecDeque<Result<Vec<SessionSummary>, String>>,
     backend_health_results: VecDeque<Result<BackendHealthResponse, String>>,
     fetch_thought_config_results: VecDeque<Result<ThoughtConfigResponse, String>>,
-    update_thought_config_results: VecDeque<Result<ThoughtConfig, String>>,
+    update_thought_config_results: VecDeque<Result<ThoughtConfigResponse, String>>,
     test_thought_config_results: VecDeque<Result<ThoughtConfigTestResponse, String>>,
     refresh_openrouter_candidates_results: VecDeque<Result<Vec<String>, String>>,
     mermaid_artifact_results: VecDeque<Result<MermaidArtifactResponse, String>>,
@@ -30,6 +30,7 @@ struct MockApiState {
     create_sessions_batch_results: VecDeque<Result<CreateSessionsBatchResponse, String>>,
     send_group_input_results: VecDeque<Result<SessionGroupInputResponse, String>>,
     update_thought_config_calls: Vec<ThoughtConfig>,
+    update_thought_config_versions: Vec<Option<u64>>,
     test_thought_config_calls: Vec<ThoughtConfig>,
     mermaid_artifact_calls: Vec<String>,
     session_skill_calls: Vec<String>,
@@ -54,6 +55,15 @@ struct MockApiState {
 #[derive(Clone, Default)]
 struct MockApi {
     state: Arc<Mutex<MockApiState>>,
+}
+
+fn mock_thought_config_response(config: ThoughtConfig, version: u64) -> ThoughtConfigResponse {
+    ThoughtConfigResponse {
+        config,
+        daemon_defaults: None,
+        version,
+        ui: swimmers::types::ThoughtConfigUiMetadata::default(),
+    }
 }
 
 impl MockApi {
@@ -110,6 +120,17 @@ impl MockApi {
     }
 
     fn push_update_thought_config(&self, result: Result<ThoughtConfig, String>) {
+        self.state
+            .lock()
+            .unwrap()
+            .update_thought_config_results
+            .push_back(result.map(|config| mock_thought_config_response(config, 0)));
+    }
+
+    fn push_update_thought_config_response(
+        &self,
+        result: Result<ThoughtConfigResponse, String>,
+    ) {
         self.state
             .lock()
             .unwrap()
@@ -356,6 +377,14 @@ impl MockApi {
             .clone()
     }
 
+    fn update_thought_config_versions(&self) -> Vec<Option<u64>> {
+        self.state
+            .lock()
+            .unwrap()
+            .update_thought_config_versions
+            .clone()
+    }
+
     fn test_thought_config_calls(&self) -> Vec<ThoughtConfig> {
         self.state.lock().unwrap().test_thought_config_calls.clone()
     }
@@ -465,15 +494,17 @@ impl TuiApi for MockApi {
     fn update_thought_config(
         &self,
         config: ThoughtConfig,
-    ) -> BoxFuture<'_, Result<ThoughtConfig, String>> {
+        version: Option<u64>,
+    ) -> BoxFuture<'_, Result<ThoughtConfigResponse, String>> {
         let state = self.state.clone();
         Box::pin(async move {
             let mut state = state.lock().unwrap();
             state.update_thought_config_calls.push(config.clone());
+            state.update_thought_config_versions.push(version);
             state
                 .update_thought_config_results
                 .pop_front()
-                .unwrap_or(Ok(config))
+                .unwrap_or_else(|| Ok(mock_thought_config_response(config, 0)))
         })
     }
 

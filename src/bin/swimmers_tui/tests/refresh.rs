@@ -388,6 +388,7 @@ fn thought_config_save_action_preserves_success_failure_and_test_messages() {
         Arc::new(ok_api),
         config.clone(),
         None,
+        None,
     ));
     assert_eq!(ok.message, "saved openrouter / model/free | test ok");
     assert!(ok.close_editor);
@@ -401,6 +402,7 @@ fn thought_config_save_action_preserves_success_failure_and_test_messages() {
     let failed_test = runtime.block_on(App::run_thought_config_save_action(
         Arc::new(failed_test_api),
         config.clone(),
+        None,
         None,
     ));
     assert_eq!(
@@ -417,6 +419,7 @@ fn thought_config_save_action_preserves_success_failure_and_test_messages() {
         Arc::new(test_error_api),
         config.clone(),
         None,
+        None,
     ));
     assert_eq!(
         test_error.message,
@@ -431,6 +434,7 @@ fn thought_config_save_action_preserves_success_failure_and_test_messages() {
     let save_error = runtime.block_on(App::run_thought_config_save_action(
         Arc::new(save_error_api),
         config,
+        None,
         None,
     ));
     assert_eq!(save_error.message, "save failed");
@@ -458,6 +462,7 @@ fn thought_config_action_outcome_updates_open_editor_and_sets_message() {
             model: "new/free".to_string(),
             ..ThoughtConfig::default()
         }),
+        updated_version: Some(9),
         openrouter_candidates: Some(candidates.clone()),
         close_editor: false,
         refresh_sessions: false,
@@ -468,6 +473,7 @@ fn thought_config_action_outcome_updates_open_editor_and_sets_message() {
         .as_ref()
         .expect("editor remains open");
     assert_eq!(editor.config.model, "new/free");
+    assert_eq!(editor.version, Some(9));
     assert_eq!(editor.openrouter_model_presets, candidates);
     assert_eq!(app.visible_message(), Some("test complete"));
     assert!(app.pending_refresh.is_none());
@@ -484,6 +490,7 @@ fn thought_config_action_outcome_ignores_editor_updates_when_editor_closed() {
             model: "ignored/free".to_string(),
             ..ThoughtConfig::default()
         }),
+        updated_version: Some(10),
         openrouter_candidates: Some(vec!["ignored/free".to_string()]),
         close_editor: true,
         refresh_sessions: false,
@@ -516,6 +523,7 @@ fn thought_config_action_outcome_closes_editor_and_restarts_refresh() {
             model: "new/free".to_string(),
             ..ThoughtConfig::default()
         }),
+        updated_version: Some(11),
         openrouter_candidates: Some(vec!["new/free".to_string()]),
         close_editor: true,
         refresh_sessions: true,

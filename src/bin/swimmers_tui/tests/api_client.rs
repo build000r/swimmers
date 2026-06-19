@@ -34,6 +34,7 @@ fn thought_config_response_deserializes_flattened_api_shape() {
 
     assert_eq!(response.config.backend, "claude");
     assert_eq!(response.config.model, "haiku");
+    assert_eq!(response.version, 0);
     assert_eq!(
         response
             .daemon_defaults
@@ -41,6 +42,69 @@ fn thought_config_response_deserializes_flattened_api_shape() {
             .map(|defaults| defaults.backend.as_str()),
         Some("claude")
     );
+}
+
+#[tokio::test]
+async fn update_thought_config_sends_if_match_and_parses_version() {
+    use axum::http::{HeaderMap, StatusCode};
+    use axum::routing::put;
+    use axum::{Json, Router};
+
+    let observed_if_match = Arc::new(Mutex::new(None));
+    let route_if_match = Arc::clone(&observed_if_match);
+    let app = Router::new().route(
+        "/v1/thought-config",
+        put(move |headers: HeaderMap, Json(body): Json<ThoughtConfig>| {
+            let route_if_match = Arc::clone(&route_if_match);
+            async move {
+                *route_if_match.lock().unwrap() = headers
+                    .get("if-match")
+                    .and_then(|value| value.to_str().ok())
+                    .map(str::to_string);
+                assert_eq!(body.backend, "claude");
+                assert_eq!(body.model, "haiku");
+                (
+                    StatusCode::OK,
+                    Json(serde_json::json!({
+                        "enabled": body.enabled,
+                        "model": body.model,
+                        "backend": body.backend,
+                        "cadence_hot_ms": body.cadence_hot_ms,
+                        "cadence_warm_ms": body.cadence_warm_ms,
+                        "cadence_cold_ms": body.cadence_cold_ms,
+                        "version": 8,
+                    })),
+                )
+            }
+        }),
+    );
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind test server");
+    let addr = listener.local_addr().expect("server addr");
+    let handle = tokio::spawn(async move {
+        axum::serve(listener, app).await.expect("serve test api");
+    });
+
+    let client = test_api_client(format!("http://{addr}"), None);
+    let response = client
+        .update_thought_config(
+            ThoughtConfig {
+                backend: "claude".to_string(),
+                model: "haiku".to_string(),
+                ..ThoughtConfig::default()
+            },
+            Some(7),
+        )
+        .await
+        .expect("update thought config");
+
+    assert_eq!(observed_if_match.lock().unwrap().as_deref(), Some("7"));
+    assert_eq!(response.version, 8);
+    assert_eq!(response.config.backend, "claude");
+
+    handle.abort();
 }
 
 async fn spawn_guarded_startup_server(

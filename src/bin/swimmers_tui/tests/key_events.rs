@@ -319,7 +319,7 @@ fn handle_key_event_opens_thought_config_editor() {
             agent_prompt: "agent".to_string(),
             terminal_prompt: "terminal".to_string(),
         }),
-        version: 0,
+        version: 7,
         ui: swimmers::types::ThoughtConfigUiMetadata::default(),
     }));
     let layout = test_layout(120, 32);
@@ -340,6 +340,7 @@ fn handle_key_event_opens_thought_config_editor() {
         .expect("thought config editor should open");
     assert_eq!(editor.config.backend, "grok");
     assert_eq!(editor.config.model, "haiku");
+    assert_eq!(editor.version, Some(7));
 }
 
 #[test]
@@ -447,14 +448,17 @@ fn thought_config_editor_updates_backend_and_model_then_saves() {
             agent_prompt: "agent".to_string(),
             terminal_prompt: "terminal".to_string(),
         }),
-        version: 0,
+        version: 4,
         ui: swimmers::types::ThoughtConfigUiMetadata::default(),
     }));
-    api.push_update_thought_config(Ok(ThoughtConfig {
-        backend: "grok".to_string(),
-        model: String::new(),
-        ..ThoughtConfig::default()
-    }));
+    api.push_update_thought_config_response(Ok(mock_thought_config_response(
+        ThoughtConfig {
+            backend: "grok".to_string(),
+            model: String::new(),
+            ..ThoughtConfig::default()
+        },
+        5,
+    )));
     api.push_test_thought_config(Ok(ThoughtConfigTestResponse {
         ok: true,
         message: "probe succeeded".to_string(),
@@ -509,6 +513,7 @@ fn thought_config_editor_updates_backend_and_model_then_saves() {
         .expect("saved config");
     assert_eq!(saved.backend, "grok");
     assert!(saved.model.is_empty());
+    assert_eq!(api.update_thought_config_versions(), vec![Some(4)]);
     assert_eq!(api.test_thought_config_calls().len(), 1);
 }
 
@@ -778,12 +783,16 @@ fn thought_config_editor_save_rotates_and_persists_openrouter_model_after_invali
     ));
     if let Some(editor) = &mut app.thought_config_editor {
         editor.focus = ThoughtConfigEditorField::Save;
+        editor.version = Some(4);
     }
-    api.push_update_thought_config(Ok(ThoughtConfig {
-        backend: "openrouter".to_string(),
-        model: "old/expired:free".to_string(),
-        ..ThoughtConfig::default()
-    }));
+    api.push_update_thought_config_response(Ok(mock_thought_config_response(
+        ThoughtConfig {
+            backend: "openrouter".to_string(),
+            model: "old/expired:free".to_string(),
+            ..ThoughtConfig::default()
+        },
+        5,
+    )));
     api.push_test_thought_config(Ok(ThoughtConfigTestResponse {
         ok: false,
         message: "probe failed: old/expired:free is not a valid model ID".to_string(),
@@ -800,11 +809,14 @@ fn thought_config_editor_save_rotates_and_persists_openrouter_model_after_invali
         last_backend_error: None,
         llm_calls: 1,
     }));
-    api.push_update_thought_config(Ok(ThoughtConfig {
-        backend: "openrouter".to_string(),
-        model: "openrouter/free".to_string(),
-        ..ThoughtConfig::default()
-    }));
+    api.push_update_thought_config_response(Ok(mock_thought_config_response(
+        ThoughtConfig {
+            backend: "openrouter".to_string(),
+            model: "openrouter/free".to_string(),
+            ..ThoughtConfig::default()
+        },
+        6,
+    )));
 
     handle_key_event(
         &mut app,
@@ -824,6 +836,7 @@ fn thought_config_editor_save_rotates_and_persists_openrouter_model_after_invali
             .map(|config| config.model.as_str()),
         Some("openrouter/free")
     );
+    assert_eq!(api.update_thought_config_versions(), vec![Some(4), Some(5)]);
     assert!(app
         .visible_message()
         .unwrap_or_default()

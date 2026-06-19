@@ -14,7 +14,7 @@ use swimmers::api::service::{
     start_dir_repo_action as start_dir_repo_action_service,
     test_thought_config as test_thought_config_service, thought_config_response,
     update_dir_group_memberships as update_dir_group_memberships_service,
-    update_thought_config as update_thought_config_service, ApiServiceError,
+    update_thought_config_versioned as update_thought_config_service, ApiServiceError,
     NativeOpenServiceError,
 };
 use swimmers::api::sessions::send_group_input_service;
@@ -260,9 +260,10 @@ impl TuiApi for InProcessApi {
     fn update_thought_config(
         &self,
         config: ThoughtConfig,
-    ) -> BoxFuture<'_, Result<ThoughtConfig, String>> {
+        version: Option<u64>,
+    ) -> BoxFuture<'_, Result<ThoughtConfigResponse, String>> {
         Box::pin(async move {
-            update_thought_config_service(&self.state, config)
+            update_thought_config_service(&self.state, config, version)
                 .await
                 .map_err(api_service_error_message)
         })
@@ -918,10 +919,13 @@ mod tests {
         let api = InProcessApi::new(test_state());
 
         let err = api
-            .update_thought_config(ThoughtConfig {
-                cadence_hot_ms: 1,
-                ..ThoughtConfig::default()
-            })
+            .update_thought_config(
+                ThoughtConfig {
+                    cadence_hot_ms: 1,
+                    ..ThoughtConfig::default()
+                },
+                None,
+            )
             .await
             .expect_err("invalid config should fail");
 
@@ -939,10 +943,13 @@ mod tests {
         let api = InProcessApi::new(state.clone());
 
         let err = api
-            .update_thought_config(ThoughtConfig {
-                enabled: false,
-                ..ThoughtConfig::default()
-            })
+            .update_thought_config(
+                ThoughtConfig {
+                    enabled: false,
+                    ..ThoughtConfig::default()
+                },
+                None,
+            )
             .await
             .expect_err("disk failure should fail");
 

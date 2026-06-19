@@ -540,7 +540,8 @@ pub(crate) trait TuiApi: Send + Sync + 'static {
     fn update_thought_config(
         &self,
         config: ThoughtConfig,
-    ) -> BoxFuture<'_, Result<ThoughtConfig, String>>;
+        version: Option<u64>,
+    ) -> BoxFuture<'_, Result<ThoughtConfigResponse, String>>;
     fn test_thought_config(
         &self,
         config: ThoughtConfig,
@@ -742,19 +743,22 @@ impl TuiApi for ApiClient {
     fn update_thought_config(
         &self,
         config: ThoughtConfig,
-    ) -> BoxFuture<'_, Result<ThoughtConfig, String>> {
+        version: Option<u64>,
+    ) -> BoxFuture<'_, Result<ThoughtConfigResponse, String>> {
         Box::pin(async move {
             let url = format!("{}/v1/thought-config", self.base_url);
-            let response = self
-                .with_auth(self.http.put(url))
-                .json(&config)
+            let mut request = self.with_auth(self.http.put(url)).json(&config);
+            if let Some(version) = version {
+                request = request.header(reqwest::header::IF_MATCH, version.to_string());
+            }
+            let response = request
                 .send()
                 .await
                 .map_err(|err| self.transport_error("update thought config", err))?;
 
             if response.status().is_success() {
                 return response
-                    .json::<ThoughtConfig>()
+                    .json::<ThoughtConfigResponse>()
                     .await
                     .map_err(|err| format!("failed to parse updated thought config: {err}"));
             }

@@ -5,6 +5,7 @@ use swimmers::openrouter_models::should_rotate_openrouter_model;
 pub(crate) struct ThoughtConfigActionOutcome {
     pub(crate) message: String,
     pub(crate) updated_config: Option<ThoughtConfig>,
+    pub(crate) updated_version: Option<u64>,
     pub(crate) openrouter_candidates: Option<Vec<String>>,
     pub(crate) close_editor: bool,
     pub(crate) refresh_sessions: bool,
@@ -46,10 +47,10 @@ impl<C: TuiApi> App<C> {
             Ok(response) => {
                 self.daemon_defaults_status =
                     DaemonDefaultsStatus::from_defaults(response.daemon_defaults.as_ref());
-                self.thought_config_editor = Some(ThoughtConfigEditorState::new(
-                    response.config,
-                    response.daemon_defaults,
-                ));
+                self.thought_config_editor = Some(
+                    ThoughtConfigEditorState::new(response.config, response.daemon_defaults)
+                        .with_version(response.version),
+                );
             }
             Err(err) => self.set_message(err),
         }
@@ -62,12 +63,17 @@ impl<C: TuiApi> App<C> {
         let ThoughtConfigActionOutcome {
             message,
             updated_config,
+            updated_version,
             openrouter_candidates,
             close_editor,
             refresh_sessions,
         } = outcome;
 
-        self.apply_thought_config_editor_action_updates(updated_config, openrouter_candidates);
+        self.apply_thought_config_editor_action_updates(
+            updated_config,
+            updated_version,
+            openrouter_candidates,
+        );
         if close_editor {
             self.close_thought_config_editor();
         }
@@ -81,6 +87,7 @@ impl<C: TuiApi> App<C> {
     fn apply_thought_config_editor_action_updates(
         &mut self,
         updated_config: Option<ThoughtConfig>,
+        updated_version: Option<u64>,
         openrouter_candidates: Option<Vec<String>>,
     ) {
         let Some(editor) = &mut self.thought_config_editor else {
@@ -91,6 +98,9 @@ impl<C: TuiApi> App<C> {
         }
         if let Some(config) = updated_config {
             editor.config = config;
+        }
+        if let Some(version) = updated_version {
+            editor.version = Some(version);
         }
     }
 
@@ -263,6 +273,10 @@ impl<C: TuiApi> App<C> {
             .thought_config_editor
             .as_ref()
             .and_then(|editor| editor.daemon_defaults.clone());
+        let version = self
+            .thought_config_editor
+            .as_ref()
+            .and_then(|editor| editor.version);
         config.model = config.model.trim().to_string();
         if let Some(editor) = &mut self.thought_config_editor {
             editor.config.model = config.model.clone();
@@ -275,7 +289,8 @@ impl<C: TuiApi> App<C> {
         self.set_message("saving thought config...");
         self.runtime.spawn(async move {
             let outcome =
-                Self::run_thought_config_save_action(client, config, daemon_defaults).await;
+                Self::run_thought_config_save_action(client, config, version, daemon_defaults)
+                    .await;
             let _ = tx.send(PendingInteractionResult::SaveThoughtConfig { outcome });
         });
     }
@@ -290,6 +305,7 @@ impl<C: TuiApi> App<C> {
             Ok(test) if test.ok => ThoughtConfigActionOutcome {
                 message: format!("test ok: {target}"),
                 updated_config: None,
+                updated_version: None,
                 openrouter_candidates: None,
                 close_editor: false,
                 refresh_sessions: false,
@@ -299,6 +315,7 @@ impl<C: TuiApi> App<C> {
                 &config,
                 daemon_defaults,
                 false,
+                None,
                 target.clone(),
                 test.message.clone(),
             )
@@ -306,6 +323,7 @@ impl<C: TuiApi> App<C> {
             .unwrap_or_else(|| ThoughtConfigActionOutcome {
                 message: format!("test failed: {target} | {}", test.message),
                 updated_config: None,
+                updated_version: None,
                 openrouter_candidates: None,
                 close_editor: false,
                 refresh_sessions: false,
@@ -313,6 +331,7 @@ impl<C: TuiApi> App<C> {
             Err(err) => ThoughtConfigActionOutcome {
                 message: format!("test error: {target} | {err}"),
                 updated_config: None,
+                updated_version: None,
                 openrouter_candidates: None,
                 close_editor: false,
                 refresh_sessions: false,
@@ -323,13 +342,22 @@ impl<C: TuiApi> App<C> {
     pub(crate) async fn run_thought_config_save_action(
         client: Arc<C>,
         config: ThoughtConfig,
+        version: Option<u64>,
         daemon_defaults: Option<DaemonDefaults>,
     ) -> ThoughtConfigActionOutcome {
-        match client.update_thought_config(config).await {
-            Ok(saved) => {
+        match client.update_thought_config(config, version).await {
+            Ok(saved_response) => {
+                let saved = saved_response.config.clone();
+                let saved_version = Some(saved_response.version);
                 let save_summary = Self::thought_config_target_summary(&saved);
-                Self::thought_config_save_test_outcome(client, saved, daemon_defaults, save_summary)
-                    .await
+                Self::thought_config_save_test_outcome(
+                    client,
+                    saved,
+                    saved_version,
+                    daemon_defaults,
+                    save_summary,
+                )
+                .await
             }
             Err(err) => Self::thought_config_save_failed_outcome(err),
         }
@@ -338,6 +366,7 @@ impl<C: TuiApi> App<C> {
     async fn thought_config_save_test_outcome(
         client: Arc<C>,
         saved: ThoughtConfig,
+        saved_version: Option<u64>,
         daemon_defaults: Option<DaemonDefaults>,
         save_summary: String,
     ) -> ThoughtConfigActionOutcome {
@@ -350,6 +379,7 @@ impl<C: TuiApi> App<C> {
                 &saved,
                 daemon_defaults,
                 true,
+                saved_version,
                 save_summary.clone(),
                 test.message.clone(),
             )
@@ -370,6 +400,7 @@ impl<C: TuiApi> App<C> {
         ThoughtConfigActionOutcome {
             message,
             updated_config: None,
+            updated_version: None,
             openrouter_candidates: None,
             close_editor: true,
             refresh_sessions: true,
@@ -380,6 +411,7 @@ impl<C: TuiApi> App<C> {
         ThoughtConfigActionOutcome {
             message,
             updated_config: None,
+            updated_version: None,
             openrouter_candidates: None,
             close_editor: false,
             refresh_sessions: false,
@@ -391,6 +423,7 @@ impl<C: TuiApi> App<C> {
         config: &ThoughtConfig,
         daemon_defaults: Option<DaemonDefaults>,
         persist: bool,
+        version: Option<u64>,
         target: String,
         failure_message: String,
     ) -> Option<ThoughtConfigActionOutcome> {
@@ -407,7 +440,7 @@ impl<C: TuiApi> App<C> {
             Self::find_working_openrouter_rotation(client.clone(), config, &candidates).await?;
         if persist {
             return Some(
-                Self::persist_openrouter_rotation(client, target, candidates, probe).await,
+                Self::persist_openrouter_rotation(client, target, candidates, probe, version).await,
             );
         }
 
@@ -481,8 +514,9 @@ impl<C: TuiApi> App<C> {
         target: String,
         candidates: Vec<String>,
         probe: OpenRouterRotationProbe,
+        version: Option<u64>,
     ) -> ThoughtConfigActionOutcome {
-        let save_result = client.update_thought_config(probe.config).await;
+        let save_result = client.update_thought_config(probe.config, version).await;
         Self::openrouter_rotation_save_outcome(&target, &probe.candidate, candidates, save_result)
     }
 
@@ -497,6 +531,7 @@ impl<C: TuiApi> App<C> {
                 probe.candidate
             ),
             updated_config: Some(probe.config),
+            updated_version: None,
             openrouter_candidates: Some(candidates),
             close_editor: false,
             refresh_sessions: false,
@@ -507,7 +542,7 @@ impl<C: TuiApi> App<C> {
         target: &str,
         candidate: &str,
         candidates: Vec<String>,
-        save_result: Result<ThoughtConfig, String>,
+        save_result: Result<ThoughtConfigResponse, String>,
     ) -> ThoughtConfigActionOutcome {
         let message = match save_result {
             Ok(_) => format!(
@@ -520,6 +555,7 @@ impl<C: TuiApi> App<C> {
         ThoughtConfigActionOutcome {
             message,
             updated_config: None,
+            updated_version: None,
             openrouter_candidates: Some(candidates),
             close_editor: true,
             refresh_sessions: true,
@@ -752,7 +788,12 @@ mod tests {
             target,
             "openrouter/free",
             candidates.clone(),
-            Ok(ThoughtConfig::default()),
+            Ok(ThoughtConfigResponse {
+                config: ThoughtConfig::default(),
+                version: 1,
+                daemon_defaults: None,
+                ui: swimmers::types::ThoughtConfigUiMetadata::default(),
+            }),
         );
         assert_eq!(
             success.message,

@@ -1,6 +1,7 @@
 use std::collections::{BTreeSet, HashMap};
 use std::io;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 #[cfg(test)]
 use std::sync::OnceLock;
@@ -14,6 +15,9 @@ use tokio::sync::oneshot;
 use uuid::Uuid;
 
 use super::{fetch_live_summary, remote_sessions, AppState};
+use crate::api::envelope::{
+    reserve_version_locked, VersionReservation, PERSISTENCE_UNAVAILABLE, VERSION_CONFLICT,
+};
 use crate::host_actions::{
     inspect_git_repo, RepoActionExecutor, RestartExecutor, SystemRepoActionExecutor,
     RESTART_COMMAND_TIMEOUT,
@@ -36,6 +40,8 @@ use crate::types::{
     RepoActionStatus, RepoTheme, SessionBatchMembership, SessionState, SessionSummary, SpawnTool,
     ThoughtConfigResponse,
 };
+
+static THOUGHT_CONFIG_VERSION: AtomicU64 = AtomicU64::new(0);
 
 #[path = "service/attention_group.rs"]
 mod attention_group;
@@ -215,12 +221,29 @@ pub async fn list_sessions_for_client(
 
 pub async fn thought_config_response(state: &Arc<AppState>) -> ThoughtConfigResponse {
     let config = state.thought_config.read().await.clone();
+    thought_config_response_for_config(state, config, current_thought_config_version())
+}
+
+fn thought_config_response_for_config(
+    state: &Arc<AppState>,
+    config: ThoughtConfig,
+    version: u64,
+) -> ThoughtConfigResponse {
     ThoughtConfigResponse {
         config,
-        version: 0,
+        version,
         daemon_defaults: state.current_daemon_defaults(),
         ui: thought_config_ui_metadata(&cached_or_default_openrouter_candidates()),
     }
+}
+
+pub fn current_thought_config_version() -> u64 {
+    THOUGHT_CONFIG_VERSION.load(Ordering::Acquire)
+}
+
+#[cfg(test)]
+pub(crate) fn set_thought_config_version_for_test(version: u64) {
+    THOUGHT_CONFIG_VERSION.store(version, Ordering::Release);
 }
 
 pub fn validate_thought_config(config: ThoughtConfig) -> Result<ThoughtConfig, ApiServiceError> {
@@ -255,18 +278,58 @@ pub async fn update_thought_config(
     state: &Arc<AppState>,
     config: ThoughtConfig,
 ) -> Result<ThoughtConfig, ApiServiceError> {
+    update_thought_config_versioned(state, config, None)
+        .await
+        .map(|response| response.config)
+}
+
+pub async fn update_thought_config_versioned(
+    state: &Arc<AppState>,
+    config: ThoughtConfig,
+    requested_version: Option<u64>,
+) -> Result<ThoughtConfigResponse, ApiServiceError> {
     let config = validate_thought_config(config)?;
     let store = state.current_file_store().ok_or_else(|| {
         ApiServiceError::new(
-            StatusCode::SERVICE_UNAVAILABLE,
-            "PERSISTENCE_UNAVAILABLE",
+            PERSISTENCE_UNAVAILABLE.status,
+            PERSISTENCE_UNAVAILABLE.code,
             "thought config persistence is unavailable",
         )
     })?;
 
+    let new_version =
+        persist_thought_config_update(state, &store, config.clone(), requested_version).await?;
+    Ok(thought_config_response_for_config(
+        state,
+        config,
+        new_version,
+    ))
+}
+
+async fn persist_thought_config_update(
+    state: &AppState,
+    store: &Arc<FileStore>,
+    config: ThoughtConfig,
+    requested_version: Option<u64>,
+) -> Result<u64, ApiServiceError> {
     let mut runtime_config = state.thought_config.write().await;
-    persist_validated_thought_config(&store, &mut runtime_config, config.clone()).await?;
-    Ok(config)
+    let reservation = reserve_thought_config_version(requested_version)?;
+    persist_validated_thought_config(store, &mut runtime_config, config.clone()).await?;
+    let new_version = reservation.commit();
+    drop(runtime_config);
+    Ok(new_version)
+}
+
+fn reserve_thought_config_version(
+    requested_version: Option<u64>,
+) -> Result<VersionReservation<'static>, ApiServiceError> {
+    reserve_version_locked(&THOUGHT_CONFIG_VERSION, requested_version).ok_or_else(|| {
+        ApiServiceError::new(
+            VERSION_CONFLICT.status,
+            VERSION_CONFLICT.code,
+            VERSION_CONFLICT.default_message,
+        )
+    })
 }
 
 pub async fn test_thought_config(

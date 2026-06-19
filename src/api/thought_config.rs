@@ -1,4 +1,3 @@
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use axum::extract::State;
@@ -7,31 +6,23 @@ use axum::response::Response;
 use axum::routing::get;
 use axum::{Extension, Json, Router};
 
-use crate::api::envelope::{
-    api_error, api_error_msg, error_response, parse_if_match_version, reserve_version_locked,
-    success_json, VersionReservation, PERSISTENCE_UNAVAILABLE, VERSION_CONFLICT,
-};
+use crate::api::envelope::{error_response, parse_if_match_version, success_json};
 use crate::api::service::{
-    persist_validated_thought_config, test_thought_config as test_thought_config_service,
-    thought_config_response, validate_thought_config, ApiServiceError,
+    test_thought_config as test_thought_config_service, thought_config_response,
+    update_thought_config_versioned, ApiServiceError,
 };
 use crate::api::AppState;
 use crate::auth::{AuthInfo, AuthScope};
-use crate::persistence::file_store::FileStore;
 use crate::thought::protocol::{build_sync_request, SyncRequest};
 use crate::thought::runtime_config::ThoughtConfig;
 use crate::types::ThoughtConfigResponse;
-
-static THOUGHT_CONFIG_VERSION: AtomicU64 = AtomicU64::new(0);
 
 async fn get_thought_config(
     Extension(auth): Extension<AuthInfo>,
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<ThoughtConfigResponse>, Response> {
     auth.require_scope(AuthScope::SessionsRead)?;
-    let mut response = thought_config_response(&state).await;
-    response.version = current_thought_config_version();
-    Ok(Json(response))
+    Ok(Json(thought_config_response(&state).await))
 }
 
 async fn get_thought_sync_preview(
@@ -63,78 +54,11 @@ async fn put_thought_config_response(
     body: ThoughtConfig,
 ) -> Result<Response, Response> {
     auth.require_scope(AuthScope::SessionsWrite)?;
-    let config = validated_put_thought_config(body)?;
-    let store = thought_config_store(&state)?;
     let requested_version = parse_if_match_version(&headers);
-    let new_version =
-        persist_thought_config_update(&state, &store, config.clone(), requested_version).await?;
-    Ok(success_thought_config_response(&config, new_version))
-}
-
-fn validated_put_thought_config(config: ThoughtConfig) -> Result<ThoughtConfig, Response> {
-    validate_thought_config(config).map_err(api_service_error_response)
-}
-
-fn thought_config_store(state: &AppState) -> Result<Arc<FileStore>, Response> {
-    state.current_file_store().ok_or_else(|| {
-        api_error_msg(
-            &PERSISTENCE_UNAVAILABLE,
-            "thought config persistence is unavailable",
-        )
-    })
-}
-
-async fn persist_thought_config_update(
-    state: &AppState,
-    store: &Arc<FileStore>,
-    config: ThoughtConfig,
-    requested_version: Option<u64>,
-) -> Result<u64, Response> {
-    // Hold the runtime-config write lock across the version reservation, the
-    // disk write, and the in-memory update. This guarantees three things:
-    //   * the version returned to the client matches the order in which
-    //     state writes commit (no concurrent reorder),
-    //   * a failed disk save drops the reservation without committing — the
-    //     counter never advances and retries with the original `If-Match`
-    //     keep working,
-    //   * disk and in-memory state can never diverge.
-    let mut runtime_config = state.thought_config.write().await;
-    let reservation = reserve_thought_config_version(requested_version)?;
-
-    persist_validated_thought_config(store, &mut runtime_config, config)
+    let response = update_thought_config_versioned(&state, body, requested_version)
         .await
         .map_err(api_service_error_response)?;
-
-    let new_version = reservation.commit();
-    drop(runtime_config);
-    Ok(new_version)
-}
-
-fn reserve_thought_config_version(
-    requested_version: Option<u64>,
-) -> Result<VersionReservation<'static>, Response> {
-    reserve_version_locked(&THOUGHT_CONFIG_VERSION, requested_version)
-        .ok_or_else(|| api_error(&VERSION_CONFLICT))
-}
-
-fn current_thought_config_version() -> u64 {
-    THOUGHT_CONFIG_VERSION.load(Ordering::Acquire)
-}
-
-fn success_thought_config_response(config: &ThoughtConfig, version: u64) -> Response {
-    let mut body = thought_config_response_body(config);
-    insert_thought_config_version(&mut body, version);
-    success_json(StatusCode::OK, &body)
-}
-
-fn thought_config_response_body(config: &ThoughtConfig) -> serde_json::Value {
-    serde_json::to_value(config).unwrap_or_else(|_| serde_json::json!({}))
-}
-
-fn insert_thought_config_version(body: &mut serde_json::Value, version: u64) {
-    if let Some(obj) = body.as_object_mut() {
-        obj.insert("version".to_string(), serde_json::json!(version));
-    }
+    Ok(success_json(StatusCode::OK, &response))
 }
 
 async fn post_thought_config_test(
@@ -484,7 +408,7 @@ mod tests {
     #[tokio::test]
     async fn get_thought_config_includes_current_version() {
         let _guard = VERSION_TEST_LOCK.lock().await;
-        THOUGHT_CONFIG_VERSION.store(7, Ordering::Release);
+        crate::api::service::set_thought_config_version_for_test(7);
         let state = test_state(None);
 
         let response = get_thought_config(
@@ -495,13 +419,13 @@ mod tests {
         .expect("read-scope client should fetch thought config");
 
         assert_eq!(response.0.version, 7);
-        THOUGHT_CONFIG_VERSION.store(0, Ordering::Release);
+        crate::api::service::set_thought_config_version_for_test(0);
     }
 
     #[tokio::test]
     async fn put_thought_config_optimistic_concurrency() {
         let _guard = VERSION_TEST_LOCK.lock().await;
-        THOUGHT_CONFIG_VERSION.store(0, Ordering::Release);
+        crate::api::service::set_thought_config_version_for_test(0);
         let dir = tempfile::tempdir().expect("tempdir");
         let store = crate::persistence::file_store::FileStore::new(dir.path())
             .await
@@ -538,7 +462,7 @@ mod tests {
         use fs2::FileExt;
 
         let _guard = VERSION_TEST_LOCK.lock().await;
-        THOUGHT_CONFIG_VERSION.store(0, Ordering::Release);
+        crate::api::service::set_thought_config_version_for_test(0);
         let dir = tempfile::tempdir().expect("tempdir");
         let store = crate::persistence::file_store::FileStore::new(dir.path())
             .await
@@ -580,7 +504,7 @@ mod tests {
     #[tokio::test]
     async fn put_thought_config_optimistic_concurrency_rejects_second_concurrent_if_match() {
         let _guard = VERSION_TEST_LOCK.lock().await;
-        THOUGHT_CONFIG_VERSION.store(0, Ordering::Release);
+        crate::api::service::set_thought_config_version_for_test(0);
         let dir = tempfile::tempdir().expect("tempdir");
         let store = crate::persistence::file_store::FileStore::new(dir.path())
             .await

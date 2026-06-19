@@ -57,10 +57,11 @@ impl TuiApi for TuiClient {
     fn update_thought_config(
         &self,
         config: ThoughtConfig,
-    ) -> BoxFuture<'_, Result<ThoughtConfig, String>> {
+        version: Option<u64>,
+    ) -> BoxFuture<'_, Result<ThoughtConfigResponse, String>> {
         match self {
-            Self::Embedded(client) => client.update_thought_config(config),
-            Self::External(client) => client.update_thought_config(config),
+            Self::Embedded(client) => client.update_thought_config(config, version),
+            Self::External(client) => client.update_thought_config(config, version),
         }
     }
 

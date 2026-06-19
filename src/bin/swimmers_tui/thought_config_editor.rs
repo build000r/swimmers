@@ -21,6 +21,7 @@ pub(crate) enum ThoughtConfigEditorField {
 #[derive(Clone, Debug)]
 pub(crate) struct ThoughtConfigEditorState {
     pub(crate) config: ThoughtConfig,
+    pub(crate) version: Option<u64>,
     pub(crate) daemon_defaults: Option<DaemonDefaults>,
     pub(crate) focus: ThoughtConfigEditorField,
     pub(crate) openrouter_model_presets: Vec<String>,
@@ -31,10 +32,16 @@ impl ThoughtConfigEditorState {
         config.normalize();
         Self {
             config,
+            version: None,
             daemon_defaults,
             focus: ThoughtConfigEditorField::Backend,
             openrouter_model_presets: cached_or_default_openrouter_candidates(),
         }
+    }
+
+    pub(crate) fn with_version(mut self, version: u64) -> Self {
+        self.version = Some(version);
+        self
     }
 
     pub(crate) fn move_focus(&mut self, delta: isize) {
