@@ -968,7 +968,12 @@ fn write_executable_script(dir: &std::path::Path, name: &str, body: &str) -> Pat
     use std::os::unix::fs::PermissionsExt;
     let path = dir.join(name);
     let tmp = dir.join(format!(".{name}.tmp"));
-    std::fs::write(&tmp, body).expect("write script");
+    {
+        use std::io::Write;
+        let mut file = std::fs::File::create(&tmp).expect("create script");
+        file.write_all(body.as_bytes()).expect("write script");
+        file.flush().expect("flush script");
+    }
     let mut perms = std::fs::metadata(&tmp).expect("metadata").permissions();
     perms.set_mode(0o755);
     std::fs::set_permissions(&tmp, perms).expect("chmod");

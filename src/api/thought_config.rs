@@ -544,7 +544,7 @@ mod tests {
         let response = put_config_response(state.clone(), ThoughtConfig::default(), Some(v1)).await;
         assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
 
-        lock_file.unlock().expect("release lock");
+        fs2::FileExt::unlock(&lock_file).expect("release lock");
 
         // The original `If-Match: v1` must still succeed: the failed save must
         // not have silently advanced the version counter.

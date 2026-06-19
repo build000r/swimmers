@@ -545,8 +545,10 @@ fn spawn_reaper(mut child: Child, log_path: PathBuf) {
 mod tests {
     use super::*;
 
+    use std::cell::Cell;
     use std::ffi::OsString;
     use std::io;
+    use std::sync::Mutex;
 
     use tempfile::tempdir;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -810,20 +812,72 @@ mod tests {
         assert_eq!(find_binary_in_path_value("swimmers", &path), None);
     }
 
+    static ENV_TEST_LOCK: Mutex<()> = Mutex::new(());
+
+    thread_local! {
+        static ENV_TEST_LOCK_DEPTH: Cell<usize> = Cell::new(0);
+    }
+
+    struct EnvLockDepth;
+
+    impl EnvLockDepth {
+        fn enter() -> Self {
+            ENV_TEST_LOCK_DEPTH.with(|depth| depth.set(depth.get() + 1));
+            Self
+        }
+    }
+
+    impl Drop for EnvLockDepth {
+        fn drop(&mut self) {
+            ENV_TEST_LOCK_DEPTH.with(|depth| depth.set(depth.get().saturating_sub(1)));
+        }
+    }
+
+    struct EnvVarRestore {
+        key: String,
+        previous: Option<OsString>,
+    }
+
+    impl EnvVarRestore {
+        fn capture(key: &str) -> Self {
+            Self {
+                key: key.to_string(),
+                previous: std::env::var_os(key),
+            }
+        }
+    }
+
+    impl Drop for EnvVarRestore {
+        fn drop(&mut self) {
+            restore_env_var(&self.key, self.previous.take());
+        }
+    }
+
+    fn with_env_lock<T>(run: impl FnOnce() -> T) -> T {
+        if ENV_TEST_LOCK_DEPTH.with(|depth| depth.get() > 0) {
+            let _depth = EnvLockDepth::enter();
+            return run();
+        }
+
+        let _guard = ENV_TEST_LOCK.lock().expect("env test lock poisoned");
+        let _depth = EnvLockDepth::enter();
+        run()
+    }
+
     fn with_env_var_removed<T>(key: &str, run: impl FnOnce() -> T) -> T {
-        let previous = std::env::var_os(key);
-        std::env::remove_var(key);
-        let result = run();
-        restore_env_var(key, previous);
-        result
+        with_env_lock(|| {
+            let _restore = EnvVarRestore::capture(key);
+            std::env::remove_var(key);
+            run()
+        })
     }
 
     fn with_env_var<T>(key: &str, value: impl Into<OsString>, run: impl FnOnce() -> T) -> T {
-        let previous = std::env::var_os(key);
-        std::env::set_var(key, value.into());
-        let result = run();
-        restore_env_var(key, previous);
-        result
+        with_env_lock(|| {
+            let _restore = EnvVarRestore::capture(key);
+            std::env::set_var(key, value.into());
+            run()
+        })
     }
 
     fn restore_env_var(key: &str, value: Option<OsString>) {

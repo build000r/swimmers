@@ -617,7 +617,7 @@ async fn atomic_write_blocking_fails_fast_when_lock_is_held() {
         .await
         .expect_err("writer should fail fast under lock contention");
 
-    lock_file.unlock().expect("unlock lock file");
+    fs2::FileExt::unlock(&lock_file).expect("unlock lock file");
 
     let typed = err
         .downcast_ref::<FileStoreIoError>()
