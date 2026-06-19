@@ -331,6 +331,12 @@ mod picker {
             &apply_response_target("legacy"),
         );
         assert_eq!(unsupported.blocked_reason, Some("unsupported target"));
+
+        let mut remote_like_local = apply_response_target("devbox");
+        remote_like_local.kind = "local".to_string();
+        let unsupported =
+            launch_target_preview_for_path("/Users/tester/repos/swimmers", &remote_like_local);
+        assert_eq!(unsupported.blocked_reason, Some("unsupported target"));
     }
 
     #[test]

@@ -823,7 +823,7 @@ pub(crate) fn launch_target_preview_for_path(
         blocked_reason: None,
     };
 
-    if target.id == "local" || target.kind == "local" {
+    if target.id == "local" {
         return preview;
     }
 
