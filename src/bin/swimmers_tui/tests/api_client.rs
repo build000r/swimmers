@@ -355,6 +355,43 @@ async fn spawn_capturing_create_api_server() -> (
     (format!("http://{addr}"), handle, captured_request)
 }
 
+async fn spawn_capturing_batch_create_api_server() -> (
+    String,
+    tokio::task::JoinHandle<()>,
+    Arc<Mutex<Option<CreateSessionsBatchRequest>>>,
+) {
+    use axum::routing::post;
+    use axum::{Json, Router};
+
+    let captured_request = Arc::new(Mutex::new(None));
+    let route_captured_request = Arc::clone(&captured_request);
+    let app = Router::new().route(
+        "/v1/sessions/batch",
+        post(move |Json(body): Json<CreateSessionsBatchRequest>| {
+            let captured_request = Arc::clone(&route_captured_request);
+            async move {
+                *captured_request
+                    .lock()
+                    .expect("captured batch request lock") = Some(body);
+                Json(create_batch_response(&[
+                    ("sess-alpha", "alpha", TEST_REPO_ALPHA),
+                    ("sess-beta", "beta", TEST_REPO_BETA),
+                ]))
+            }
+        }),
+    );
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind test server");
+    let addr = listener.local_addr().expect("server addr");
+    let handle = tokio::spawn(async move {
+        axum::serve(listener, app).await.expect("serve test api");
+    });
+
+    (format!("http://{addr}"), handle, captured_request)
+}
+
 async fn spawn_delayed_dirs_api_server(
     list_delay: Duration,
 ) -> (String, tokio::task::JoinHandle<()>) {
@@ -440,6 +477,36 @@ async fn api_client_create_session_sends_launch_target_and_initial_request() {
         request.initial_request.as_deref(),
         Some("move this off laptop")
     );
+}
+
+#[tokio::test]
+async fn api_client_create_sessions_batch_sends_launch_target_and_initial_request() {
+    let (base_url, handle, captured_request) = spawn_capturing_batch_create_api_server().await;
+    let client = test_api_client(base_url, None);
+
+    client
+        .create_sessions_batch(
+            vec![TEST_REPO_ALPHA.to_string(), TEST_REPO_BETA.to_string()],
+            SpawnTool::Codex,
+            Some("jeremy-skillbox".to_string()),
+            Some("fan out remotely".to_string()),
+        )
+        .await
+        .expect("batch create should preserve remote launch metadata");
+
+    handle.abort();
+    let request = captured_request
+        .lock()
+        .expect("captured batch request lock")
+        .take()
+        .expect("captured batch create request");
+    assert_eq!(
+        request.dirs,
+        vec![TEST_REPO_ALPHA.to_string(), TEST_REPO_BETA.to_string()]
+    );
+    assert_eq!(request.spawn_tool, Some(SpawnTool::Codex));
+    assert_eq!(request.launch_target.as_deref(), Some("jeremy-skillbox"));
+    assert_eq!(request.initial_request.as_deref(), Some("fan out remotely"));
 }
 
 #[tokio::test]
