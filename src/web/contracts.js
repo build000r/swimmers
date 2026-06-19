@@ -166,12 +166,14 @@ export function normalizeSessionSummary(value) {
 
 export function normalizeSessionEnvironmentSummary(value) {
   const environment = objectRecord(value) || {};
+  const scope = stringValue(environment.scope, "local");
+  const remote = scope.trim().toLowerCase() === "remote";
   return {
-    scope: stringValue(environment.scope, "local"),
-    target_id: stringValue(environment.target_id, "local"),
-    target_label: stringValue(environment.target_label, "Local machine"),
-    target_kind: stringValue(environment.target_kind, "local"),
-    display_host: stringValue(environment.display_host, "local"),
+    scope,
+    target_id: stringValue(environment.target_id, remote ? "" : "local"),
+    target_label: stringValue(environment.target_label, remote ? "" : "Local machine"),
+    target_kind: stringValue(environment.target_kind, remote ? "remote" : "local"),
+    display_host: stringValue(environment.display_host, remote ? "" : "local"),
     remote_session_id: optionalString(environment.remote_session_id),
     launch_source: optionalString(environment.launch_source),
     local_cwd: optionalString(environment.local_cwd),

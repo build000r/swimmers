@@ -1245,6 +1245,47 @@ fn attention_group_click_uses_env_size_layout_and_unnumbered_policy() {
 }
 
 #[test]
+fn attention_group_click_passes_current_visible_group_for_rotation() {
+    let _lock = TEST_ENV_LOCK.lock().expect("env lock");
+    let _size = EnvVarGuard::remove("SWIMMERS_ATTENTION_GROUP_SIZE");
+    let _layout = EnvVarGuard::remove("SWIMMERS_ATTENTION_GROUP_LAYOUT");
+    let _unnumbered = EnvVarGuard::remove("SWIMMERS_ATTENTION_GROUP_INCLUDE_UNNUMBERED");
+
+    let api = MockApi::new();
+    let mut app = make_app(api.clone());
+    app.attention_group_session_ids = vec!["sess-visible".to_string(), "sess-cleared".to_string()];
+    api.push_open_attention_group(Ok(NativeAttentionGroupOpenResponse {
+        session_id: "attention-group".to_string(),
+        tmux_name: "swimmers-attention".to_string(),
+        session_count: 2,
+        session_ids: vec!["sess-visible".to_string(), "sess-next".to_string()],
+        backlog_session_ids: Vec::new(),
+        status: "swapped".to_string(),
+        focused: true,
+        pane_id: Some("pane-attention".to_string()),
+        attach_command: Some("tmux attach -t swimmers-attention".to_string()),
+    }));
+
+    app.open_attention_group();
+    poll_until_interaction(&mut app);
+
+    assert_eq!(
+        api.open_attention_group_calls(),
+        vec![(
+            6,
+            vec!["sess-visible".to_string(), "sess-cleared".to_string()],
+            true,
+            false,
+            AttentionGroupLayout::Tiled
+        )]
+    );
+    assert_eq!(
+        app.attention_group_session_ids,
+        vec!["sess-visible".to_string(), "sess-next".to_string()]
+    );
+}
+
+#[test]
 fn attention_group_click_shows_attach_command_when_native_focus_is_unavailable() {
     let api = MockApi::new();
     let mut app = make_app(api.clone());

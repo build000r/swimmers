@@ -18,7 +18,11 @@ export function sessionHostLabel(session) {
   if (String(environment.scope || "local").toLowerCase() !== "remote") {
     return "";
   }
-  return environment.display_host || environment.target_label || environment.target_id || "";
+  return firstNonEmpty(
+    environment.display_host,
+    environment.target_label,
+    environment.target_id,
+  ) || "";
 }
 
 export function sessionCwdLabel(session) {
@@ -61,9 +65,25 @@ function sessionTarget(session) {
   if (String(environment.scope || "local").toLowerCase() !== "remote") {
     return { key: "local", label: "local" };
   }
-  const key = environment.target_id || environment.display_host || environment.target_label || "remote";
-  const label = environment.display_host || environment.target_label || environment.target_id || "remote";
-  return { key: String(key), label: String(label) };
+  const key = firstNonEmpty(
+    environment.target_id,
+    environment.display_host,
+    environment.target_label,
+  ) || "remote";
+  const label = firstNonEmpty(
+    environment.display_host,
+    environment.target_label,
+    environment.target_id,
+  ) || "remote";
+  return { key, label };
+}
+
+function firstNonEmpty(...values) {
+  for (const value of values) {
+    const trimmed = String(value ?? "").trim();
+    if (trimmed) return trimmed;
+  }
+  return "";
 }
 
 function addFleetBucket(buckets, kind, key, label, session) {

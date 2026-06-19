@@ -196,6 +196,27 @@ test("normalizeSessionListResponse preserves SessionSummary-derived web fields w
   });
 });
 
+test("normalizeSessionListResponse keeps partial remote identity remote", () => {
+  const payload = normalizeSessionListResponse({
+    sessions: [{
+      session_id: "remote-1",
+      tmux_name: "remote-1",
+      state: "idle",
+      cwd: "/srv/skillbox/repos/swimmers",
+      environment: {
+        scope: "remote",
+        display_host: "Skillbox devbox",
+      },
+    }],
+  });
+
+  assert.equal(payload.sessions[0].environment.scope, "remote");
+  assert.equal(payload.sessions[0].environment.target_id, "");
+  assert.equal(payload.sessions[0].environment.target_label, "");
+  assert.equal(payload.sessions[0].environment.target_kind, "remote");
+  assert.equal(payload.sessions[0].environment.display_host, "Skillbox devbox");
+});
+
 test("normalizeOperatorPressureResponse preserves existing Trogdor input fields only", () => {
   const payload = normalizeOperatorPressureResponse({
     sessions: [{

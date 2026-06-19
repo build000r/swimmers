@@ -182,6 +182,26 @@ test("surfaceSession falls back honestly for unmapped remote cwd", () => {
   assert.equal(session.repoKey, "/srv/skillbox/repos/swimmers");
 });
 
+test("surfaceSession trims remote target identity before fleet grouping", () => {
+  const session = surfaceSession(rawSession({
+    cwd: "/srv/skillbox/repos/swimmers",
+    environment: {
+      scope: "remote",
+      target_id: "   ",
+      target_label: "  Skillbox devbox  ",
+      target_kind: "swimmers_api",
+      display_host: "   ",
+      remote_session_id: "remote-1",
+      remote_cwd: "/srv/skillbox/repos/swimmers",
+      canonical_cwd: "/srv/skillbox/repos/swimmers",
+    },
+  }));
+
+  assert.equal(session.targetKey, "Skillbox devbox");
+  assert.equal(session.targetLabel, "Skillbox devbox");
+  assert.equal(session.cwdLabel, "repos/swimmers @ Skillbox devbox");
+});
+
 test("surfaceSession exposes advisory metadata as passive external badges", () => {
   const session = surfaceSession(rawSession({
     environment: {

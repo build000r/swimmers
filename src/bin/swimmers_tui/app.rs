@@ -692,7 +692,7 @@ impl<C: TuiApi> App<C> {
     }
 
     pub(crate) fn open_attention_group(&mut self) {
-        self.request_attention_group(Vec::new(), true, true);
+        self.request_attention_group(self.attention_group_session_ids.clone(), true, true);
     }
 
     fn request_attention_group(
