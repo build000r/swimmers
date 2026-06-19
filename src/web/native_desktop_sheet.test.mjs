@@ -169,7 +169,7 @@ test("remote handoff falls back to namespaced session id and avoids false remote
     },
   };
   const environments = [{
-    id: "skillbox",
+    id: " skillbox ",
     label: "Skillbox devbox",
     backend_mode: "remote_swimmers_api",
   }];

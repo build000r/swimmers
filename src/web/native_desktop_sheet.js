@@ -40,7 +40,7 @@ function environmentSummaryForSession(session, environments = []) {
   if (!targetId || !Array.isArray(environments)) {
     return null;
   }
-  return environments.find((environment) => String(environment?.id || "") === targetId) ?? null;
+  return environments.find((environment) => String(environment?.id || "").trim() === targetId) ?? null;
 }
 
 function backendModeLabel(value) {
