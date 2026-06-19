@@ -172,7 +172,7 @@ impl SkillboxOverlay {
         let configured_targets = self
             .all_launch_targets()
             .into_iter()
-            .filter(|target| target.kind == "swimmers_api")
+            .filter(is_swimmers_api_launch_target)
             .count();
 
         if configured_targets == 0 {
@@ -272,6 +272,10 @@ impl SkillboxOverlay {
         });
         entries
     }
+}
+
+fn is_swimmers_api_launch_target(target: &LaunchTargetSummary) -> bool {
+    target.kind.trim() == "swimmers_api"
 }
 
 fn first_client_matching_cwd<'a>(

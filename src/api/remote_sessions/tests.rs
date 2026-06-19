@@ -1279,6 +1279,7 @@ fn remote_poll_targets_keeps_only_swimmers_api_targets() {
     let config = Config::default();
     let mut swimmers = target();
     swimmers.id = "swimmers".to_string();
+    swimmers.kind = " swimmers_api ".to_string();
     swimmers.base_url = Some("http://remote.example:3210".to_string());
 
     let mut unsupported = target();

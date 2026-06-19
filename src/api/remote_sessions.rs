@@ -1509,7 +1509,7 @@ fn ensure_swimmers_api_target(target: &LaunchTargetSummary) -> Result<(), Remote
 }
 
 fn is_swimmers_api_target(target: &LaunchTargetSummary) -> bool {
-    target.kind == "swimmers_api"
+    target.kind.trim() == "swimmers_api"
 }
 
 fn target_points_at_current_server(target: &LaunchTargetSummary, config: &Config) -> bool {

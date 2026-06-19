@@ -954,7 +954,7 @@ fn overlay_health_reports_load_age_and_remote_target_count_without_probe() {
     let remote = LaunchTargetSummary {
         id: "remote-skillbox".to_string(),
         label: "Remote".to_string(),
-        kind: "swimmers_api".to_string(),
+        kind: " swimmers_api ".to_string(),
         base_url: Some("http://example.test:3210".to_string()),
         auth_token_env: Some("REMOTE_TOKEN".to_string()),
         path_mappings: Vec::new(),
