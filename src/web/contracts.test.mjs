@@ -156,7 +156,15 @@ test("normalizeSessionListResponse preserves SessionSummary-derived web fields w
         last_error_at: null,
         last_error: 404,
         freshness_ms: "5",
-        advisory: [{ source: "c0", label: "c0 group", value: 42, stale: false }],
+        advisory: [{
+          source: "c0",
+          label: "c0 group",
+          value: 42,
+          stale: false,
+          group_key: "c0:42",
+          observed_at: "2026-06-05T00:00:00Z",
+          freshness_ms: "5",
+        }],
       },
       {
         id: "skillbox-devbox",
@@ -283,6 +291,9 @@ test("normalizeSessionListResponse preserves SessionSummary-derived web fields w
       value: "42",
       status: "external",
       stale: false,
+      group_key: "c0:42",
+      observed_at: "2026-06-05T00:00:00Z",
+      freshness_ms: 5,
     }],
   },
   {
@@ -692,6 +703,9 @@ test("normalizeSurfaceModel preserves Trogdor view model fields and null current
     value: "7",
     status: "external",
     stale: false,
+    group_key: null,
+    observed_at: null,
+    freshness_ms: null,
   }]);
   assert.equal(model.sessions[0].advisoryLabel, "42");
   assert.equal(model.attentionInbox.length, 1);

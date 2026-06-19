@@ -988,6 +988,9 @@ fn thought_panel_marks_advisory_metadata_as_external_and_stale() {
         value: "w".to_string(),
         status: "external".to_string(),
         stale: true,
+        group_key: Some("c0:w".to_string()),
+        observed_at: None,
+        freshness_ms: None,
     }];
 
     app.capture_thought_updates(&[session.clone()], layout.thought_entry_capacity());
@@ -1006,6 +1009,72 @@ fn thought_panel_marks_advisory_metadata_as_external_and_stale() {
         thought_panel_header(&app),
         "clawgs / pwd / all · 0/1 asleep · > asleep · fleet 1 host / 1 project · ext 1"
     );
+}
+
+#[test]
+fn header_filter_strip_applies_advisory_fleet_filters_without_mutating_sessions() {
+    let api = MockApi::new();
+    let layout = test_layout(180, 32);
+    let mut app = make_app(api);
+
+    let mut advisory = session_summary_with_thought(
+        "sess-advisory",
+        "7",
+        TEST_REPO_SWIMMERS,
+        "x",
+        "2026-03-08T14:00:05Z",
+    );
+    advisory.environment.advisory = vec![swimmers::types::AdvisoryMetadataSummary {
+        source: "c0".to_string(),
+        label: "c0 group".to_string(),
+        value: "swimmers".to_string(),
+        status: "external".to_string(),
+        stale: true,
+        group_key: Some("c0:swimmers".to_string()),
+        observed_at: None,
+        freshness_ms: None,
+    }];
+    let plain = session_summary_with_thought(
+        "sess-plain",
+        "8",
+        TEST_REPO_SKILLS,
+        "plain",
+        "2026-03-08T14:00:06Z",
+    );
+
+    app.capture_thought_updates(
+        &[advisory.clone(), plain.clone()],
+        layout.thought_entry_capacity(),
+    );
+    app.entities = vec![
+        SessionEntity::new(advisory.clone(), layout.overview_field),
+        SessionEntity::new(plain.clone(), layout.overview_field),
+    ];
+
+    let strip = build_header_filter_layout(&app, 180);
+    let chip = strip
+        .chips
+        .iter()
+        .find(|chip| chip.label == "ext:c0 group: swimmers")
+        .expect("advisory chip");
+    assert_eq!(
+        header_filter_action_at(&app, 180, chip.rect.x, chip.rect.y),
+        Some(ThoughtPanelAction::FilterByFleet(ThoughtFleetFilter {
+            kind: swimmers::types::FleetLensBucketKind::Advisory,
+            key: "c0:swimmers".to_string(),
+            label: "c0 group: swimmers".to_string(),
+        }))
+    );
+
+    app.thought_filter.fleet = Some(ThoughtFleetFilter {
+        kind: swimmers::types::FleetLensBucketKind::Advisory,
+        key: "c0:swimmers".to_string(),
+        label: "c0 group: swimmers".to_string(),
+    });
+    assert!(app.thought_filter.matches_session(&advisory));
+    assert!(!app.thought_filter.matches_session(&plain));
+    assert_eq!(advisory.session_id, "sess-advisory");
+    assert_eq!(advisory.cwd, TEST_REPO_SWIMMERS);
 }
 
 #[test]

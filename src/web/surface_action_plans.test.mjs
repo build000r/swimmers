@@ -57,6 +57,13 @@ test("surface action dispatch validates fleet filter payloads", () => {
     },
   );
   assert.deepEqual(
+    surfaceActionDispatchPlan({ type: "action", actionId: "fleet_filter", kind: " advisory ", key: " c0:swimmers " }),
+    {
+      type: "set_fleet_filter",
+      filter: { kind: "advisory", key: "c0:swimmers" },
+    },
+  );
+  assert.deepEqual(
     surfaceActionDispatchPlan({ type: "action", actionId: "fleet_filter", kind: "", key: "" }),
     {
       type: "set_fleet_filter",

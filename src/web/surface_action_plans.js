@@ -1,4 +1,4 @@
-const FLEET_FILTER_KINDS = new Set(["target", "repo", "state", "readiness", "transport"]);
+const FLEET_FILTER_KINDS = new Set(["target", "repo", "advisory", "state", "readiness", "transport"]);
 
 function normalizeFleetFilterPayload(filter = {}) {
   const kind = String(filter?.kind || "").trim().toLowerCase();

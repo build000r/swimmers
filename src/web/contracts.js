@@ -125,6 +125,11 @@ export function normalizeAdvisoryMetadataSummary(value) {
     value: stringValue(advisory.value),
     status: stringValue(advisory.status, "external"),
     stale: booleanValue(advisory.stale, true),
+    group_key: optionalString(advisory.group_key),
+    observed_at: optionalString(advisory.observed_at),
+    freshness_ms: advisory.freshness_ms === null || advisory.freshness_ms === undefined
+      ? null
+      : finiteNumber(advisory.freshness_ms),
   };
 }
 

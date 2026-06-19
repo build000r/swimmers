@@ -2,8 +2,8 @@ use std::collections::BTreeMap;
 
 use crate::session_labels::{repo_label_for_key, session_repo_key};
 use crate::types::{
-    ActionCueKind, FleetLensBucket, FleetLensBucketKind, FleetLensSummary, RestState,
-    SessionEnvironmentScope, SessionState, SessionSummary, TransportHealth,
+    ActionCueKind, AdvisoryMetadataSummary, FleetLensBucket, FleetLensBucketKind, FleetLensSummary,
+    RestState, SessionEnvironmentScope, SessionState, SessionSummary, TransportHealth,
 };
 
 pub fn build_fleet_lens_summary(sessions: &[SessionSummary]) -> FleetLensSummary {
@@ -26,6 +26,10 @@ pub fn build_fleet_lens_summary(sessions: &[SessionSummary]) -> FleetLensSummary
             repo_label,
             session,
         );
+
+        for advisory in &session.environment.advisory {
+            insert_advisory_bucket(&mut buckets, advisory);
+        }
 
         insert_bucket(
             &mut buckets,
@@ -99,6 +103,65 @@ fn insert_bucket(
     }
     if session.commit_candidate {
         bucket.commit_ready_count += 1;
+    }
+}
+
+pub fn advisory_key(advisory: &AdvisoryMetadataSummary) -> Option<String> {
+    advisory
+        .group_key
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
+        .or_else(|| {
+            let source = advisory.source.trim();
+            let label = advisory.label.trim();
+            let value = advisory.value.trim();
+            (!source.is_empty() && !label.is_empty() && !value.is_empty()).then(|| {
+                [source, label, value]
+                    .into_iter()
+                    .map(|part| part.to_ascii_lowercase())
+                    .collect::<Vec<_>>()
+                    .join(":")
+            })
+        })
+}
+
+pub(crate) fn advisory_label(advisory: &AdvisoryMetadataSummary) -> Option<String> {
+    let label = advisory.label.trim();
+    let value = advisory.value.trim();
+    if label.is_empty() || value.is_empty() {
+        return None;
+    }
+    Some(format!("{label}: {value}"))
+}
+
+fn insert_advisory_bucket(
+    buckets: &mut BTreeMap<(FleetLensBucketKind, String), FleetLensBucket>,
+    advisory: &AdvisoryMetadataSummary,
+) {
+    let Some(key) = advisory_key(advisory) else {
+        return;
+    };
+    let Some(label) = advisory_label(advisory) else {
+        return;
+    };
+    let bucket = buckets
+        .entry((FleetLensBucketKind::Advisory, key.clone()))
+        .or_insert_with(|| FleetLensBucket {
+            kind: FleetLensBucketKind::Advisory,
+            key,
+            label,
+            count: 0,
+            degraded_count: 0,
+            stale_count: 0,
+            attention_count: 0,
+            commit_ready_count: 0,
+        });
+    bucket.count += 1;
+    if advisory.stale {
+        bucket.stale_count += 1;
+        bucket.degraded_count += 1;
     }
 }
 
@@ -268,6 +331,16 @@ mod tests {
             "remote_swimmers_api",
         );
         remote.transport_health = TransportHealth::Degraded;
+        remote.environment.advisory = vec![AdvisoryMetadataSummary {
+            source: "c0".to_string(),
+            label: "c0 group".to_string(),
+            value: "swimmers".to_string(),
+            status: "external".to_string(),
+            stale: true,
+            group_key: Some("c0:swimmers".to_string()),
+            observed_at: None,
+            freshness_ms: None,
+        }];
 
         let summary = build_fleet_lens_summary(&[local, remote]);
 
@@ -292,5 +365,17 @@ mod tests {
             .map(|bucket| bucket.label.as_str())
             .collect::<Vec<_>>();
         assert_eq!(target_labels, vec!["Skillbox devbox", "local"]);
+
+        let advisory = summary
+            .buckets
+            .iter()
+            .find(|bucket| {
+                bucket.kind == FleetLensBucketKind::Advisory && bucket.key == "c0:swimmers"
+            })
+            .expect("advisory bucket");
+        assert_eq!(advisory.label, "c0 group: swimmers");
+        assert_eq!(advisory.count, 1);
+        assert_eq!(advisory.stale_count, 1);
+        assert_eq!(advisory.degraded_count, 1);
     }
 }

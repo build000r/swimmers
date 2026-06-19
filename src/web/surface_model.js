@@ -177,11 +177,54 @@ function addFleetBucket(buckets, kind, key, label, session) {
   buckets.set(bucketKey, bucket);
 }
 
+function advisoryFleetKey(badge) {
+  const explicit = String(badge?.group_key || "").trim();
+  if (explicit) return explicit;
+  const source = String(badge?.source || "").trim().toLowerCase();
+  const label = String(badge?.label || "").trim().toLowerCase();
+  const value = String(badge?.value || "").trim().toLowerCase();
+  return source && label && value ? [source, label, value].join(":") : "";
+}
+
+function advisoryFleetLabel(badge) {
+  const label = String(badge?.label || "").trim();
+  const value = String(badge?.value || "").trim();
+  return label && value ? `${label}: ${value}` : "";
+}
+
+function addAdvisoryFleetBucket(buckets, badge) {
+  const key = advisoryFleetKey(badge);
+  const label = advisoryFleetLabel(badge);
+  if (!key || !label) return;
+  const bucketKey = `advisory\0${key}`;
+  const bucket = buckets.get(bucketKey) || {
+    kind: "advisory",
+    key,
+    label,
+    count: 0,
+    degraded_count: 0,
+    stale_count: 0,
+    attention_count: 0,
+    commit_ready_count: 0,
+    advisory_count: 0,
+  };
+  bucket.count += 1;
+  bucket.advisory_count += 1;
+  if (badge.stale) {
+    bucket.stale_count += 1;
+    bucket.degraded_count += 1;
+  }
+  buckets.set(bucketKey, bucket);
+}
+
 export function buildFleetLensSummary(sessions) {
   const buckets = new Map();
   for (const session of Array.isArray(sessions) ? sessions : []) {
     addFleetBucket(buckets, "target", session.targetKey, session.targetLabel, session);
     addFleetBucket(buckets, "repo", session.repoKey, session.repoLabel, session);
+    for (const badge of session.advisoryBadges || []) {
+      addAdvisoryFleetBucket(buckets, badge);
+    }
     addFleetBucket(buckets, "state", session.stateKey, session.state, session);
     addFleetBucket(buckets, "readiness", session.readinessKey, session.readinessLabel, session);
     addFleetBucket(buckets, "transport", session.transportKey, session.transportLabel, session);
@@ -189,9 +232,10 @@ export function buildFleetLensSummary(sessions) {
   const order = new Map([
     ["target", 0],
     ["repo", 1],
-    ["state", 2],
-    ["readiness", 3],
-    ["transport", 4],
+    ["advisory", 2],
+    ["state", 3],
+    ["readiness", 4],
+    ["transport", 5],
   ]);
   return {
     total_sessions: Array.isArray(sessions) ? sessions.length : 0,
@@ -213,6 +257,8 @@ export function sessionMatchesFleetFilter(session, filter) {
       return session.targetKey === active.key;
     case "repo":
       return session.repoKey === active.key;
+    case "advisory":
+      return (session.advisoryBadges || []).some((badge) => advisoryFleetKey(badge) === active.key);
     case "state":
       return session.stateKey === active.key;
     case "readiness":
@@ -363,8 +409,9 @@ export function fleetLensChips(lens, filter) {
   const target = bucketFor(lens, "target");
   const repo = bucketFor(lens, "repo");
   const needs = bucketFor(lens, "readiness", "needs_attention");
+  const advisory = bucketFor(lens, "advisory");
   const degraded = firstNonHealthyTransport(lens);
-  for (const bucket of [target, repo, needs, degraded].filter(Boolean)) {
+  for (const bucket of [target, repo, advisory, needs, degraded].filter(Boolean)) {
     chips.push({
       label: inboxChipLabel(bucket),
       kind: bucket.kind,
@@ -559,13 +606,21 @@ export function sessionAdvisoryBadges(session) {
     ? session.environment.advisory
     : [];
   return advisories
-    .map((advisory) => ({
-      source: String(advisory?.source || "").trim(),
-      label: String(advisory?.label || "").trim(),
-      value: String(advisory?.value || "").trim(),
-      status: String(advisory?.status || "external").trim() || "external",
-      stale: advisory?.stale !== false,
-    }))
+    .map((advisory) => {
+      const freshness = advisory?.freshness_ms;
+      return {
+        source: String(advisory?.source || "").trim(),
+        label: String(advisory?.label || "").trim(),
+        value: String(advisory?.value || "").trim(),
+        status: String(advisory?.status || "external").trim() || "external",
+        stale: advisory?.stale !== false,
+        group_key: String(advisory?.group_key || "").trim(),
+        observed_at: String(advisory?.observed_at || "").trim(),
+        freshness_ms: freshness === null || freshness === undefined || freshness === ""
+          ? null
+          : (Number.isFinite(Number(freshness)) ? Number(freshness) : null),
+      };
+    })
     .filter((advisory) => advisory.source && advisory.label && advisory.value);
 }
 

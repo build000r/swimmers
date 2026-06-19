@@ -482,6 +482,12 @@ pub struct AdvisoryMetadataSummary {
     pub value: String,
     pub status: String,
     pub stale: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub group_key: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub observed_at: Option<DateTime<Utc>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub freshness_ms: Option<u64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -723,6 +729,7 @@ impl EnvironmentSummary {
 pub enum FleetLensBucketKind {
     Target,
     Repo,
+    Advisory,
     State,
     Readiness,
     Transport,

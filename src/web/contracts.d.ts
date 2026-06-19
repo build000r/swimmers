@@ -136,6 +136,9 @@ export interface AdvisoryMetadataSummary {
   value: string;
   status: string;
   stale: boolean;
+  group_key: Nullable<string>;
+  observed_at: Nullable<IsoDateTime>;
+  freshness_ms: Nullable<number>;
 }
 
 export interface SessionEnvironmentSummary {
@@ -228,7 +231,7 @@ export interface EnvironmentSummary {
   advisory: AdvisoryMetadataSummary[];
 }
 
-export type FleetLensBucketKind = "target" | "repo" | "state" | "readiness" | "transport";
+export type FleetLensBucketKind = "target" | "repo" | "advisory" | "state" | "readiness" | "transport";
 
 export interface FleetLensBucket {
   kind: FleetLensBucketKind | string;

@@ -1,6 +1,6 @@
 use super::*;
 use swimmers::color::hsl_to_rgb;
-use swimmers::fleet_lens::build_fleet_lens_summary;
+use swimmers::fleet_lens::{advisory_key, build_fleet_lens_summary};
 use swimmers::session_labels::{session_canonical_cwd_key, session_cwd_label};
 use swimmers::types::{
     ActionCueKind, AdvisoryMetadataSummary, DependencyHealthStatus, EnvironmentSummary,
@@ -35,6 +35,7 @@ pub(crate) struct ThoughtLogEntry {
     pub(crate) state_key: String,
     pub(crate) readiness_key: String,
     pub(crate) transport_key: String,
+    pub(crate) advisory_keys: Vec<String>,
     pub(crate) batch: Option<SessionBatchMembership>,
     pub(crate) state: SessionState,
     pub(crate) current_command: Option<String>,
@@ -65,6 +66,12 @@ impl ThoughtLogEntry {
             state_key: thought_filter_state_key(session.state).to_string(),
             readiness_key: thought_filter_readiness_key(session).to_string(),
             transport_key: thought_filter_transport_key(session.transport_health).to_string(),
+            advisory_keys: session
+                .environment
+                .advisory
+                .iter()
+                .filter_map(advisory_key)
+                .collect(),
             batch: session.batch.clone(),
             state: session.state,
             current_command: session.current_command.clone(),
@@ -672,6 +679,7 @@ fn fleet_bucket_is_useful_chip(bucket: &FleetLensBucket, buckets: &[FleetLensBuc
         FleetLensBucketKind::Readiness => bucket_count > 1 || bucket.key == "needs_attention",
         FleetLensBucketKind::Transport => bucket_count > 1 || bucket.key != "healthy",
         FleetLensBucketKind::Repo => false,
+        FleetLensBucketKind::Advisory => bucket_count > 0,
     }
 }
 
@@ -718,6 +726,7 @@ fn fleet_filter_chip_color(fleet: &ThoughtFleetFilter, filter: &ThoughtFilter) -
         FleetLensBucketKind::Transport if fleet.key != "healthy" => Color::Red,
         FleetLensBucketKind::Transport => Color::DarkGrey,
         FleetLensBucketKind::Repo => Color::Cyan,
+        FleetLensBucketKind::Advisory => Color::Blue,
     }
 }
 
@@ -954,6 +963,7 @@ fn thought_filter_entry_fleet_matches(entry: &ThoughtLogEntry, fleet: &ThoughtFl
     match fleet.kind {
         FleetLensBucketKind::Target => entry.target_key == fleet.key,
         FleetLensBucketKind::Repo => entry.cwd == fleet.key,
+        FleetLensBucketKind::Advisory => entry.advisory_keys.iter().any(|key| key == &fleet.key),
         FleetLensBucketKind::State => entry.state_key == fleet.key,
         FleetLensBucketKind::Readiness => entry.readiness_key == fleet.key,
         FleetLensBucketKind::Transport => entry.transport_key == fleet.key,
@@ -967,6 +977,12 @@ fn thought_filter_session_fleet_matches(
     match fleet.kind {
         FleetLensBucketKind::Target => thought_filter_target_key(session) == fleet.key,
         FleetLensBucketKind::Repo => session_canonical_cwd_key(session) == fleet.key,
+        FleetLensBucketKind::Advisory => session
+            .environment
+            .advisory
+            .iter()
+            .filter_map(advisory_key)
+            .any(|key| key == fleet.key),
         FleetLensBucketKind::State => thought_filter_state_key(session.state) == fleet.key,
         FleetLensBucketKind::Readiness => thought_filter_readiness_key(session) == fleet.key,
         FleetLensBucketKind::Transport => {
@@ -979,6 +995,7 @@ fn fleet_filter_kind_label(kind: FleetLensBucketKind) -> &'static str {
     match kind {
         FleetLensBucketKind::Target => "host",
         FleetLensBucketKind::Repo => "pwd",
+        FleetLensBucketKind::Advisory => "ext",
         FleetLensBucketKind::State => "state",
         FleetLensBucketKind::Readiness => "ready",
         FleetLensBucketKind::Transport => "health",

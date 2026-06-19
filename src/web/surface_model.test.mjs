@@ -213,7 +213,16 @@ test("surfaceSession exposes advisory metadata as passive external badges", () =
       display_host: "local",
       canonical_cwd: "/Users/tester/repos/opensource/swimmers",
       advisory: [
-        { source: "c0", label: "c0 group", value: "wave-a", status: "external", stale: true },
+        {
+          source: "c0",
+          label: "c0 group",
+          value: "wave-a",
+          status: "external",
+          stale: true,
+          group_key: "c0:wave-a",
+          observed_at: "2026-06-05T00:00:00Z",
+          freshness_ms: 120000,
+        },
         { source: "ntm", label: "", value: "ignored", status: "external", stale: true },
       ],
     },
@@ -225,6 +234,9 @@ test("surfaceSession exposes advisory metadata as passive external badges", () =
     value: "wave-a",
     status: "external",
     stale: true,
+    group_key: "c0:wave-a",
+    observed_at: "2026-06-05T00:00:00Z",
+    freshness_ms: 120000,
   }]);
   assert.equal(session.advisoryLabel, "c0 group: wave-a (external stale)");
 });
@@ -379,7 +391,14 @@ test("buildSurfaceModel applies fleet lens filters without losing bucket counts"
       target_kind: "swimmers_api",
       display_host: "Skillbox devbox",
       canonical_cwd: "/Users/tester/repos/opensource/swimmers",
-      advisory: [{ source: "load_guard", label: "capacity", value: "tight", status: "external", stale: true }],
+      advisory: [{
+        source: "manual",
+        label: "capacity",
+        value: "tight",
+        status: "external",
+        stale: true,
+        group_key: "capacity:tight",
+      }],
     },
   });
   const state = baseState({
@@ -403,6 +422,12 @@ test("buildSurfaceModel applies fleet lens filters without losing bucket counts"
     model.fleetLens.buckets.find((bucket) => bucket.kind === "target" && bucket.key === "skillbox")?.advisory_count,
     1,
   );
+  assert.deepEqual(
+    model.fleetLens.buckets
+      .filter((bucket) => bucket.kind === "advisory")
+      .map((bucket) => [bucket.key, bucket.label, bucket.count, bucket.stale_count]),
+    [["capacity:tight", "capacity: tight", 1, 1]],
+  );
   assert.equal(
     model.fleetLens.buckets.find((bucket) => bucket.kind === "repo")?.count,
     2,
@@ -410,6 +435,59 @@ test("buildSurfaceModel applies fleet lens filters without losing bucket counts"
   assert.deepEqual(model.fleetFilter, { kind: "target", key: "skillbox" });
   assert.equal(model.fleetChips[0].label, "all 2");
   assert.equal(model.fleetChips[1].label, "target Skillbox devbox 1 · ext 1");
+  assert.equal(model.fleetChips[1].active, true);
+});
+
+test("buildSurfaceModel can filter by passive advisory metadata without changing session identity", () => {
+  const advisory = rawSession({
+    session_id: "advisory",
+    tmux_name: "advisory-agent",
+    cwd: "/Users/tester/repos/opensource/swimmers",
+    environment: {
+      scope: "local",
+      target_id: "local",
+      target_label: "Local machine",
+      target_kind: "local",
+      display_host: "local",
+      canonical_cwd: "/Users/tester/repos/opensource/swimmers",
+      advisory: [{
+        source: "c0",
+        label: "c0 group",
+        value: "swimmers",
+        status: "external",
+        stale: true,
+        group_key: "c0:swimmers",
+      }],
+    },
+  });
+  const plain = rawSession({
+    session_id: "plain",
+    tmux_name: "plain-agent",
+    cwd: "/Users/tester/repos/opensource/skills",
+    environment: {
+      scope: "local",
+      target_id: "local",
+      target_label: "Local machine",
+      target_kind: "local",
+      display_host: "local",
+      canonical_cwd: "/Users/tester/repos/opensource/skills",
+    },
+  });
+
+  const model = buildSurfaceModel({
+    state: baseState({
+      sessions: [advisory, plain],
+      fleetFilter: { kind: "advisory", key: "c0:swimmers" },
+    }),
+    boot: { focus_layout: false, franken_term_available: true },
+    websocketOpen: 7,
+  });
+
+  assert.deepEqual(model.fleetFilter, { kind: "advisory", key: "c0:swimmers" });
+  assert.deepEqual(model.sessions.map((session) => session.sessionId), ["advisory"]);
+  assert.equal(model.sessions[0].fullCwd, "/Users/tester/repos/opensource/swimmers");
+  assert.equal(model.sessions[0].name, "advisory-agent");
+  assert.equal(model.fleetChips[1].label, "advisory c0 group: swimmers 1 · ext 1");
   assert.equal(model.fleetChips[1].active, true);
 });
 
