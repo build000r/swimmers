@@ -33,8 +33,12 @@ export function createSessionSocketController(runtime) {
     }
 
     await runtime.setupTerminalSurface();
+    const refreshedSession = runtime.currentSession();
+    if (!refreshedSession || refreshedSession.session_id !== session.session_id) {
+      return;
+    }
     const plan = selectedSessionConnectionPlan({
-      session,
+      session: refreshedSession,
       terminalSurfaceChecked: true,
       hasTerminal: Boolean(state.terminal),
       terminalFallbackActive: state.terminalFallbackActive,

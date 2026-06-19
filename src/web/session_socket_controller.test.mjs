@@ -175,3 +175,33 @@ test("connectSelectedSession disconnects stale sockets before async terminal set
   assert.equal(state.ws, sockets[0]);
   assert.equal(calls.filter(([name]) => name === "feedTerminalBytes").length, 0);
 });
+
+test("connectSelectedSession drops stale async setup after selection changes", async () => {
+  const gate = deferred();
+  const { calls, controller, setSession, sockets, state } = runtimeFixture({
+    session: { session_id: "sess_a" },
+    runtime: {
+      setupTerminalSurface: async () => {
+        calls.push(["setupTerminalSurface:start"]);
+        await gate.promise;
+        calls.push(["setupTerminalSurface:done"]);
+      },
+    },
+  });
+
+  const connecting = controller.connectSelectedSession();
+
+  await Promise.resolve();
+  setSession({ session_id: "sess_b" });
+  gate.resolve();
+  await connecting;
+
+  assert.equal(sockets.length, 0);
+  assert.equal(state.ws, null);
+
+  await controller.connectSelectedSession();
+
+  assert.equal(sockets.length, 1);
+  assert.equal(sockets[0].sessionId, "sess_b");
+  assert.equal(state.ws, sockets[0]);
+});
