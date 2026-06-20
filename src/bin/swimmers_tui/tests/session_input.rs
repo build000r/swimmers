@@ -1065,6 +1065,10 @@ fn toggle_launch_target_persists_across_picker_reopen() {
     )));
     api.push_list_dirs(Ok(dir_response_with_launch_targets(
         TEST_REPOS_ROOT,
+        &[("remote-swimmers", false)],
+    )));
+    api.push_list_dirs(Ok(dir_response_with_launch_targets(
+        TEST_REPOS_ROOT,
         &[("swimmers", false)],
     )));
     let field = test_field();
@@ -1075,6 +1079,9 @@ fn toggle_launch_target_persists_across_picker_reopen() {
 
     assert_eq!(app.launch_target.as_deref(), Some("local"));
     app.handle_picker_action(PickerAction::ToggleLaunchTarget, field);
+    assert_eq!(app.launch_target.as_deref(), Some("jeremy-skillbox"));
+    assert!(app.pending_interaction.is_some());
+    poll_until_interaction(&mut app);
     assert_eq!(app.launch_target.as_deref(), Some("jeremy-skillbox"));
 
     app.close_picker();
@@ -1089,7 +1096,11 @@ fn toggle_launch_target_persists_across_picker_reopen() {
     );
     assert_eq!(
         api.list_targets(),
-        vec![None, Some("jeremy-skillbox".to_string())]
+        vec![
+            None,
+            Some("jeremy-skillbox".to_string()),
+            Some("jeremy-skillbox".to_string())
+        ]
     );
 }
 
@@ -1363,6 +1374,45 @@ fn picker_commit_action_blocks_remote_target_before_local_write() {
         app.message.as_ref().map(|(message, _)| message.as_str()),
         Some("remote directory actions are read-only for devbox")
     );
+}
+
+#[test]
+fn picker_launch_target_toggle_reloads_remote_inventory_before_local_write() {
+    let api = MockApi::new();
+    api.push_list_dirs(Ok(dir_response(TEST_REPOS_ROOT, &[("swimmers", false)])));
+    let field = test_field();
+    let mut response = dir_response_with_launch_targets(TEST_REPOS_ROOT, &[("swimmers", false)]);
+    response.entries = vec![repo_dir_entry("swimmers", true, Some(true), None)];
+    response.default_launch_target = Some("jeremy-skillbox".to_string());
+    let mut app = make_app(api.clone());
+    let mut picker = PickerState::new(
+        2,
+        2,
+        response,
+        true,
+        SpawnTool::Codex,
+        Some("jeremy-skillbox".to_string()),
+    );
+    picker.selection = PickerSelection::Entry(0);
+    app.launch_target = Some("jeremy-skillbox".to_string());
+    app.picker = Some(picker);
+
+    app.handle_picker_action(PickerAction::ToggleLaunchTarget, field);
+
+    assert_eq!(app.launch_target.as_deref(), Some("local"));
+    assert!(app.pending_interaction.is_some());
+
+    app.picker_start_action_for_selection(RepoActionKind::Commit);
+
+    assert!(api.start_repo_action_calls().is_empty());
+    assert_eq!(
+        app.message.as_ref().map(|(message, _)| message.as_str()),
+        Some("wait for the current action to finish")
+    );
+
+    poll_until_interaction(&mut app);
+    assert!(app.pending_interaction.is_none());
+    assert_eq!(api.list_targets(), vec![None]);
 }
 
 #[test]

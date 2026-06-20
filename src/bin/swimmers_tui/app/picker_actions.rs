@@ -108,8 +108,33 @@ impl<C: TuiApi> App<C> {
     }
 
     fn toggle_picker_launch_target_from_action(&mut self) {
-        if let Some(picker) = &mut self.picker {
-            self.launch_target = picker.toggle_launch_target();
+        let previous_inventory_target = selected_remote_inventory_target(
+            self.picker.as_ref(),
+            self.launch_target.as_deref(),
+            &self.launch_targets,
+            &self.environments,
+        );
+        let Some((path, managed_only, group, launch_target)) = self.picker.as_mut().map(|picker| {
+            let launch_target = picker.toggle_launch_target();
+            (
+                picker.current_path.clone(),
+                picker.managed_only,
+                picker.current_group.clone(),
+                launch_target,
+            )
+        }) else {
+            return;
+        };
+        self.launch_target = launch_target;
+
+        let next_inventory_target = selected_remote_inventory_target(
+            self.picker.as_ref(),
+            self.launch_target.as_deref(),
+            &self.launch_targets,
+            &self.environments,
+        );
+        if previous_inventory_target != next_inventory_target {
+            self.picker_reload_with_options(Some(path), managed_only, group, true, true);
         }
     }
 
