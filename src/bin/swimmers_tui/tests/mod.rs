@@ -42,9 +42,9 @@ use proptest::prelude::*;
 use swimmers::api::remote_sessions;
 use swimmers::openrouter_models::default_openrouter_candidates;
 use swimmers::types::{
-    AttentionGroupLayout, CreateSessionsBatchResult, GhosttyOpenMode, RepoActionStatus,
-    SessionBatchMembership, SessionGroupInputResult, StateEvidence, ThoughtSource, ThoughtState,
-    TransportHealth,
+    AttentionGroupLayout, CreateSessionsBatchResult, GhosttyOpenMode, LaunchPathMapping,
+    RepoActionStatus, SessionBatchMembership, SessionGroupInputResult, StateEvidence,
+    ThoughtSource, ThoughtState, TransportHealth,
 };
 use tempfile::tempdir;
 

@@ -156,6 +156,57 @@ fn remote_inventory_target(target: Option<&str>) -> Option<String> {
         .map(str::to_string)
 }
 
+fn target_supports_remote_inventory(target: &LaunchTargetSummary) -> bool {
+    target.kind.trim().eq_ignore_ascii_case("swimmers_api") && !target.path_mappings.is_empty()
+}
+
+fn environment_remote_inventory_target(
+    environments: &[EnvironmentSummary],
+    target_id: Option<&str>,
+) -> Option<String> {
+    let target_id = target_id
+        .map(str::trim)
+        .filter(|target| !target.is_empty())?;
+    environments
+        .iter()
+        .find(|environment| {
+            environment.id == target_id && environment.capabilities.remote_dir_inventory
+        })
+        .map(|environment| environment.id.clone())
+}
+
+fn selected_remote_inventory_target(
+    picker: Option<&PickerState>,
+    fallback_target: Option<&str>,
+    launch_targets: &[LaunchTargetSummary],
+    environments: &[EnvironmentSummary],
+) -> Option<String> {
+    if let Some(picker) = picker {
+        let target = picker.selected_launch_target();
+        return target_supports_remote_inventory(&target).then_some(target.id);
+    }
+
+    let Some(target_id) = fallback_target
+        .map(str::trim)
+        .filter(|target| !target.is_empty() && *target != "local")
+    else {
+        return None;
+    };
+
+    if let Some(target) = launch_targets.iter().find(|target| target.id == target_id) {
+        return target_supports_remote_inventory(target).then(|| target.id.clone());
+    }
+
+    if environments
+        .iter()
+        .any(|environment| environment.id == target_id)
+    {
+        return environment_remote_inventory_target(environments, Some(target_id));
+    }
+
+    remote_inventory_target(Some(target_id))
+}
+
 fn remote_inventory_read_only_message(target: &str) -> String {
     format!("remote directory actions are read-only for {target}")
 }
@@ -282,6 +333,7 @@ pub(crate) struct App<C: TuiApi> {
     pub(crate) picker: Option<PickerState>,
     pub(crate) spawn_tool: SpawnTool,
     pub(crate) launch_target: Option<String>,
+    pub(crate) launch_targets: Vec<LaunchTargetSummary>,
     pub(crate) initial_request: Option<InitialRequestState>,
     pub(crate) group_input_targets: Option<GroupInputTargets>,
     pub(crate) initial_request_generation: u64,
@@ -369,6 +421,7 @@ impl<C: TuiApi> App<C> {
             picker: None,
             spawn_tool: SpawnTool::Grok,
             launch_target: None,
+            launch_targets: Vec::new(),
             initial_request: None,
             group_input_targets: None,
             initial_request_generation: 0,
@@ -1105,6 +1158,7 @@ impl<C: TuiApi> App<C> {
                     self.launch_target.clone(),
                 );
                 self.launch_target = picker.launch_target.clone();
+                self.launch_targets = picker.launch_targets.clone();
                 picker.sync_theme_colors(&mut self.repo_themes);
                 self.picker = Some(picker);
                 self.last_picker_refresh = Some(Instant::now());
@@ -1139,6 +1193,7 @@ impl<C: TuiApi> App<C> {
                     picker.current_group = group;
                     picker.apply_response(response, preserve_selection);
                     self.launch_target = picker.launch_target.clone();
+                    self.launch_targets = picker.launch_targets.clone();
                     picker.sync_theme_colors(&mut self.repo_themes);
                     self.last_picker_refresh = Some(Instant::now());
                 }
@@ -1542,11 +1597,11 @@ impl<C: TuiApi> App<C> {
             return;
         };
 
-        let target = remote_inventory_target(
-            self.picker
-                .as_ref()
-                .and_then(|picker| picker.launch_target.as_deref())
-                .or(self.launch_target.as_deref()),
+        let target = selected_remote_inventory_target(
+            self.picker.as_ref(),
+            self.launch_target.as_deref(),
+            &self.launch_targets,
+            &self.environments,
         );
         let requested_target = target.clone();
         let client = Arc::clone(&self.client);
@@ -1583,11 +1638,11 @@ impl<C: TuiApi> App<C> {
             return;
         };
 
-        let target = remote_inventory_target(
-            self.picker
-                .as_ref()
-                .and_then(|picker| picker.launch_target.as_deref())
-                .or(self.launch_target.as_deref()),
+        let target = selected_remote_inventory_target(
+            self.picker.as_ref(),
+            self.launch_target.as_deref(),
+            &self.launch_targets,
+            &self.environments,
         );
         let client = Arc::clone(&self.client);
         if show_message {

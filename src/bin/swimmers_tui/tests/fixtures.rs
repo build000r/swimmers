@@ -303,7 +303,10 @@ fn dir_response_with_launch_targets(path: &str, names: &[(&str, bool)]) -> DirLi
             base_url: Some("http://100.105.106.104:3210".to_string()),
             auth_token_env: Some("SWIMMERS_JEREMY_AUTH_TOKEN".to_string()),
             bootstrap_hint: None,
-            path_mappings: Vec::new(),
+            path_mappings: vec![LaunchPathMapping {
+                local_prefix: TEST_REPOS_ROOT.to_string(),
+                remote_prefix: "/srv/repos".to_string(),
+            }],
         },
     ];
     response.default_launch_target = Some("local".to_string());

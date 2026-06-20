@@ -16,6 +16,18 @@ fn remote_target_mapping_alpha() -> LaunchTargetSummary {
     }
 }
 
+fn ssh_only_target() -> LaunchTargetSummary {
+    LaunchTargetSummary {
+        id: "skillbox-devbox".to_string(),
+        label: "Skillbox devbox".to_string(),
+        kind: "ssh_only".to_string(),
+        base_url: None,
+        auth_token_env: None,
+        bootstrap_hint: None,
+        path_mappings: Vec::new(),
+    }
+}
+
 #[test]
 fn render_picker_uses_current_repo_theme_color() {
     let temp = tempdir().expect("tempdir");
@@ -1335,6 +1347,38 @@ fn remote_picker_activation_blocks_unmapped_entry_before_composer() {
             .as_ref()
             .map(|request| request.cwd.as_str()),
         Some(TEST_REPO_ALPHA)
+    );
+}
+
+#[test]
+fn ssh_only_picker_reload_keeps_local_directory_inventory() {
+    let api = MockApi::new();
+    let mut reload_response = dir_response(TEST_REPOS_ROOT, &[("swimmers", false)]);
+    reload_response.launch_targets = vec![LaunchTargetSummary::local(), ssh_only_target()];
+    reload_response.default_launch_target = Some("local".to_string());
+    api.push_list_dirs(Ok(reload_response));
+    let mut initial_response = dir_response(TEST_REPOS_ROOT, &[("swimmers", false)]);
+    initial_response.launch_targets = vec![LaunchTargetSummary::local(), ssh_only_target()];
+    initial_response.default_launch_target = Some("skillbox-devbox".to_string());
+    let mut app = make_app(api.clone());
+    app.picker = Some(PickerState::new(
+        10,
+        10,
+        initial_response,
+        true,
+        SpawnTool::Codex,
+        None,
+    ));
+
+    app.picker_reload(Some(TEST_REPOS_ROOT.to_string()), true, None);
+    poll_until_interaction(&mut app);
+
+    assert_eq!(api.list_targets(), vec![None]);
+    assert_eq!(
+        app.picker
+            .as_ref()
+            .and_then(|picker| picker.launch_target.as_deref()),
+        Some("local")
     );
 }
 

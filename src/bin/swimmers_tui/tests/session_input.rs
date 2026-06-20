@@ -1094,6 +1094,56 @@ fn toggle_launch_target_persists_across_picker_reopen() {
 }
 
 #[test]
+fn ssh_only_launch_target_persists_across_picker_reopen_without_remote_inventory() {
+    fn ssh_only_response(path: &str, names: &[(&str, bool)]) -> DirListResponse {
+        let mut response = dir_response(path, names);
+        response.launch_targets = vec![
+            LaunchTargetSummary::local(),
+            LaunchTargetSummary {
+                id: "skillbox-devbox".to_string(),
+                label: "Skillbox devbox".to_string(),
+                kind: "ssh_only".to_string(),
+                base_url: None,
+                auth_token_env: None,
+                bootstrap_hint: Some("ssh skillbox-devbox 'swimmers serve'".to_string()),
+                path_mappings: Vec::new(),
+            },
+        ];
+        response.default_launch_target = Some("local".to_string());
+        response
+    }
+
+    let api = MockApi::new();
+    api.push_list_dirs(Ok(ssh_only_response(
+        TEST_REPOS_ROOT,
+        &[("initial-local", false)],
+    )));
+    api.push_list_dirs(Ok(ssh_only_response(
+        TEST_REPOS_ROOT,
+        &[("reopened-local", false)],
+    )));
+    let field = test_field();
+    let mut app = make_app(api.clone());
+
+    app.handle_field_click(10, 10, field);
+    poll_until_interaction(&mut app);
+
+    assert_eq!(app.launch_target.as_deref(), Some("local"));
+    app.handle_picker_action(PickerAction::ToggleLaunchTarget, field);
+    assert_eq!(app.launch_target.as_deref(), Some("skillbox-devbox"));
+
+    app.close_picker();
+    app.handle_field_click(10, 10, field);
+    poll_until_interaction(&mut app);
+
+    let picker = app.picker.as_ref().expect("picker should reopen");
+    assert_eq!(picker.launch_target.as_deref(), Some("skillbox-devbox"));
+    assert_eq!(picker.entries.len(), 1);
+    assert_eq!(picker.entries[0].name, "reopened-local");
+    assert_eq!(api.list_targets(), vec![None, None]);
+}
+
+#[test]
 fn failed_remote_picker_open_resets_launch_target_to_local() {
     let api = MockApi::new();
     api.push_list_dirs(Err("remote down".to_string()));

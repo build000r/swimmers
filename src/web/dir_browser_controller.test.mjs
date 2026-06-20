@@ -78,6 +78,14 @@ function devboxTarget() {
   };
 }
 
+function sshOnlyTarget() {
+  return {
+    id: "skillbox-devbox",
+    label: "Skillbox devbox",
+    kind: "ssh_only",
+  };
+}
+
 function selectElement(value = "local") {
   return {
     value,
@@ -440,6 +448,49 @@ test("directory browser controller reloads inventory when launch target changes"
     assert.equal(state.dirBrowser.launchTarget, "devbox");
     assert.equal(calls.length, 1);
     assert.equal(calls[0], "/v1/dirs?path=%2Fworkspace&managed_only=false&target=devbox");
+  } finally {
+    globalThis.document = previousDocument;
+  }
+});
+
+test("directory browser controller keeps ssh-only target on local inventory reload", async () => {
+  const previousDocument = globalThis.document;
+  globalThis.document = {
+    createElement(tagName) {
+      return { tagName, value: "", textContent: "" };
+    },
+  };
+  try {
+    const calls = [];
+    const { runtime, state, el } = createRuntime({
+      apiFetch: async (url) => {
+        calls.push(url);
+        return {};
+      },
+      responseJson: async (_response, normalize) => normalize({
+        path: "/workspace",
+        entries: [],
+        launch_targets: [{ id: "local", label: "Local machine", kind: "local" }, sshOnlyTarget()],
+        default_launch_target: "local",
+      }),
+      location: new URL("http://swimmers.test/"),
+      renderDirBrowserView() {
+        return true;
+      },
+    });
+    state.dirBrowser.path = "/workspace";
+    state.dirBrowser.entries = [{ name: "swimmers", has_children: false }];
+    state.dirBrowser.launchTargets = [{ id: "local", label: "Local machine", kind: "local" }, sshOnlyTarget()];
+    state.dirBrowser.launchTarget = "local";
+    el.dirsPath.value = "/workspace";
+    el.createLaunchTarget = selectElement("skillbox-devbox");
+
+    const controller = createDirBrowserController(runtime);
+    await controller.handleCreateLaunchTargetChange();
+
+    assert.equal(state.dirBrowser.launchTarget, "skillbox-devbox");
+    assert.equal(calls.length, 1);
+    assert.equal(calls[0], "/v1/dirs?path=%2Fworkspace&managed_only=false");
   } finally {
     globalThis.document = previousDocument;
   }

@@ -115,6 +115,17 @@ export function createDirBrowserController(runtime) {
     return dirBrowserLaunchTargetPayload(el, state.dirBrowser);
   }
 
+  function remoteInventoryTargetPayload() {
+    const target = selectedLaunchTargetSummary();
+    if (String(target?.kind || "").trim().toLowerCase() !== "swimmers_api") {
+      return null;
+    }
+    if (!Array.isArray(target?.path_mappings) || target.path_mappings.length === 0) {
+      return null;
+    }
+    return launchTargetPayload();
+  }
+
   function remoteDirectoryWritesReadOnly() {
     return launchTargetPayload() !== null;
   }
@@ -270,8 +281,8 @@ export function createDirBrowserController(runtime) {
       if (groupName) {
         url.searchParams.set("group", groupName);
       }
-      const target = selectedLaunchTarget();
-      if (target && target !== "local") {
+      const target = remoteInventoryTargetPayload();
+      if (target) {
         url.searchParams.set("target", target);
       }
       const response = await apiFetch(url.pathname + url.search);
