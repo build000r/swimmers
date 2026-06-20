@@ -643,6 +643,26 @@ Match host *
 }
 
 #[test]
+fn ssh_import_parses_keyword_equals_directives() {
+    let config = r#"
+Host eqbox
+  HostName=eq.example.com
+  User=skillbox
+"#;
+
+    let report = ssh_import_report_from_config("/tmp/ssh-config", config);
+
+    assert_eq!(report.proposals.len(), 1);
+    assert_eq!(report.proposals[0].id, "eqbox");
+    assert_eq!(report.proposals[0].label, "skillbox@eq.example.com");
+    assert_eq!(
+        report.proposals[0].host_name.as_deref(),
+        Some("eq.example.com")
+    );
+    assert_eq!(report.proposals[0].user.as_deref(), Some("skillbox"));
+}
+
+#[test]
 fn ssh_import_report_from_path_expands_included_config_files() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let ssh_dir = tmp.path().join(".ssh");
@@ -703,6 +723,30 @@ Host prod
         .expect("devbox proposal");
     assert_eq!(devbox.label, "aiops@devbox.example");
     assert!(devbox.source.contains("10-devbox.conf:2"));
+}
+
+#[test]
+fn ssh_import_report_from_path_expands_equals_include() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let root = tmp.path().join("config");
+    let included = tmp.path().join("included.conf");
+    std::fs::write(&root, format!("Include={}\n", included.display())).expect("write root config");
+    std::fs::write(
+        &included,
+        r#"
+Host eq-include
+  HostName=included.example
+  User=aiops
+"#,
+    )
+    .expect("write included config");
+
+    let report = ssh_import_report_from_path(&root).expect("ssh import report");
+
+    assert!(report.warnings.is_empty(), "{:?}", report.warnings);
+    assert_eq!(report.proposals.len(), 1);
+    assert_eq!(report.proposals[0].id, "eq-include");
+    assert_eq!(report.proposals[0].label, "aiops@included.example");
 }
 
 #[test]

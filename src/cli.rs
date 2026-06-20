@@ -611,10 +611,10 @@ impl SshImportParser {
             if line.is_empty() {
                 continue;
             }
-            let mut parts = line.split_whitespace();
-            let Some(keyword) = parts.next() else {
+            let Some((keyword, arguments)) = split_ssh_config_directive(line) else {
                 continue;
             };
+            let mut parts = arguments.split_whitespace();
             if keyword.eq_ignore_ascii_case("Host") {
                 if self.inside_match_block && is_indented {
                     continue;
@@ -672,6 +672,36 @@ fn strip_ssh_config_comment(line: &str) -> &str {
     line.split_once('#')
         .map(|(before, _)| before)
         .unwrap_or(line)
+}
+
+fn split_ssh_config_directive(line: &str) -> Option<(&str, &str)> {
+    let line = line.trim();
+    if line.is_empty() {
+        return None;
+    }
+
+    let first_ws = line.find(|ch: char| ch.is_ascii_whitespace());
+    let first_eq = line.find('=');
+
+    let (keyword, arguments) = match (first_ws, first_eq) {
+        (Some(ws_index), Some(eq_index)) if eq_index < ws_index => {
+            (&line[..eq_index], &line[eq_index + 1..])
+        }
+        (None, Some(eq_index)) => (&line[..eq_index], &line[eq_index + 1..]),
+        (Some(ws_index), _) => {
+            let rest = line[ws_index..].trim_start();
+            let rest = rest.strip_prefix('=').unwrap_or(rest).trim_start();
+            (&line[..ws_index], rest)
+        }
+        (None, None) => (line, ""),
+    };
+
+    let keyword = keyword.trim();
+    if keyword.is_empty() {
+        None
+    } else {
+        Some((keyword, arguments.trim()))
+    }
 }
 
 fn ssh_include_paths<'a>(
