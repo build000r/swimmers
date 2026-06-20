@@ -306,6 +306,23 @@ async fn delete_session_response(
     session_id: &str,
     delete_mode: SessionDeleteMode,
 ) -> Response {
+    match remote_sessions::denamespace_for_target(session_id) {
+        Ok(Some((target, remote_session_id))) => {
+            return match remote_sessions::delete_remote_session(
+                &target,
+                remote_session_id,
+                &delete_mode,
+            )
+            .await
+            {
+                Ok(response) => (StatusCode::OK, Json(response)).into_response(),
+                Err(err) => err.into_response(),
+            };
+        }
+        Ok(None) => {}
+        Err(err) => return err.into_response(),
+    }
+
     match state
         .supervisor
         .delete_session(session_id, delete_mode)
@@ -346,6 +363,18 @@ pub(super) async fn dismiss_attention(
     if let Err(resp) = auth.require_scope(AuthScope::SessionsWrite) {
         return resp;
     }
+    match remote_sessions::denamespace_for_target(&session_id) {
+        Ok(Some((target, remote_session_id))) => {
+            return match remote_sessions::dismiss_remote_attention(&target, remote_session_id).await
+            {
+                Ok(response) => (StatusCode::OK, Json(response)).into_response(),
+                Err(err) => err.into_response(),
+            };
+        }
+        Ok(None) => {}
+        Err(err) => return err.into_response(),
+    }
+
     let handle = match state.supervisor.get_session(&session_id).await {
         Some(h) => h,
         None => {

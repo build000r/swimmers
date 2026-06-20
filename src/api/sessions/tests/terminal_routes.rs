@@ -416,6 +416,49 @@ async fn dismiss_attention_returns_not_found_for_unknown_session() {
 }
 
 #[tokio::test]
+async fn dismiss_attention_prefers_remote_namespace_error_over_local_session() {
+    let state = test_state();
+    let session_id =
+        remote_sessions::namespace_session_id("not-configured-dismiss-target", "shadow");
+    let (cmd_tx, mut cmd_rx) = mpsc::channel(8);
+    state
+        .supervisor
+        .insert_test_handle(ActorHandle::test_handle(
+            &session_id,
+            "tmux-remote-shadow",
+            cmd_tx,
+        ))
+        .await;
+
+    let response = dismiss_attention(
+        Extension(AuthInfo::new(OPERATOR_SCOPES.to_vec())),
+        State(state),
+        Path(session_id),
+    )
+    .await
+    .into_response();
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let json = response_json(response).await;
+    assert_eq!(json["code"], "LAUNCH_TARGET_UNKNOWN");
+    let mut saw_local_dismiss = false;
+    for _ in 0..4 {
+        match tokio::time::timeout(Duration::from_millis(10), cmd_rx.recv()).await {
+            Ok(Some(SessionCommand::DismissAttention)) => {
+                saw_local_dismiss = true;
+                break;
+            }
+            Ok(Some(_)) => {}
+            Ok(None) | Err(_) => break,
+        }
+    }
+    assert!(
+        !saw_local_dismiss,
+        "remote namespace error must not deliver a local dismiss command"
+    );
+}
+
+#[tokio::test]
 async fn dismiss_attention_forwards_command_and_returns_ok() {
     let state = test_state();
     let (cmd_tx, mut cmd_rx) = mpsc::channel(8);

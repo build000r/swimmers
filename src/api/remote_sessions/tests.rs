@@ -7,9 +7,10 @@ use crate::types::{
     SUMMARY_CAUSE_REMOTE_POLL_DEGRADED,
 };
 use axum::http::HeaderMap;
-use axum::routing::{get, post};
+use axum::routing::{delete, get, post};
 use axum::{Json as AxumJson, Router};
 use chrono::Utc;
+use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::sync::Arc;
 use tokio::sync::Mutex;
@@ -423,6 +424,49 @@ async fn remote_smoke_send_input(
     .into_response()
 }
 
+async fn remote_smoke_delete_session(
+    axum::extract::State(state): axum::extract::State<RemoteSmokeState>,
+    headers: HeaderMap,
+    axum::extract::Path(session_id): axum::extract::Path<String>,
+    axum::extract::Query(query): axum::extract::Query<BTreeMap<String, String>>,
+) -> Response {
+    let path = match query.get("mode") {
+        Some(mode) => format!("/v1/sessions/{session_id}?mode={mode}"),
+        None => format!("/v1/sessions/{session_id}"),
+    };
+    state
+        .capture("DELETE", path, &headers, serde_json::Value::Null)
+        .await;
+    if remote_smoke_scope(&headers) != RemoteSmokeScope::Operator {
+        return remote_smoke_auth_error(&headers, "operator");
+    }
+    AxumJson(serde_json::json!({
+        "ok": true,
+        "session_id": session_id,
+        "mode": query.get("mode").cloned(),
+    }))
+    .into_response()
+}
+
+async fn remote_smoke_dismiss_attention(
+    axum::extract::State(state): axum::extract::State<RemoteSmokeState>,
+    headers: HeaderMap,
+    axum::extract::Path(session_id): axum::extract::Path<String>,
+) -> Response {
+    let path = format!("/v1/sessions/{session_id}/attention/dismiss");
+    state
+        .capture("POST", path, &headers, serde_json::Value::Null)
+        .await;
+    if remote_smoke_scope(&headers) != RemoteSmokeScope::Operator {
+        return remote_smoke_auth_error(&headers, "operator");
+    }
+    AxumJson(serde_json::json!({
+        "ok": true,
+        "session_id": session_id,
+    }))
+    .into_response()
+}
+
 async fn remote_smoke_group_input(
     axum::extract::State(state): axum::extract::State<RemoteSmokeState>,
     headers: HeaderMap,
@@ -521,6 +565,14 @@ async fn spawn_remote_smoke_server() -> (String, tokio::task::JoinHandle<()>, Re
         .route(
             "/v1/sessions/{session_id}/input",
             post(remote_smoke_send_input),
+        )
+        .route(
+            "/v1/sessions/{session_id}",
+            delete(remote_smoke_delete_session),
+        )
+        .route(
+            "/v1/sessions/{session_id}/attention/dismiss",
+            post(remote_smoke_dismiss_attention),
         )
         .route("/v1/sessions/group-input", post(remote_smoke_group_input))
         .route(
@@ -2022,6 +2074,72 @@ async fn send_remote_input_posts_denamespaced_session_and_namespaces_response() 
     drop(requests);
     handle.abort();
     std::env::remove_var(REMOTE_OPERATOR_TOKEN_ENV);
+}
+
+#[tokio::test]
+async fn delete_remote_session_deletes_denamespaced_session_with_mode_and_auth() {
+    let _guard = crate::test_support::ENV_LOCK
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
+    let _token_guard = TestEnvGuard::set(REMOTE_OPERATOR_TOKEN_ENV, REMOTE_OPERATOR_TOKEN);
+    let (base_url, handle, state) = spawn_remote_smoke_server().await;
+    let target = remote_smoke_target(&base_url, REMOTE_OPERATOR_TOKEN_ENV);
+
+    let response = delete_remote_session(
+        &target,
+        "sess-delete",
+        &crate::config::SessionDeleteMode::KillTmux,
+    )
+    .await
+    .expect("remote delete");
+
+    assert_eq!(response["ok"], true);
+    assert_eq!(response["session_id"], "sess-delete");
+    assert_eq!(response["mode"], "kill_tmux");
+    let requests = state.requests.lock().await;
+    let request = requests
+        .iter()
+        .find(|request| {
+            request.method == "DELETE" && request.path == "/v1/sessions/sess-delete?mode=kill_tmux"
+        })
+        .expect("remote delete request");
+    assert_eq!(
+        request.auth.as_deref(),
+        Some(format!("Bearer {REMOTE_OPERATOR_TOKEN}").as_str())
+    );
+    drop(requests);
+    handle.abort();
+}
+
+#[tokio::test]
+async fn dismiss_remote_attention_posts_denamespaced_session_with_auth() {
+    let _guard = crate::test_support::ENV_LOCK
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
+    let _token_guard = TestEnvGuard::set(REMOTE_OPERATOR_TOKEN_ENV, REMOTE_OPERATOR_TOKEN);
+    let (base_url, handle, state) = spawn_remote_smoke_server().await;
+    let target = remote_smoke_target(&base_url, REMOTE_OPERATOR_TOKEN_ENV);
+
+    let response = dismiss_remote_attention(&target, "sess-attention")
+        .await
+        .expect("remote attention dismiss");
+
+    assert_eq!(response["ok"], true);
+    assert_eq!(response["session_id"], "sess-attention");
+    let requests = state.requests.lock().await;
+    let request = requests
+        .iter()
+        .find(|request| {
+            request.method == "POST"
+                && request.path == "/v1/sessions/sess-attention/attention/dismiss"
+        })
+        .expect("remote dismiss request");
+    assert_eq!(
+        request.auth.as_deref(),
+        Some(format!("Bearer {REMOTE_OPERATOR_TOKEN}").as_str())
+    );
+    drop(requests);
+    handle.abort();
 }
 
 #[tokio::test]

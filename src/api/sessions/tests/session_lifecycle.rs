@@ -175,6 +175,27 @@ async fn delete_session_returns_not_found_for_missing_session() {
 }
 
 #[tokio::test]
+async fn delete_session_prefers_remote_namespace_error_over_local_session() {
+    let state = test_state();
+    let session_id =
+        remote_sessions::namespace_session_id("not-configured-delete-target", "shadow");
+    let _rx = insert_summary_test_handle(&state, summary(&session_id, SessionState::Idle)).await;
+
+    let response = delete_session(
+        Extension(AuthInfo::new(OPERATOR_SCOPES.to_vec())),
+        State(state.clone()),
+        Path(session_id.clone()),
+        Query(DeleteSessionQuery { mode: None }),
+    )
+    .await;
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let json = response_json(response).await;
+    assert_eq!(json["code"], "LAUNCH_TARGET_UNKNOWN");
+    assert!(state.supervisor.get_session(&session_id).await.is_some());
+}
+
+#[tokio::test]
 async fn delete_session_error_response_maps_internal_errors() {
     let response = delete_session_error_response(anyhow::anyhow!("tmux kill failed"));
 

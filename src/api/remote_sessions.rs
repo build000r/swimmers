@@ -15,7 +15,7 @@ use serde::Serialize;
 
 use crate::api::envelope::error_body_msg;
 use crate::api::service::validate_sessions_batch_dirs;
-use crate::config::Config;
+use crate::config::{Config, SessionDeleteMode};
 use crate::session::overlay::default_overlay;
 use crate::types::{
     CreateSessionRequest, CreateSessionResponse, CreateSessionsBatchRequest,
@@ -1634,6 +1634,44 @@ pub async fn send_remote_input(
     Ok(response)
 }
 
+pub async fn delete_remote_session(
+    target: &LaunchTargetSummary,
+    remote_session_id: &str,
+    delete_mode: &SessionDeleteMode,
+) -> Result<serde_json::Value, RemoteSessionError> {
+    let session_id = encode_path_segment(remote_session_id);
+    let mode = remote_delete_mode_param(delete_mode);
+    delete_remote_json_with_query(
+        target,
+        &format!("/v1/sessions/{session_id}"),
+        &[("mode", mode)],
+        "REMOTE_SESSION_DELETE_FAILED",
+        "delete session",
+    )
+    .await
+}
+
+fn remote_delete_mode_param(delete_mode: &SessionDeleteMode) -> &'static str {
+    match delete_mode {
+        SessionDeleteMode::DetachBridge => "detach_bridge",
+        SessionDeleteMode::KillTmux => "kill_tmux",
+    }
+}
+
+pub async fn dismiss_remote_attention(
+    target: &LaunchTargetSummary,
+    remote_session_id: &str,
+) -> Result<serde_json::Value, RemoteSessionError> {
+    let session_id = encode_path_segment(remote_session_id);
+    post_remote_empty_json(
+        target,
+        &format!("/v1/sessions/{session_id}/attention/dismiss"),
+        "REMOTE_ATTENTION_DISMISS_FAILED",
+        "dismiss attention",
+    )
+    .await
+}
+
 pub async fn send_remote_group_input(
     target: &LaunchTargetSummary,
     remote_session_ids: Vec<String>,
@@ -1823,6 +1861,33 @@ where
     })
 }
 
+async fn delete_remote_json_with_query<T>(
+    target: &LaunchTargetSummary,
+    path: &str,
+    query: &[(&str, &str)],
+    code: &'static str,
+    action: &'static str,
+) -> Result<T, RemoteSessionError>
+where
+    T: serde::de::DeserializeOwned,
+{
+    ensure_swimmers_api_target(target)?;
+    let client = http_client(REMOTE_CREATE_TIMEOUT)?;
+    let url = remote_url(target, path)?;
+    let response = with_remote_auth(client.delete(url), target)?
+        .query(query)
+        .send()
+        .await
+        .map_err(|err| {
+            RemoteSessionError::new(
+                StatusCode::BAD_GATEWAY,
+                code,
+                format!("failed to {action} on '{}': {err}", target.id),
+            )
+        })?;
+    remote_json_response(target, response, code, action).await
+}
+
 async fn post_remote_json<B, T>(
     target: &LaunchTargetSummary,
     path: &str,
@@ -1848,6 +1913,43 @@ where
                 format!("failed to {action} on '{}': {err}", target.id),
             )
         })?;
+    remote_json_response(target, response, code, action).await
+}
+
+async fn post_remote_empty_json<T>(
+    target: &LaunchTargetSummary,
+    path: &str,
+    code: &'static str,
+    action: &'static str,
+) -> Result<T, RemoteSessionError>
+where
+    T: serde::de::DeserializeOwned,
+{
+    ensure_swimmers_api_target(target)?;
+    let client = http_client(REMOTE_CREATE_TIMEOUT)?;
+    let url = remote_url(target, path)?;
+    let response = with_remote_auth(client.post(url), target)?
+        .send()
+        .await
+        .map_err(|err| {
+            RemoteSessionError::new(
+                StatusCode::BAD_GATEWAY,
+                code,
+                format!("failed to {action} on '{}': {err}", target.id),
+            )
+        })?;
+    remote_json_response(target, response, code, action).await
+}
+
+async fn remote_json_response<T>(
+    target: &LaunchTargetSummary,
+    response: reqwest::Response,
+    code: &'static str,
+    action: &'static str,
+) -> Result<T, RemoteSessionError>
+where
+    T: serde::de::DeserializeOwned,
+{
     if !response.status().is_success() {
         return Err(remote_response_error(
             target,
