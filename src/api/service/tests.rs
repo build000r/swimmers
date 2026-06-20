@@ -1162,6 +1162,65 @@ async fn update_dir_group_memberships_persists_delta_and_returns_effective_group
 }
 
 #[tokio::test]
+async fn update_dir_group_memberships_removes_user_added_group_without_stale_exclusion() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let base = dir.path().join("repos");
+    let frontend = base.join("frontend-app");
+    let backend = base.join("backend-app");
+    let other = base.join("other-app");
+    let wildcard_root = dir.path().join("skills");
+    std::fs::create_dir_all(&frontend).expect("frontend");
+    std::fs::create_dir_all(&backend).expect("backend");
+    std::fs::create_dir_all(&other).expect("other");
+    std::fs::create_dir_all(&wildcard_root).expect("wildcard");
+    let mut config = test_group_config(&base, frontend, backend, wildcard_root);
+    let store = FileStore::new(dir.path().join("store"))
+        .await
+        .expect("store");
+
+    update_dir_group_memberships_with_config(
+        store.clone(),
+        &base.canonicalize().expect("base"),
+        &config,
+        DirGroupMembershipUpdateRequest {
+            path: other.to_string_lossy().into_owned(),
+            target: None,
+            add: vec!["frontend".into()],
+            remove: Vec::new(),
+        },
+    )
+    .await
+    .expect("add user group");
+
+    let response = update_dir_group_memberships_with_config(
+        store.clone(),
+        &base.canonicalize().expect("base"),
+        &config,
+        DirGroupMembershipUpdateRequest {
+            path: other.to_string_lossy().into_owned(),
+            target: None,
+            add: Vec::new(),
+            remove: vec!["frontend".into()],
+        },
+    )
+    .await
+    .expect("remove user group");
+
+    assert!(response.groups.is_empty());
+    let memberships = store.load_dir_group_memberships().await;
+    assert!(
+        !memberships.groups.contains_key("frontend"),
+        "removing a user-added group should not leave a stale exclusion"
+    );
+
+    config.groups[0].paths.push(other.clone());
+    assert_eq!(
+        service_directory::effective_groups_for_path(&config, &memberships, &other),
+        vec!["frontend".to_string()]
+    );
+}
+
+#[tokio::test]
 async fn update_dir_group_memberships_rejects_unknown_and_empty_updates_before_persisting() {
     let dir = tempfile::tempdir().expect("tempdir");
     let base = dir.path().join("repos");

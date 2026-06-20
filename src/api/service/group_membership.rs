@@ -105,9 +105,16 @@ pub(super) async fn update_dir_group_memberships_with_config(
 
     let path = canonical_path_string(&canonical_path);
     let update_path = path.clone();
+    let overlay_removals = overlay_group_membership_removals(dir_config, &canonical_path, &remove);
     let memberships = store
         .update_dir_group_memberships(move |memberships| {
-            apply_group_membership_update(memberships, &update_path, add, remove);
+            apply_group_membership_update_with_overlay_removals(
+                memberships,
+                &update_path,
+                add,
+                remove,
+                &overlay_removals,
+            );
         })
         .await
         .map_err(|error| {
@@ -224,13 +231,45 @@ fn prune_empty_group_deltas(memberships: &mut DirGroupMemberships) {
         .retain(|_, delta| !delta.include_paths.is_empty() || !delta.exclude_paths.is_empty());
 }
 
+fn overlay_group_membership_removals(
+    config: &OverlayDirConfig,
+    canonical_path: &Path,
+    groups: &[String],
+) -> BTreeSet<String> {
+    config
+        .groups
+        .iter()
+        .filter(|group| groups.iter().any(|name| name == &group.name))
+        .filter(|group| overlay_group_contains_path(group, canonical_path))
+        .map(|group| group.name.clone())
+        .collect()
+}
+
+#[cfg(test)]
 pub(super) fn apply_group_membership_update(
     memberships: &mut DirGroupMemberships,
     path: &str,
     add: Vec<String>,
     remove: Vec<String>,
 ) {
-    apply_group_membership_removes(memberships, path, remove);
+    let overlay_removals = remove.iter().cloned().collect::<BTreeSet<_>>();
+    apply_group_membership_update_with_overlay_removals(
+        memberships,
+        path,
+        add,
+        remove,
+        &overlay_removals,
+    );
+}
+
+fn apply_group_membership_update_with_overlay_removals(
+    memberships: &mut DirGroupMemberships,
+    path: &str,
+    add: Vec<String>,
+    remove: Vec<String>,
+    overlay_removals: &BTreeSet<String>,
+) {
+    apply_group_membership_removes(memberships, path, remove, overlay_removals);
     apply_group_membership_adds(memberships, path, add);
     prune_empty_group_deltas(memberships);
 }
@@ -239,9 +278,11 @@ fn apply_group_membership_removes(
     memberships: &mut DirGroupMemberships,
     path: &str,
     groups: Vec<String>,
+    overlay_removals: &BTreeSet<String>,
 ) {
     for group in groups {
-        apply_group_membership_remove(memberships, path, group);
+        let removes_overlay_membership = overlay_removals.contains(&group);
+        apply_group_membership_remove(memberships, path, group, removes_overlay_membership);
     }
 }
 
@@ -255,10 +296,19 @@ fn apply_group_membership_adds(
     }
 }
 
-fn apply_group_membership_remove(memberships: &mut DirGroupMemberships, path: &str, group: String) {
+fn apply_group_membership_remove(
+    memberships: &mut DirGroupMemberships,
+    path: &str,
+    group: String,
+    removes_overlay_membership: bool,
+) {
     let delta = memberships.groups.entry(group).or_default();
     delta.include_paths.remove(path);
-    delta.exclude_paths.insert(path.to_string());
+    if removes_overlay_membership {
+        delta.exclude_paths.insert(path.to_string());
+    } else {
+        delta.exclude_paths.remove(path);
+    }
 }
 
 fn apply_group_membership_add(memberships: &mut DirGroupMemberships, path: &str, group: String) {
