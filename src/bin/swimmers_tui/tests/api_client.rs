@@ -997,6 +997,64 @@ async fn api_client_fetch_environment_metadata_falls_back_to_sessions_envelope_o
 }
 
 #[tokio::test]
+async fn api_client_fetch_environment_metadata_fallback_preserves_bearer_auth() {
+    use axum::http::{HeaderMap, StatusCode};
+    use axum::response::IntoResponse;
+    use axum::routing::get;
+    use axum::{Json, Router};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+
+    let session_hits = Arc::new(AtomicUsize::new(0));
+    let session_hits_route = Arc::clone(&session_hits);
+    let app = Router::new().route(
+        "/v1/sessions",
+        get(move |headers: HeaderMap| {
+            let session_hits = Arc::clone(&session_hits_route);
+            async move {
+                let authorized = headers
+                    .get("authorization")
+                    .and_then(|value| value.to_str().ok())
+                    == Some("Bearer testtoken");
+                if !authorized {
+                    return StatusCode::UNAUTHORIZED.into_response();
+                }
+
+                session_hits.fetch_add(1, Ordering::SeqCst);
+                let mut environment = EnvironmentSummary::local();
+                environment.id = "legacy-token-devbox".to_string();
+                Json(SessionListResponse {
+                    sessions: Vec::new(),
+                    version: 1,
+                    repo_themes: HashMap::new(),
+                    environments: vec![environment],
+                    fleet_lens: Default::default(),
+                    fleet_presets: Vec::new(),
+                })
+                .into_response()
+            }
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind test server");
+    let addr = listener.local_addr().expect("server addr");
+    let handle = tokio::spawn(async move {
+        axum::serve(listener, app).await.expect("serve test api");
+    });
+    let client = test_api_client(format!("http://{addr}"), Some("testtoken"));
+
+    let metadata = client
+        .fetch_environment_metadata()
+        .await
+        .expect("authenticated environment metadata fallback");
+
+    handle.abort();
+    assert_eq!(session_hits.load(Ordering::SeqCst), 1);
+    assert_eq!(metadata.environments[0].id, "legacy-token-devbox");
+}
+
+#[tokio::test]
 async fn startup_preflight_waits_for_slow_local_sessions() {
     let (base_url, handle) = spawn_delayed_api_server(Some(Duration::from_millis(150)), None).await;
     let client = test_api_client(base_url, None);
