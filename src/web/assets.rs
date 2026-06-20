@@ -816,15 +816,11 @@ async fn resolve_vite_dist_asset_path(
     dist_dir: &Path,
     relative_path: &Path,
 ) -> Result<Option<PathBuf>, std::io::Error> {
-    let dist_root = match tokio::fs::canonicalize(dist_dir).await {
-        Ok(path) => path,
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(err) => return Err(err),
+    let Some(dist_root) = canonicalize_existing(dist_dir).await? else {
+        return Ok(None);
     };
-    let assets_root = match tokio::fs::canonicalize(dist_dir.join("assets")).await {
-        Ok(path) => path,
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(err) => return Err(err),
+    let Some(assets_root) = canonicalize_existing(dist_dir.join("assets")).await? else {
+        return Ok(None);
     };
     if !assets_root.starts_with(&dist_root)
         || assets_root.file_name() != Some(std::ffi::OsStr::new("assets"))
@@ -832,15 +828,30 @@ async fn resolve_vite_dist_asset_path(
         return Ok(None);
     }
 
-    let asset_path = match tokio::fs::canonicalize(dist_dir.join(relative_path)).await {
-        Ok(path) => path,
+    let Some(asset_path) = canonicalize_existing(dist_dir.join(relative_path)).await? else {
+        return Ok(None);
+    };
+    if !asset_path.starts_with(&assets_root) {
+        return Ok(None);
+    }
+
+    let metadata = match tokio::fs::metadata(&asset_path).await {
+        Ok(metadata) => metadata,
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(err) => return Err(err),
     };
-    if asset_path.starts_with(&assets_root) {
+    if metadata.is_file() {
         Ok(Some(asset_path))
     } else {
         Ok(None)
+    }
+}
+
+async fn canonicalize_existing(path: impl AsRef<Path>) -> Result<Option<PathBuf>, std::io::Error> {
+    match tokio::fs::canonicalize(path).await {
+        Ok(path) => Ok(Some(path)),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(err) => Err(err),
     }
 }
 

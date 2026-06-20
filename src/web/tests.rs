@@ -552,6 +552,7 @@ async fn vite_dist_asset_route_serves_built_js_css_and_chunks_with_cache_policy(
     .expect("write chunk");
     std::fs::write(assets_dir.join("app.js"), "console.log('alias');").expect("write alias");
     std::fs::write(assets_dir.join("app-12345678.js.map"), "{}").expect("write map");
+    std::fs::create_dir_all(assets_dir.join("nested")).expect("nested asset dir");
 
     let cases = [
         (
@@ -603,6 +604,9 @@ async fn vite_dist_asset_route_serves_built_js_css_and_chunks_with_cache_policy(
         "assets/app-12345678.js?raw",
         "assets/app-12345678.js#hash",
         "assets/app-12345678.js.map",
+        "assets/",
+        "assets/nested",
+        "assets/nested/",
         ".vite/manifest.json",
     ] {
         let response = serve_vite_dist_asset(dir.path(), route).await;
