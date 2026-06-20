@@ -649,6 +649,65 @@ async fn vite_dist_asset_route_rejects_symlink_escape_from_assets_dir() {
         .contains("secret outside assets"));
 }
 
+#[tokio::test]
+async fn vite_dist_asset_public_route_rejects_encoded_traversal() {
+    let dir = tempdir().expect("tempdir");
+    let assets_dir = dir.path().join("assets");
+    std::fs::create_dir_all(&assets_dir).expect("assets dir");
+    std::fs::write(
+        assets_dir.join("app-12345678.js"),
+        "export const safe = true;",
+    )
+    .expect("write safe asset");
+    std::fs::write(dir.path().join("private.js"), "secret outside assets")
+        .expect("write private asset");
+
+    let app = axum::Router::new().route(
+        "/assets/vite/{*path}",
+        axum::routing::get({
+            let dist_dir = dir.path().to_path_buf();
+            move |axum::extract::Path(path): axum::extract::Path<String>| {
+                let dist_dir = dist_dir.clone();
+                async move { serve_vite_dist_asset(&dist_dir, &path).await }
+            }
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind test asset server");
+    let base_url = format!("http://{}", listener.local_addr().expect("test addr"));
+    let server = tokio::spawn(async move {
+        axum::serve(listener, app)
+            .await
+            .expect("serve asset test router");
+    });
+
+    let valid = reqwest::get(format!("{base_url}/assets/vite/assets/app-12345678.js"))
+        .await
+        .expect("valid asset response");
+    assert_eq!(valid.status(), StatusCode::OK);
+    assert_eq!(
+        valid.text().await.expect("valid asset body"),
+        "export const safe = true;"
+    );
+
+    for route in [
+        "/assets/vite/assets/%2e%2e/private.js",
+        "/assets/vite/assets/%2E%2E/private.js",
+        "/assets/vite/assets/%5cprivate.js",
+        "/assets/vite/assets%5capp-12345678.js",
+    ] {
+        let response = reqwest::get(format!("{base_url}{route}"))
+            .await
+            .expect("traversal response");
+        assert_eq!(response.status(), StatusCode::NOT_FOUND, "{route}");
+        let body = response.text().await.expect("traversal body");
+        assert!(!body.contains("secret outside assets"), "{route}");
+    }
+
+    server.abort();
+}
+
 #[test]
 fn vite_manifest_tags_reject_backslash_asset_paths() {
     let manifest = serde_json::from_str::<std::collections::BTreeMap<String, ViteManifestEntry>>(
