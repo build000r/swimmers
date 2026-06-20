@@ -10,7 +10,6 @@ use std::time::{Duration, Instant};
 use axum::http::StatusCode;
 use chrono::{DateTime, Utc};
 use futures::stream::{self, StreamExt};
-use tokio::process::Command;
 use tokio::sync::oneshot;
 use uuid::Uuid;
 
@@ -694,55 +693,30 @@ pub async fn restart_services(
         return Err("no restartable services mapped for this path".to_string());
     }
 
-    let commands = restart_commands_for_requested_services(services, requested);
+    let commands = collect_restart_commands(services, requested);
     if commands.is_empty() {
         return Err("matched services have no restart command configured".to_string());
     }
 
-    run_restart_commands(&commands).await
+    run_restart_commands(commands).await
 }
 
-fn restart_commands_for_requested_services<'a>(
-    services: &'a [OverlayServiceEntry],
-    requested: &[String],
-) -> Vec<RestartCommandRef<'a>> {
-    services
-        .iter()
-        .filter(|service| requested.contains(&service.name))
-        .filter_map(restart_command_for_service)
-        .collect()
+async fn run_restart_commands(commands: Vec<(String, String)>) -> Result<(), String> {
+    run_restart_commands_with_timeout(commands, RESTART_COMMAND_TIMEOUT).await
 }
 
-fn restart_command_for_service(service: &OverlayServiceEntry) -> Option<RestartCommandRef<'_>> {
-    Some(RestartCommandRef {
-        service_name: &service.name,
-        command: service.restart.as_deref()?,
+async fn run_restart_commands_with_timeout(
+    commands: Vec<(String, String)>,
+    timeout: Duration,
+) -> Result<(), String> {
+    tokio::task::spawn_blocking(move || {
+        RestartExecutor { commands, timeout }
+            .execute(PathBuf::new(), RepoActionKind::Restart)
+            .map(|_| ())
+            .map_err(|error| error.to_string())
     })
-}
-
-async fn run_restart_commands(commands: &[RestartCommandRef<'_>]) -> Result<(), String> {
-    for command in commands {
-        run_restart_command(command).await?;
-    }
-    Ok(())
-}
-
-async fn run_restart_command(command: &RestartCommandRef<'_>) -> Result<(), String> {
-    let output = restart_command_output(command).await?;
-    if output.status.success() {
-        return Ok(());
-    }
-
-    Err(restart_failure_message(
-        command.service_name,
-        &output.stdout,
-        &output.stderr,
-    ))
-}
-
-struct RestartCommandRef<'a> {
-    service_name: &'a str,
-    command: &'a str,
+    .await
+    .map_err(|error| format!("restart task failed: {error}"))?
 }
 
 async fn probe_pending_entries(state: &Arc<AppState>, pending: &[PendingEntry]) -> Vec<RepoProbe> {
@@ -1608,64 +1582,6 @@ pub async fn open_native_session_for_host(
     )
     .await
     .map_err(|error| NativeOpenServiceError::Internal(error.to_string()))
-}
-
-async fn restart_command_output(
-    command: &RestartCommandRef<'_>,
-) -> Result<std::process::Output, String> {
-    tokio::time::timeout(
-        RESTART_COMMAND_TIMEOUT,
-        // `kill_on_drop` ensures the timeout actually reaps the child: when
-        // the timeout fires the `output()` future is dropped, and without
-        // this the spawned `sh` (and its descendants' controlling process)
-        // would be orphaned and keep running past the deadline.
-        Command::new("sh")
-            .arg("-c")
-            .arg(command.command)
-            .kill_on_drop(true)
-            .output(),
-    )
-    .await
-    .map_err(|_| {
-        format!(
-            "restart of {} timed out after {}s",
-            command.service_name,
-            RESTART_COMMAND_TIMEOUT.as_secs()
-        )
-    })?
-    .map_err(|error| error.to_string())
-}
-
-fn restart_failure_message(service_name: &str, stdout: &[u8], stderr: &[u8]) -> String {
-    format!(
-        "{}: {}",
-        service_name,
-        restart_failure_detail(stdout, stderr)
-    )
-}
-
-fn restart_failure_detail(stdout: &[u8], stderr: &[u8]) -> String {
-    let stderr = String::from_utf8_lossy(stderr).trim().to_string();
-    if stderr.is_empty() {
-        restart_stdout_failure_detail(stdout)
-    } else {
-        truncate_restart_detail(&stderr)
-    }
-}
-
-fn restart_stdout_failure_detail(stdout: &[u8]) -> String {
-    let stdout = String::from_utf8_lossy(stdout);
-    let detail = stdout
-        .lines()
-        .rev()
-        .find(|line| !line.trim().is_empty())
-        .unwrap_or("restart failed")
-        .trim();
-    truncate_restart_detail(detail)
-}
-
-fn truncate_restart_detail(detail: &str) -> String {
-    detail.chars().take(600).collect()
 }
 
 #[cfg(test)]

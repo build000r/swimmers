@@ -397,31 +397,149 @@ fn restart_commands_for_matched_services_rejects_no_restart_commands() {
     assert_eq!(err.code, "NO_RESTART_COMMAND");
 }
 
-#[test]
-fn restart_services_failure_detail_prefers_stderr_and_truncates() {
-    let stdout = b"stdout detail";
-    let stderr = format!("{}{}", "x".repeat(610), "tail");
+#[tokio::test]
+async fn restart_services_failure_detail_prefers_stderr_and_truncates() {
+    let stderr = "x".repeat(610);
+    let err = run_restart_commands_with_timeout(
+        vec![(
+            "svc".to_string(),
+            format!(
+                "printf %s {} >&2; exit 9",
+                crate::launcher::shell_single_quote(&stderr)
+            ),
+        )],
+        Duration::from_secs(1),
+    )
+    .await
+    .expect_err("failing restart command should report stderr");
 
-    let detail = restart_failure_detail(stdout, stderr.as_bytes());
-
-    assert_eq!(detail.chars().count(), 600);
-    assert_eq!(detail, "x".repeat(600));
+    let expected = format!("svc: {}", "x".repeat(600));
+    assert_eq!(err, expected);
 }
 
-#[test]
-fn restart_services_failure_detail_uses_last_nonempty_stdout_line() {
-    let stdout = b"first\n\n second detail \n";
+#[tokio::test]
+async fn restart_services_failure_detail_uses_last_nonempty_stdout_line() {
+    let err = run_restart_commands_with_timeout(
+        vec![(
+            "svc".to_string(),
+            "printf 'first\\n\\n second detail \\n'; exit 9".to_string(),
+        )],
+        Duration::from_secs(1),
+    )
+    .await
+    .expect_err("failing restart command should report stdout fallback");
 
-    let detail = restart_failure_detail(stdout, b"  \n");
-
-    assert_eq!(detail, "second detail");
+    assert_eq!(err, "svc: second detail");
 }
 
-#[test]
-fn restart_services_failure_detail_defaults_without_output() {
-    let detail = restart_failure_detail(b"\n  \n", b"");
+#[tokio::test]
+async fn restart_services_failure_detail_defaults_without_output() {
+    let err = run_restart_commands_with_timeout(
+        vec![("svc".to_string(), "exit 9".to_string())],
+        Duration::from_secs(1),
+    )
+    .await
+    .expect_err("failing restart command should report default fallback");
 
-    assert_eq!(detail, "restart failed");
+    assert_eq!(err, "svc: restart failed");
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn restart_services_timeout_kills_descendant_processes() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let child_pid_path = temp.path().join("restart-child.pid");
+    let child_pid_file = child_pid_path.to_string_lossy().into_owned();
+    let restart_command = format!(
+        "sleep 60 & echo $! > {}; wait",
+        crate::launcher::shell_single_quote(&child_pid_file)
+    );
+
+    let err = run_restart_commands_with_timeout(
+        vec![("slow-service".to_string(), restart_command)],
+        Duration::from_millis(75),
+    )
+    .await
+    .expect_err("slow restart should time out");
+
+    assert!(
+        err.contains("slow-service: restart timed out after"),
+        "unexpected timeout detail: {err}"
+    );
+
+    let child_pid = read_pid_file(&child_pid_path);
+    let child_stopped_running = wait_for_process_to_stop_running(child_pid, Duration::from_secs(2));
+    kill_pid_if_alive(child_pid);
+    assert!(
+        child_stopped_running,
+        "timed-out direct restart should kill descendant process {child_pid}"
+    );
+}
+
+#[cfg(unix)]
+fn read_pid_file(path: &Path) -> libc::pid_t {
+    let deadline = Instant::now() + Duration::from_secs(1);
+    loop {
+        match std::fs::read_to_string(path) {
+            Ok(value) => return value.trim().parse().expect("child pid should parse"),
+            Err(error) if error.kind() == io::ErrorKind::NotFound && Instant::now() < deadline => {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            Err(error) => panic!("failed to read child pid file: {error}"),
+        }
+    }
+}
+
+#[cfg(unix)]
+fn unix_process_exists(pid: libc::pid_t) -> bool {
+    if pid <= 0 {
+        return false;
+    }
+    let rc = unsafe { libc::kill(pid, 0) };
+    if rc == 0 {
+        return true;
+    }
+    matches!(io::Error::last_os_error().raw_os_error(), Some(libc::EPERM))
+}
+
+#[cfg(unix)]
+fn unix_process_is_zombie(pid: libc::pid_t) -> bool {
+    let Ok(output) = std::process::Command::new("ps")
+        .args(["-o", "stat=", "-p", &pid.to_string()])
+        .output()
+    else {
+        return false;
+    };
+    output.status.success()
+        && String::from_utf8_lossy(&output.stdout)
+            .trim_start()
+            .starts_with('Z')
+}
+
+#[cfg(unix)]
+fn unix_process_is_running(pid: libc::pid_t) -> bool {
+    unix_process_exists(pid) && !unix_process_is_zombie(pid)
+}
+
+#[cfg(unix)]
+fn wait_for_process_to_stop_running(pid: libc::pid_t, timeout: Duration) -> bool {
+    let deadline = Instant::now() + timeout;
+    while unix_process_is_running(pid) {
+        if Instant::now() >= deadline {
+            return false;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    true
+}
+
+#[cfg(unix)]
+fn kill_pid_if_alive(pid: libc::pid_t) {
+    if unix_process_is_running(pid) {
+        unsafe {
+            let _ = libc::kill(pid, libc::SIGKILL);
+        }
+    }
 }
 
 // Empty roots short-circuit before any cache access, so this test never
