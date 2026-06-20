@@ -603,10 +603,6 @@ impl SshImportParser {
     ) {
         for (line_index, raw_line) in config.lines().enumerate() {
             let line_number = line_index + 1;
-            let is_indented = raw_line
-                .chars()
-                .next()
-                .is_some_and(|ch| ch.is_ascii_whitespace());
             let line = strip_ssh_config_comment(raw_line).trim();
             if line.is_empty() {
                 continue;
@@ -616,9 +612,6 @@ impl SshImportParser {
             };
             let parts = ssh_config_arguments(arguments);
             if keyword.eq_ignore_ascii_case("Host") {
-                if self.inside_match_block && is_indented {
-                    continue;
-                }
                 self.inside_match_block = false;
                 self.append_current_block();
                 self.current.aliases = parts;

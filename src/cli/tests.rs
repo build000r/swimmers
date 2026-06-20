@@ -609,7 +609,7 @@ Host *.internal unsafe;alias !negated
   HostName ignored.internal
 
 Match host *
-  Host ignored-after-match
+  User ignored-match-user
 "#;
 
     let report = ssh_import_report_from_config("/tmp/ssh-config", config);
@@ -640,6 +640,28 @@ Match host *
         .overlay_snippet
         .contains("kind: ssh_only"));
     assert_eq!(report.proposals[1].id, "skillbox-short");
+}
+
+#[test]
+fn ssh_import_treats_indented_host_after_match_as_new_block() {
+    let config = r#"
+Match host *
+  User ignored-match-user
+  Host after-match
+    HostName after.example
+    User aiops
+"#;
+
+    let report = ssh_import_report_from_config("/tmp/ssh-config", config);
+
+    assert_eq!(report.proposals.len(), 1);
+    assert_eq!(report.proposals[0].id, "after-match");
+    assert_eq!(report.proposals[0].label, "aiops@after.example");
+    assert_eq!(report.proposals[0].user.as_deref(), Some("aiops"));
+    assert_eq!(
+        report.proposals[0].host_name.as_deref(),
+        Some("after.example")
+    );
 }
 
 #[test]
