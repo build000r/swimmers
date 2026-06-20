@@ -29,6 +29,7 @@ This validates the fixture JSON, checks that its required proof-command map is c
 
 - remote environment inventory with token redaction
 - target health and path-mapping doctor output
+- degraded cached remote targets remain observable but do not advertise write actions
 - mapped and unmapped remote launch preview
 - remote single-session and same-target group input proxying
 - mixed-target group input rejection
@@ -39,6 +40,20 @@ This validates the fixture JSON, checks that its required proof-command map is c
 - passive advisory metadata display as external and stale
 
 The smoke is safe to run on a laptop because it uses test doubles and fixtures only.
+By default, Rust build artifacts are written outside the repo with
+`CARGO_TARGET_DIR=${TMPDIR:-/tmp}/swimmers-multi-env-cockpit-target` when the
+caller has not set `CARGO_TARGET_DIR`.
+
+For split validation, use:
+
+```bash
+bash scripts/test-multi-env-cockpit.sh --fixture-only
+SWIMMERS_MULTI_ENV_SMOKE_SKIP_RUST=1 make multi-env-smoke
+SWIMMERS_MULTI_ENV_SMOKE_SKIP_JS=1 make multi-env-smoke
+```
+
+Those flags exist only to support environments where Rust and Node validation
+run on different machines. The default command remains the release contract.
 
 ## Operator Setup
 

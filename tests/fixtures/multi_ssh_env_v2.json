@@ -352,6 +352,7 @@
     "capability_matrix": "python3 scripts/test-multi-ssh-env-v2.sh --fixture-only",
     "environment_inventory_redaction": "cargo test --lib api::remote_sessions::tests::environment_summary_redacts_token_values_and_credentialed_base_url -- --test-threads=1",
     "health_and_mapping_doctor": "cargo test --lib api::remote_sessions::tests::remote_targets_health_reports_auth_and_mapping_doctor_without_env_names -- --test-threads=1",
+    "degraded_cached_capabilities": "cargo test --lib api::remote_sessions::tests::remote_targets_health_reports_cached_degraded_target_without_secret_values -- --test-threads=1",
     "launcher_receipts": "cargo test --bin swimmers-tui launch_target_preview_uses_longest_mapping_and_blocks_unmapped_remote_cwds -- --test-threads=1",
     "unmapped_cwd_guardrail": "cargo test --lib api::remote_sessions::tests::unmapped_launch_target_cwd_returns_stable_guidance -- --test-threads=1",
     "advisory_freshness": "cargo test --bin swimmers-tui thought_panel_marks_advisory_metadata_as_external_and_stale -- --test-threads=1",

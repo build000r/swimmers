@@ -88,6 +88,7 @@ required_command_keys = {
     "capability_matrix",
     "environment_inventory_redaction",
     "health_and_mapping_doctor",
+    "degraded_cached_capabilities",
     "launcher_receipts",
     "unmapped_cwd_guardrail",
     "advisory_freshness",
@@ -117,6 +118,9 @@ if [[ "${SWIMMERS_MULTI_SSH_SMOKE_SKIP_RUST:-0}" != "1" ]]; then
     -- --test-threads=1
   cargo test --lib \
     api::remote_sessions::tests::remote_targets_health_reports_auth_and_mapping_doctor_without_env_names \
+    -- --test-threads=1
+  cargo test --lib \
+    api::remote_sessions::tests::remote_targets_health_reports_cached_degraded_target_without_secret_values \
     -- --test-threads=1
   cargo test --lib \
     api::remote_sessions::tests::unmapped_launch_target_cwd_returns_stable_guidance \

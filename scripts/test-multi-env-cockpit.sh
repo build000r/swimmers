@@ -1,10 +1,16 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-fixture="tests/fixtures/multi_env_cockpit.json"
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "${ROOT_DIR}"
 
-command -v cargo >/dev/null
-command -v node >/dev/null
+fixture="tests/fixtures/multi_env_cockpit.json"
+fixture_only=0
+
+if [[ "${1:-}" == "--fixture-only" ]]; then
+  fixture_only=1
+fi
+
 command -v python3 >/dev/null
 
 python3 -m json.tool "$fixture" >/dev/null
@@ -19,6 +25,7 @@ with open(fixture_path, "r", encoding="utf-8") as handle:
 required_command_keys = {
     "environment_inventory",
     "health_doctor",
+    "degraded_cached_capabilities",
     "remote_first_launch_preview",
     "remote_write_proxy",
     "remote_group_write_proxy",
@@ -54,43 +61,59 @@ assert not missing, f"missing proof command keys: {sorted(missing)}"
 assert data["one_command_smoke"] == "make multi-env-smoke"
 PY
 
-cargo test --lib \
-  api::remote_sessions::tests::environment_summary_redacts_token_values_and_credentialed_base_url \
-  -- --test-threads=1
-cargo test --lib \
-  api::remote_sessions::tests::remote_targets_health_reports_auth_and_mapping_doctor_without_env_names \
-  -- --test-threads=1
-cargo test --lib \
-  api::remote_sessions::tests::unmapped_launch_target_cwd_returns_stable_guidance \
-  -- --test-threads=1
-cargo test --lib \
-  api::remote_sessions::tests::send_remote_input_posts_denamespaced_session_and_namespaces_response \
-  -- --test-threads=1
-cargo test --lib \
-  api::remote_sessions::tests::send_remote_group_input_denamespaces_request_and_namespaces_results \
-  -- --test-threads=1
-cargo test --lib \
-  api::sessions::group_input::tests::remote_group_input_target_rejects_mixed_remote_targets \
-  -- --test-threads=1
-cargo test --lib \
-  api::service::attention_group::tests::attention_queue_excludes_remote_namespaced_sessions \
-  -- --test-threads=1
-cargo test --lib operator_pressure -- --test-threads=1
-cargo test --bin swimmers-tui \
-  launch_target_preview_uses_longest_mapping_and_blocks_unmapped_remote_cwds \
-  -- --test-threads=1
-cargo test --bin swimmers-tui \
-  thought_panel_header_summarizes_cross_host_inbox \
-  -- --test-threads=1
-cargo test --bin swimmers-tui \
-  header_filter_strip_applies_native_fleet_filters \
-  -- --test-threads=1
-cargo test --bin swimmers-tui \
-  thought_panel_marks_advisory_metadata_as_external_and_stale \
-  -- --test-threads=1
-node --test \
-  src/web/surface_model.test.mjs \
-  src/web/rendered_surface.test.mjs \
-  src/web/app_interaction_behavior.test.mjs
+if [[ "${fixture_only}" == "1" ]]; then
+  printf 'multi-env cockpit fixture passed\n'
+  exit 0
+fi
+
+if [[ "${SWIMMERS_MULTI_ENV_SMOKE_SKIP_RUST:-0}" != "1" ]]; then
+  command -v cargo >/dev/null
+  export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-${TMPDIR:-/tmp}/swimmers-multi-env-cockpit-target}"
+  cargo test --lib \
+    api::remote_sessions::tests::environment_summary_redacts_token_values_and_credentialed_base_url \
+    -- --test-threads=1
+  cargo test --lib \
+    api::remote_sessions::tests::remote_targets_health_reports_auth_and_mapping_doctor_without_env_names \
+    -- --test-threads=1
+  cargo test --lib \
+    api::remote_sessions::tests::remote_targets_health_reports_cached_degraded_target_without_secret_values \
+    -- --test-threads=1
+  cargo test --lib \
+    api::remote_sessions::tests::unmapped_launch_target_cwd_returns_stable_guidance \
+    -- --test-threads=1
+  cargo test --lib \
+    api::remote_sessions::tests::send_remote_input_posts_denamespaced_session_and_namespaces_response \
+    -- --test-threads=1
+  cargo test --lib \
+    api::remote_sessions::tests::send_remote_group_input_denamespaces_request_and_namespaces_results \
+    -- --test-threads=1
+  cargo test --lib \
+    api::sessions::group_input::tests::remote_group_input_target_rejects_mixed_remote_targets \
+    -- --test-threads=1
+  cargo test --lib \
+    api::service::attention_group::tests::attention_queue_excludes_remote_namespaced_sessions \
+    -- --test-threads=1
+  cargo test --lib operator_pressure -- --test-threads=1
+  cargo test --bin swimmers-tui \
+    launch_target_preview_uses_longest_mapping_and_blocks_unmapped_remote_cwds \
+    -- --test-threads=1
+  cargo test --bin swimmers-tui \
+    thought_panel_header_summarizes_cross_host_inbox \
+    -- --test-threads=1
+  cargo test --bin swimmers-tui \
+    header_filter_strip_applies_native_fleet_filters \
+    -- --test-threads=1
+  cargo test --bin swimmers-tui \
+    thought_panel_marks_advisory_metadata_as_external_and_stale \
+    -- --test-threads=1
+fi
+
+if [[ "${SWIMMERS_MULTI_ENV_SMOKE_SKIP_JS:-0}" != "1" ]]; then
+  command -v node >/dev/null
+  node --test \
+    src/web/surface_model.test.mjs \
+    src/web/rendered_surface.test.mjs \
+    src/web/app_interaction_behavior.test.mjs
+fi
 
 printf 'multi-env cockpit smoke passed\n'

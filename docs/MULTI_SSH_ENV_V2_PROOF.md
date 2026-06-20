@@ -44,6 +44,7 @@ The smoke validates fixture shape and then runs focused Rust and web tests for:
 
 - environment inventory redaction
 - target health and path-mapping doctor behavior
+- degraded cached API targets remain observable but do not advertise write actions
 - unmapped cwd launch guardrails
 - TUI launcher preview receipts
 - passive advisory freshness labels

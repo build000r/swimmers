@@ -608,12 +608,21 @@ impl EnvironmentCapabilitySummary {
         has_path_mappings: bool,
         has_bootstrap_hint: bool,
     ) -> Self {
+        Self::remote_swimmers_api_with_state(ready, ready, has_path_mappings, has_bootstrap_hint)
+    }
+
+    pub fn remote_swimmers_api_with_state(
+        observe_sessions: bool,
+        write_ready: bool,
+        has_path_mappings: bool,
+        has_bootstrap_hint: bool,
+    ) -> Self {
         Self {
-            observe_sessions: ready,
-            launch_session: ready,
-            send_input: ready,
-            group_input: ready,
-            remote_dir_inventory: ready && has_path_mappings,
+            observe_sessions,
+            launch_session: write_ready,
+            send_input: write_ready,
+            group_input: write_ready,
+            remote_dir_inventory: write_ready && has_path_mappings,
             native_attach: false,
             ssh_attach_hint: false,
             bootstrap_hint: has_bootstrap_hint,

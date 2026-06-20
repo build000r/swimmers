@@ -202,6 +202,7 @@ fn environment_summary_for_target(target: &LaunchTargetSummary) -> EnvironmentSu
             target,
             safe_ssh_alias.is_some(),
             bootstrap_hint.is_some(),
+            &health,
         ),
         base_url: is_swimmers_api
             .then(|| sanitized_target_base_url(target))
@@ -257,17 +258,31 @@ fn environment_capabilities(
     target: &LaunchTargetSummary,
     has_safe_ssh_alias: bool,
     has_bootstrap_hint: bool,
+    health: &RemoteTargetHealth,
 ) -> EnvironmentCapabilitySummary {
     match normalized_target_kind(target).as_str() {
         "local" => EnvironmentCapabilitySummary::local(),
-        "swimmers_api" => EnvironmentCapabilitySummary::remote_swimmers_api(
-            remote_target_config_error(target).is_none(),
+        "swimmers_api" => EnvironmentCapabilitySummary::remote_swimmers_api_with_state(
+            remote_api_observe_ready(target, health),
+            remote_api_write_ready(target, health),
             !target.path_mappings.is_empty(),
             has_bootstrap_hint,
         ),
         "ssh_only" => EnvironmentCapabilitySummary::ssh_handoff(has_safe_ssh_alias),
         _ => EnvironmentCapabilitySummary::advisory_only(),
     }
+}
+
+fn remote_api_write_ready(target: &LaunchTargetSummary, health: &RemoteTargetHealth) -> bool {
+    remote_target_config_error(target).is_none()
+        && !matches!(
+            health.status,
+            DependencyHealthStatus::Degraded | DependencyHealthStatus::Unavailable
+        )
+}
+
+fn remote_api_observe_ready(target: &LaunchTargetSummary, health: &RemoteTargetHealth) -> bool {
+    remote_api_write_ready(target, health) || health.last_seen_at.is_some()
 }
 
 fn non_api_target_environment_health(kind: &str) -> RemoteTargetHealth {

@@ -1262,6 +1262,14 @@ fn remote_targets_health_reports_cached_degraded_target_without_secret_values() 
 
     let environment = environment_summary_for_target(&remote);
     assert_eq!(environment.status, DependencyHealthStatus::Degraded);
+    assert!(
+        environment.capabilities.observe_sessions,
+        "cached degraded targets should remain visible for stale session inventory"
+    );
+    assert!(!environment.capabilities.launch_session);
+    assert!(!environment.capabilities.send_input);
+    assert!(!environment.capabilities.group_input);
+    assert!(!environment.capabilities.remote_dir_inventory);
     assert_eq!(
         environment.last_error.as_deref(),
         Some("REMOTE_SESSION_LIST_FAILED")
