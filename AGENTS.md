@@ -18,6 +18,8 @@
 - Metamorphic integration tests: `cargo test --test metamorphic`
 - Perf/concurrency gates: `make ci-perf-gates`
 - Coverage lcov: `make cargo-cov-lcov`
+- Remote Rust validation dry run: `make remote-rust-validate-dry-run`
+- Remote Rust validation: `SWIMMERS_REMOTE_RUST_HOST=<ssh-target> make remote-rust-validate`
 - Release workflow: `.github/workflows/release.yml` runs on `v*` tags or manual dispatch, builds the Linux `swimmers` binary, and renders notes with `scripts/release-notes-from-changelog.sh`.
 - Unknown / verify first: no repo lint target is wired in Makefile or CI; check local `rustfmt`/`clippy` availability before relying on `cargo fmt --check` or `cargo clippy`.
 
@@ -45,6 +47,7 @@
 - `cargo test` is the broad local suite; many unit tests live inline across `src/`.
 - `make ci-perf-gates` runs targeted thought, API hot-path, TUI bootstrap, and first-frame perf gates; expect it to be slower and environment-sensitive.
 - Smoke scripts such as `scripts/test-run-tui.sh`, `scripts/test-web-live-terminal.sh`, and `scripts/stress-dirs-concurrency.sh` may require tmux, curl/lsof/bash behavior, and a local machine setup.
+- When local disk pressure or Cargo cache churn blocks Rust proof, run `make remote-rust-validate-dry-run` first, then use `scripts/remote-rust-validate.sh` with `SWIMMERS_REMOTE_RUST_HOST` set to an operator-provided SSH target. The helper copies tracked working-tree files only, runs commands in an optional contributor validation container with an isolated `CARGO_TARGET_DIR`, and removes remote temp directories by default. Add new source files to git before treating remote validation as proof. Do not commit private hostnames, usernames, remote paths, tokens, or raw remote logs.
 - `tests/artifacts/`, `target/`, `lcov.info`, `data/`, and `.swimmers/` are generated/ignored outputs.
 - JS `.mjs` tests exist under `src/web/`, but no package/build file or Make target wires a JS test command; verify runner expectations before changing them.
 

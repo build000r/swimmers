@@ -32,6 +32,10 @@ The tracked fixture is
 The fixture is live-SSH free. It does not connect to hosts, start tmux, launch
 browsers, or require a remote Swimmers service.
 
+Remote Rust validation through `scripts/remote-rust-validate.sh` is a separate
+contributor proof lane; it intentionally uses SSH and must not be treated as
+part of this multi-SSH cockpit live proof.
+
 ## One-Command Smoke
 
 Run:

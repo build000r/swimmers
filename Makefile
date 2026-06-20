@@ -1,7 +1,7 @@
 SHELL := /bin/bash
 .DEFAULT_GOAL := help
 
-.PHONY: help server up tailnet kill up-smoke web web-smoke web-workbench-smoke tui tui-check tui-smoke tui-stress glance-smoke remote-auth-smoke multi-env-smoke multi-ssh-env-smoke multi-ssh-env-live-dry-run release-acceptance release-acceptance-default release-acceptance-source release-acceptance-native release-acceptance-thought release-acceptance-voice release-acceptance-all ci-perf-gates cargo-cov-lcov
+.PHONY: help server up tailnet kill up-smoke web web-smoke web-workbench-smoke tui tui-check tui-smoke tui-stress glance-smoke remote-auth-smoke multi-env-smoke multi-ssh-env-smoke multi-ssh-env-live-dry-run remote-rust-validate remote-rust-validate-dry-run release-acceptance release-acceptance-default release-acceptance-source release-acceptance-native release-acceptance-thought release-acceptance-voice release-acceptance-all ci-perf-gates cargo-cov-lcov
 
 help:
 	@printf '%s\n' \
@@ -24,6 +24,8 @@ help:
 	'  make multi-env-smoke        Verify configured local+remote cockpit fixture contracts' \
 	'  make multi-ssh-env-smoke    Verify v2 local+API+SSH-only fixture contracts' \
 	'  make multi-ssh-env-live-dry-run Print the opt-in live devbox proof plan' \
+	'  make remote-rust-validate-dry-run Print optional remote Cargo validation plan' \
+	'  make remote-rust-validate  Run Rust validation on SWIMMERS_REMOTE_RUST_HOST' \
 	'  make release-acceptance     Verify default installed-binary release smoke' \
 	'  make release-acceptance-all Run default, source, native asset, and thought profiles' \
 	'  make release-acceptance-voice Run optional voice-feature acceptance profile' \
@@ -81,6 +83,12 @@ multi-ssh-env-smoke:
 
 multi-ssh-env-live-dry-run:
 	bash ./scripts/test-multi-ssh-env-live.sh --dry-run
+
+remote-rust-validate:
+	bash ./scripts/remote-rust-validate.sh
+
+remote-rust-validate-dry-run:
+	bash ./scripts/remote-rust-validate.sh --dry-run
 
 release-acceptance: release-acceptance-default
 

@@ -358,6 +358,10 @@ make tui-check          # Type-check the native TUI binary
 make up-smoke           # Run shell-level checks on the combined web+TUI launcher
 make tui-smoke          # Run shell-level bootstrap tests on the run-tui.sh shim
 make glance-smoke       # Render the 10-session Glance fixture and write proof artifacts
+make remote-rust-validate-dry-run
+                        # Print the remote Rust validation plan without SSH
+make remote-rust-validate
+                        # Run cargo validation on SWIMMERS_REMOTE_RUST_HOST
 make release-acceptance # Run the default installed-binary release smoke
 make release-acceptance-all
                         # Run default, source, native asset, and thought profiles
@@ -370,6 +374,25 @@ and the focused selected-session URL (`/selected`), and defaults
 `SWIMMERS_PERSONAL_WORKFLOWS=1` for source-checkout browser workflows. Set that
 environment variable to `0` to hide local repo browsing, skills, group editing,
 and commit-helper routes.
+
+When local disk pressure or Cargo cache churn makes Rust validation impractical,
+agents and maintainers can offload source-checkout validation to an
+operator-provided SSH host:
+
+```bash
+make remote-rust-validate-dry-run
+SWIMMERS_REMOTE_RUST_HOST=builder.example make remote-rust-validate
+SWIMMERS_REMOTE_RUST_HOST=builder.example \
+  scripts/remote-rust-validate.sh -- cargo test group_membership -- --test-threads=1
+```
+
+The helper copies only tracked working-tree files into an isolated remote temp
+checkout, so untracked scratch files are not sent. Add new source files to git
+before treating remote validation as proof. It runs the command inside a
+disposable Rust contributor validation container with an isolated
+`CARGO_TARGET_DIR`, and removes remote temp directories by default. This is only
+a contributor/operator validation lane; Swimmers itself remains a single-binary
+tmux tool with no Docker runtime dependency.
 
 ### Browser asset routes
 
