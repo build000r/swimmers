@@ -59,15 +59,57 @@ export function dirEntryBatchSelectable(entry, resolvedPath) {
   return true;
 }
 
-export function dirEntryGroups(entry) {
-  const groups = Array.isArray(entry?.groups) ? entry.groups : [];
-  const normalized = groups
-    .map((group) => String(group || "").trim())
-    .filter(Boolean);
-  if (entry?.group && !normalized.includes(String(entry.group))) {
-    normalized.push(String(entry.group));
+export function normalizedDirGroupList(values) {
+  const source = Array.isArray(values) ? values : [values];
+  const normalized = [];
+  for (const value of source) {
+    const group = String(value || "").trim();
+    if (group && !normalized.includes(group)) {
+      normalized.push(group);
+    }
   }
   return normalized;
+}
+
+export function dirEntryGroups(entry) {
+  const groups = Array.isArray(entry?.groups) ? entry.groups : [];
+  const normalized = normalizedDirGroupList(groups);
+  const activeGroup = String(entry?.group || "").trim();
+  if (activeGroup && !normalized.includes(activeGroup)) {
+    normalized.push(activeGroup);
+  }
+  return normalized;
+}
+
+export function dirGroupMoveRemoveGroups(entry, targetGroup, activeGroup) {
+  const target = String(targetGroup || "").trim();
+  if (!target) {
+    return [];
+  }
+  const removals = dirEntryGroups(entry).filter((group) => group !== target);
+  const active = String(activeGroup || "").trim();
+  if (active && active !== target && !removals.includes(active)) {
+    removals.push(active);
+  }
+  return removals;
+}
+
+function datasetRemoveGroups(dataset) {
+  const rawGroups = dataset.removeGroups;
+  if (Array.isArray(rawGroups)) {
+    return normalizedDirGroupList(rawGroups);
+  }
+  if (typeof rawGroups === "string" && rawGroups.trim()) {
+    try {
+      const parsed = JSON.parse(rawGroups);
+      if (Array.isArray(parsed)) {
+        return normalizedDirGroupList(parsed);
+      }
+    } catch {
+      return normalizedDirGroupList(rawGroups);
+    }
+  }
+  return normalizedDirGroupList(dataset.removeGroup);
 }
 
 export function renderDirGroupActionPlan(entry, entryPath, allGroups, activeGroup) {
@@ -79,11 +121,13 @@ export function renderDirGroupActionPlan(entry, entryPath, allGroups, activeGrou
   return availableGroups.map((groupName) => {
     const isMember = memberships.has(groupName);
     const action = isMember ? "remove" : activeGroup && memberships.has(activeGroup) ? "move" : "add";
+    const removeGroups = action === "move" ? dirGroupMoveRemoveGroups(entry, groupName, activeGroup) : [];
     return {
       groupName,
       isMember,
       action,
-      removeGroup: action === "move" ? activeGroup : "",
+      removeGroup: removeGroups[0] || "",
+      removeGroups,
       label: isMember ? `remove ${groupName}` : action === "move" ? `move to ${groupName}` : `add ${groupName}`,
     };
   });
@@ -98,7 +142,7 @@ function renderDirGroupActions(entry, entryPath, allGroups, activeGroup, readOnl
   wrap.className = "dir-row-group-actions";
   wrap.setAttribute("aria-label", `Group actions for ${entry?.name || entryPath}`);
 
-  for (const { groupName, isMember, action, removeGroup, label } of actions) {
+  for (const { groupName, isMember, action, removeGroup, removeGroups, label } of actions) {
     const button = document.createElement("button");
     button.type = "button";
     button.className = `ghost-button dir-entry-group-action${isMember ? " is-member" : ""}`;
@@ -107,6 +151,7 @@ function renderDirGroupActions(entry, entryPath, allGroups, activeGroup, readOnl
     button.dataset.action = action;
     if (action === "move") {
       button.dataset.removeGroup = removeGroup;
+      button.dataset.removeGroups = JSON.stringify(removeGroups);
     }
     button.disabled = readOnly;
     button.textContent = label;
@@ -200,7 +245,14 @@ export function dirGroupMembershipClickPlan(eventType, target) {
     return { type: "ignore" };
   }
   const dataset = button.dataset || {};
-  return { type: "membership", path: dataset.path, action: dataset.action, group: dataset.group, removeGroup: dataset.removeGroup };
+  return {
+    type: "membership",
+    path: dataset.path,
+    action: dataset.action,
+    group: dataset.group,
+    removeGroup: dataset.removeGroup,
+    removeGroups: datasetRemoveGroups(dataset),
+  };
 }
 
 export function dirRowClickPlan(eventType, target) {

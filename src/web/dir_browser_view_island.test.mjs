@@ -81,7 +81,7 @@ test("directory browser view island preserves row, action, badge, and link contr
   const restoreWindow = withWindowLocation();
   const rows = createDirBrowserListContents(createElement, {
     path: "/srv/repos",
-    groups: ["core", "clients"],
+    groups: ["core", "clients", "ops"],
     activeGroup: "core",
     selectedPaths: new Set(["/srv/repos/swimmers", "/srv/repos/clients"]),
     readOnly: false,
@@ -89,7 +89,7 @@ test("directory browser view island preserves row, action, badge, and link contr
       {
         name: "swimmers",
         full_path: "/srv/repos/swimmers",
-        groups: ["core"],
+        groups: ["core", "ops"],
         has_children: true,
         is_running: true,
         repo_dirty: true,
@@ -143,7 +143,7 @@ test("directory browser view island preserves row, action, badge, and link contr
       "dir-badge is-running",
       "dir-badge is-dirty",
     ]);
-    assert.equal(status[0].props.title, "groups: core");
+    assert.equal(status[0].props.title, "groups: core, ops");
     assert.equal(groupsCell.props.className, "col-groups dir-row-groups");
     assert.equal(groupsChildren[0].props.className, "dir-open-url");
     assert.equal(groupsChildren[0].props.href, "http://127.0.0.1:3210/repo");
@@ -151,10 +151,11 @@ test("directory browser view island preserves row, action, badge, and link contr
     assert.equal(groupsChildren[0].props.rel, "noopener noreferrer");
     assert.equal(groupsChildren[1].props.className, "dir-row-group-actions");
     assert.equal(groupsChildren[1].props["aria-label"], "Group actions for swimmers");
-    assert.deepEqual(groupButtons.map((button) => button.props["data-action"]), ["remove", "move"]);
-    assert.deepEqual(groupButtons.map((button) => button.props["data-group"]), ["core", "clients"]);
+    assert.deepEqual(groupButtons.map((button) => button.props["data-action"]), ["remove", "move", "remove"]);
+    assert.deepEqual(groupButtons.map((button) => button.props["data-group"]), ["core", "clients", "ops"]);
     assert.equal(groupButtons[1].props["data-remove-group"], "core");
-    assert.deepEqual(groupButtons.map(childText), ["remove core", "move to clients"]);
+    assert.equal(groupButtons[1].props["data-remove-groups"], JSON.stringify(["core", "ops"]));
+    assert.deepEqual(groupButtons.map(childText), ["remove core", "move to clients", "remove ops"]);
 
     assert.equal(virtual.props["data-path"], "/srv/repos/clients");
     assert.equal(virtual.props["data-disabled"], "true");

@@ -20,6 +20,7 @@ import {
   launchTargetPreviewText,
   mapPathWithLaunchTarget,
   normalizeLaunchTargets,
+  renderDirGroupActionPlan,
   renderCreateBatchBar,
   selectedLaunchTarget,
   selectedLaunchTargetSummary,
@@ -81,6 +82,33 @@ test("directory group and search helpers keep membership and repo status searcha
   assert.equal(dirEntryMatchesSearch(entry, entry.full_path, "swimmers dirty"), true);
   assert.equal(dirEntryMatchesSearch(entry, entry.full_path, "running missing"), false);
   assert.deepEqual(visibleDirEntries([entry], "/srv/repos", "core"), [entry]);
+});
+
+test("directory group move plan removes every old membership except the target", () => {
+  const actions = renderDirGroupActionPlan(
+    {
+      name: "swimmers",
+      full_path: "/srv/repos/swimmers",
+      groups: ["core", "ops"],
+    },
+    "/srv/repos/swimmers",
+    ["core", "clients", "ops"],
+    "core",
+  );
+
+  assert.deepEqual(
+    actions.map((action) => ({
+      groupName: action.groupName,
+      action: action.action,
+      removeGroup: action.removeGroup,
+      removeGroups: action.removeGroups,
+    })),
+    [
+      { groupName: "core", action: "remove", removeGroup: "", removeGroups: [] },
+      { groupName: "clients", action: "move", removeGroup: "core", removeGroups: ["core", "ops"] },
+      { groupName: "ops", action: "remove", removeGroup: "", removeGroups: [] },
+    ],
+  );
 });
 
 test("directory batch selectability rejects virtual group rows without a full path", () => {
@@ -225,6 +253,7 @@ test("dirGroupMembershipClickPlan preserves action dataset forwarding and ignore
     action: "add",
     group: "clients",
     removeGroup: undefined,
+    removeGroups: [],
   });
   assert.deepEqual(dirGroupMembershipClickPlan("click", actionFor({ path: "/srv/repos/a", action: "remove", group: "clients" }).target), {
     type: "membership",
@@ -232,6 +261,7 @@ test("dirGroupMembershipClickPlan preserves action dataset forwarding and ignore
     action: "remove",
     group: "clients",
     removeGroup: undefined,
+    removeGroups: [],
   });
   assert.deepEqual(dirGroupMembershipClickPlan("click", actionFor({ path: "/srv/repos/a", action: "move", group: "new", removeGroup: "old" }).target), {
     type: "membership",
@@ -239,6 +269,21 @@ test("dirGroupMembershipClickPlan preserves action dataset forwarding and ignore
     action: "move",
     group: "new",
     removeGroup: "old",
+    removeGroups: ["old"],
+  });
+  assert.deepEqual(dirGroupMembershipClickPlan("click", actionFor({
+    path: "/srv/repos/a",
+    action: "move",
+    group: "new",
+    removeGroup: "old",
+    removeGroups: JSON.stringify(["old", "ops", "old", " "]),
+  }).target), {
+    type: "membership",
+    path: "/srv/repos/a",
+    action: "move",
+    group: "new",
+    removeGroup: "old",
+    removeGroups: ["old", "ops"],
   });
   assert.deepEqual(dirGroupMembershipClickPlan("click", actionFor({}).target), {
     type: "membership",
@@ -246,6 +291,7 @@ test("dirGroupMembershipClickPlan preserves action dataset forwarding and ignore
     action: undefined,
     group: undefined,
     removeGroup: undefined,
+    removeGroups: [],
   });
 });
 

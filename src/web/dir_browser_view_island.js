@@ -59,6 +59,9 @@ function groupActionButton(createElement, entry, entryPath, action, readOnly) {
   if (action.removeGroup) {
     props["data-remove-group"] = action.removeGroup;
   }
+  if (action.removeGroups?.length) {
+    props["data-remove-groups"] = JSON.stringify(action.removeGroups);
+  }
   return createElement("button", props, action.label);
 }
 

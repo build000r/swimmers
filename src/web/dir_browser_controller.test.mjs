@@ -665,6 +665,56 @@ test("directory browser controller sends local target with group edits", async (
   }
 });
 
+test("directory browser controller sends all stale groups on group move", async () => {
+  const previousDocument = globalThis.document;
+  globalThis.document = {
+    createElement(tagName) {
+      return { tagName, value: "", textContent: "" };
+    },
+  };
+  try {
+    const calls = [];
+    const { runtime, state, el } = createRuntime({
+      apiFetch: async (...args) => {
+        calls.push(args);
+        return {};
+      },
+      responseJson: async (_response, normalize) => normalize({
+        path: "/workspace",
+        entries: [],
+        launch_targets: [{ id: "local", label: "Local machine", kind: "local" }],
+        default_launch_target: "local",
+      }),
+      location: new URL("http://swimmers.test/"),
+      renderDirBrowserView() {
+        return true;
+      },
+    });
+    state.readOnly = false;
+    state.dirBrowser.path = "/workspace";
+    state.dirBrowser.launchTarget = "local";
+    el.createLaunchTarget = selectElement("local");
+
+    const controller = createDirBrowserController(runtime);
+    await controller.updateDirEntryGroupMembership(
+      "/workspace/swimmers",
+      "move",
+      "clients",
+      ["core", "ops", "clients", "core", " "],
+    );
+
+    assert.equal(calls[0][0], "/v1/dirs/group-memberships");
+    assert.deepEqual(JSON.parse(calls[0][1].body), {
+      path: "/workspace/swimmers",
+      target: null,
+      add: ["clients"],
+      remove: ["core", "ops"],
+    });
+  } finally {
+    globalThis.document = previousDocument;
+  }
+});
+
 test("directory browser controller blocks remote group edits before fetch", async () => {
   const calls = [];
   const { runtime, state, el, statuses } = createRuntime({

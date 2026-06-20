@@ -10,6 +10,7 @@ import {
   launchTargetPayload as dirBrowserLaunchTargetPayload,
   launchTargetPreviewForPath as dirBrowserLaunchTargetPreviewForPath,
   launchTargetStatusTextForPreview as dirBrowserLaunchTargetStatusTextForPreview,
+  normalizedDirGroupList,
   renderCreateBatchBar as renderDirBrowserCreateBatchBar,
   renderDirEntries as renderDirBrowserEntries,
   selectedLaunchTarget as dirBrowserSelectedLaunchTarget,
@@ -312,10 +313,10 @@ export function createDirBrowserController(runtime) {
     }
   }
 
-  async function updateDirEntryGroupMembership(path, action, groupName, removeGroup = "") {
+  async function updateDirEntryGroupMembership(path, action, groupName, removeGroups = []) {
     const targetPath = String(path || "").trim();
     const targetGroup = String(groupName || "").trim();
-    const sourceGroup = String(removeGroup || "").trim();
+    const sourceGroups = normalizedDirGroupList(removeGroups);
     if (!targetPath || !targetGroup || state.readOnly) {
       return;
     }
@@ -330,8 +331,8 @@ export function createDirBrowserController(runtime) {
       remove.push(targetGroup);
     } else {
       add.push(targetGroup);
-      if (action === "move" && sourceGroup && sourceGroup !== targetGroup) {
-        remove.push(sourceGroup);
+      if (action === "move") {
+        remove.push(...sourceGroups.filter((group) => group !== targetGroup));
       }
     }
 
@@ -648,7 +649,7 @@ export function createDirBrowserController(runtime) {
 
     const groupActionPlan = dirGroupMembershipClickPlan(event.type, target);
     if (groupActionPlan.type === "membership") {
-      await updateDirEntryGroupMembership(groupActionPlan.path, groupActionPlan.action, groupActionPlan.group, groupActionPlan.removeGroup);
+      await updateDirEntryGroupMembership(groupActionPlan.path, groupActionPlan.action, groupActionPlan.group, groupActionPlan.removeGroups);
       return;
     }
 
