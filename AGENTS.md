@@ -20,8 +20,8 @@
 - Coverage lcov: `make cargo-cov-lcov`
 - Remote Rust validation dry run: `make remote-rust-validate-dry-run`
 - Remote Rust validation: `SWIMMERS_REMOTE_RUST_HOST=<ssh-target> make remote-rust-validate`
-- Release workflow: `.github/workflows/release.yml` runs on `v*` tags or manual dispatch, builds the Linux `swimmers` binary, and renders notes with `scripts/release-notes-from-changelog.sh`.
-- Unknown / verify first: no repo lint target is wired in Makefile or CI; check local `rustfmt`/`clippy` availability before relying on `cargo fmt --check` or `cargo clippy`.
+- Release workflow: `.github/workflows/release.yml` runs on `v*` tags or manual dispatch, builds the Linux `swimmers` and `swimmers-tui` binaries, and renders notes with `scripts/release-notes-from-changelog.sh`.
+- Lint/format/doc: CI (`.github/workflows/ci.yml`) runs `cargo clippy -- -D warnings`, `cargo fmt --check`, and `cargo doc --no-deps` on pushes to main and PRs. No Makefile targets wrap these; run them locally with the standard Cargo commands.
 
 ## Important Paths
 - `src/api/` - Axum routes and in-process API service helpers.

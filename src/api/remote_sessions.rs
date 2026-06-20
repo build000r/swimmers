@@ -454,14 +454,9 @@ fn remote_target_environment_health(target: &LaunchTargetSummary) -> RemoteTarge
                 freshness_ms: None,
             };
         };
-        let current_error = cached_poll_error_is_current(entry);
-        let mut status = if current_error {
-            if entry.last_seen_at.is_some() {
-                DependencyHealthStatus::Degraded
-            } else {
-                DependencyHealthStatus::Unavailable
-            }
-        } else if now_ms() < entry.backoff_until_ms {
+        let has_stale_error =
+            cached_poll_error_is_current(entry) || now_ms() < entry.backoff_until_ms;
+        let mut status = if has_stale_error {
             if entry.last_seen_at.is_some() {
                 DependencyHealthStatus::Degraded
             } else {

@@ -896,7 +896,7 @@ fn filter_managed_only_pending_entries(
     managed_only: bool,
     dir_config: Option<&OverlayDirConfig>,
 ) {
-    if !managed_only || !dir_config.is_some_and(|config| !config.services.is_empty()) {
+    if !managed_only || dir_config.is_none_or(|config| config.services.is_empty()) {
         return;
     }
 
@@ -1112,10 +1112,8 @@ async fn decorate_group_entries(
     let health_map = overlay_service_health_map(&config.services, &services).await;
     let svc_meta = service_metadata_map(&config.services);
 
-    for ((index, pending_entry), (repo_dirty, repo_action)) in pending_indices
-        .into_iter()
-        .zip(pending.into_iter())
-        .zip(probes.into_iter())
+    for ((index, pending_entry), (repo_dirty, repo_action)) in
+        pending_indices.into_iter().zip(pending).zip(probes)
     {
         let (is_running, has_restart, open_url) =
             service_entry_metadata(&pending_entry.services, &health_map, &svc_meta);

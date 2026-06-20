@@ -146,7 +146,7 @@ pub(super) fn remote_native_handoff_message(session: &SessionSummary) -> Option<
     ))
 }
 
-fn first_non_empty<'a, const N: usize>(values: [Option<&'a str>; N]) -> Option<&'a str> {
+fn first_non_empty<const N: usize>(values: [Option<&str>; N]) -> Option<&str> {
     values
         .into_iter()
         .flatten()

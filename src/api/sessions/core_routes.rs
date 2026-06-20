@@ -655,7 +655,7 @@ pub(super) async fn remote_snapshot_response(
 }
 
 async fn local_snapshot_response(state: &Arc<AppState>, session_id: &str) -> Response {
-    let handle = match state.supervisor.get_session(&session_id).await {
+    let handle = match state.supervisor.get_session(session_id).await {
         Some(h) => h,
         None => {
             return error_response(StatusCode::NOT_FOUND, "SESSION_NOT_FOUND", None);

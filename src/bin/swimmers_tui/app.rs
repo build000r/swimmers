@@ -186,12 +186,9 @@ fn selected_remote_inventory_target(
         return target_supports_remote_inventory(&target).then_some(target.id);
     }
 
-    let Some(target_id) = fallback_target
+    let target_id = fallback_target
         .map(str::trim)
-        .filter(|target| !target.is_empty() && *target != "local")
-    else {
-        return None;
-    };
+        .filter(|target| !target.is_empty() && *target != "local")?;
 
     if let Some(target) = launch_targets.iter().find(|target| target.id == target_id) {
         return target_supports_remote_inventory(target).then(|| target.id.clone());

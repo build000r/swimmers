@@ -429,9 +429,25 @@ fn validate_observer_token_mode(load: &mut ConfigLoad) {
     }
 }
 
+fn validate_observer_token_distinct(load: &mut ConfigLoad) {
+    if !matches!(load.config.auth_mode, AuthMode::Token) {
+        return;
+    }
+    if load.config.auth_token.as_deref().is_some()
+        && load.config.auth_token == load.config.observer_token
+    {
+        push_error(
+            load,
+            "OBSERVER_TOKEN",
+            "OBSERVER_TOKEN must differ from AUTH_TOKEN; identical values would grant observer clients operator access",
+        );
+    }
+}
+
 fn validate_auth_cross_fields(load: &mut ConfigLoad) {
     validate_auth_token_mode(load);
     validate_observer_token_mode(load);
+    validate_observer_token_distinct(load);
 }
 
 impl Config {
@@ -701,6 +717,20 @@ mod tests {
         ]);
         assert!(matches!(load.config.auth_mode, AuthMode::Token));
         assert!(load.diagnostics.is_empty());
+    }
+
+    #[test]
+    fn observer_token_matching_auth_token_is_a_config_error() {
+        let load = load_with_env(&[
+            ("AUTH_MODE", "token"),
+            ("AUTH_TOKEN", "same-secret"),
+            ("OBSERVER_TOKEN", "same-secret"),
+        ]);
+
+        assert!(load.has_errors());
+        let diagnostic = diagnostic_for(&load, "OBSERVER_TOKEN");
+        assert_eq!(diagnostic.level, ConfigDiagnosticLevel::Error);
+        assert!(diagnostic.message.contains("must differ from AUTH_TOKEN"));
     }
 
     #[test]
