@@ -643,6 +643,135 @@ Match host *
 }
 
 #[test]
+fn ssh_import_report_from_path_expands_included_config_files() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let ssh_dir = tmp.path().join(".ssh");
+    let includes = ssh_dir.join("config.d");
+    std::fs::create_dir_all(&includes).expect("create include dir");
+    let root = ssh_dir.join("config");
+    let included_a = includes.join("10-devbox.conf");
+    let included_b = includes.join("20-prod.conf");
+    std::fs::write(
+        &root,
+        format!(
+            r#"
+Host root-host
+  HostName root.example
+
+Include {}
+
+Host after-include
+  HostName after.example
+"#,
+            includes.join("*.conf").display()
+        ),
+    )
+    .expect("write root config");
+    std::fs::write(
+        &included_a,
+        r#"
+Host devbox
+  HostName devbox.example
+  User aiops
+"#,
+    )
+    .expect("write included devbox config");
+    std::fs::write(
+        &included_b,
+        r#"
+Host prod
+  HostName prod.example
+"#,
+    )
+    .expect("write included prod config");
+
+    let report = ssh_import_report_from_path(&root).expect("ssh import report");
+
+    assert!(report.warnings.is_empty(), "{:?}", report.warnings);
+    assert!(!report.connects_to_hosts);
+    assert!(!report.writes_files);
+    let ids: Vec<_> = report
+        .proposals
+        .iter()
+        .map(|proposal| proposal.id.as_str())
+        .collect();
+    assert_eq!(ids, vec!["root-host", "devbox", "prod", "after-include"]);
+    let devbox = report
+        .proposals
+        .iter()
+        .find(|proposal| proposal.id == "devbox")
+        .expect("devbox proposal");
+    assert_eq!(devbox.label, "aiops@devbox.example");
+    assert!(devbox.source.contains("10-devbox.conf:2"));
+}
+
+#[test]
+fn ssh_import_report_from_path_deduplicates_recursive_includes() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let root = tmp.path().join("config");
+    let included = tmp.path().join("included.conf");
+    std::fs::write(
+        &root,
+        format!(
+            r#"
+Include {}
+Include {}
+"#,
+            included.display(),
+            included.display()
+        ),
+    )
+    .expect("write root config");
+    std::fs::write(
+        &included,
+        r#"
+Host once
+  HostName once.example
+"#,
+    )
+    .expect("write included config");
+
+    let report = ssh_import_report_from_path(&root).expect("ssh import report");
+
+    let ids: Vec<_> = report
+        .proposals
+        .iter()
+        .map(|proposal| proposal.id.as_str())
+        .collect();
+    assert_eq!(ids, vec!["once"]);
+}
+
+#[test]
+fn ssh_import_from_config_string_does_not_read_include_files() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let included = tmp.path().join("included.conf");
+    std::fs::write(
+        &included,
+        r#"
+Host should-not-load
+  HostName should-not-load.example
+"#,
+    )
+    .expect("write included config");
+    let config = format!(
+        r#"
+Host root-only
+  HostName root.example
+Include {}
+"#,
+        included.display()
+    );
+
+    let proposals = ssh_import_proposals_from_config(&config);
+
+    let ids: Vec<_> = proposals
+        .iter()
+        .map(|proposal| proposal.id.as_str())
+        .collect();
+    assert_eq!(ids, vec!["root-only"]);
+}
+
+#[test]
 fn ssh_import_ignores_wildcards_negations_and_shell_unsafe_aliases() {
     let config = r#"
 Host * !blocked devbox? unsafe;alias safe.alias user@host:22

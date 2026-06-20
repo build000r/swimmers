@@ -178,6 +178,16 @@ V2 environment cockpit setups use three target kinds:
   it is not treated as a live session source until that host has a trusted
   `swimmers_api` target.
 
+To inventory existing SSH aliases before editing an overlay, run:
+
+```bash
+swimmers config ssh-import --dry-run --ssh-config ~/.ssh/config
+```
+
+The importer is proposal-only: it reads SSH config files, follows `Include`
+patterns, emits JSON `ssh_only` target snippets, and does not connect to hosts
+or write config.
+
 Example overlay shape:
 
 ```yaml

@@ -13,13 +13,15 @@
 //! environment variables — clap is intentionally only used for subcommands,
 //! not as a replacement for env-var-based config. See README.md.
 
+use std::collections::HashSet;
 use std::io::ErrorKind;
 use std::net::IpAddr;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command as ProcessCommand, ExitStatus, Output, Stdio};
 use std::time::{Duration, Instant};
 
 use clap::{Parser, Subcommand};
+use glob::glob;
 use serde::Serialize;
 
 use crate::config::{
@@ -486,6 +488,8 @@ pub struct SshImportReport {
     pub source_path: String,
     pub writes_files: bool,
     pub connects_to_hosts: bool,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub warnings: Vec<String>,
     pub proposals: Vec<SshImportProposal>,
 }
 
@@ -510,7 +514,15 @@ struct SshHostBlock {
     aliases: Vec<String>,
     host_name: Option<String>,
     user: Option<String>,
+    source_label: String,
     line_number: usize,
+}
+
+#[derive(Debug, Default)]
+struct SshImportParser {
+    proposals: Vec<SshImportProposal>,
+    current: SshHostBlock,
+    inside_match_block: bool,
 }
 
 pub fn default_ssh_config_path() -> Option<PathBuf> {
@@ -524,56 +536,136 @@ pub fn ssh_import_report_from_config(
     source_path: impl Into<String>,
     config: &str,
 ) -> SshImportReport {
+    let mut parser = SshImportParser::default();
+    parser.parse_config(
+        "ssh_config",
+        config,
+        None,
+        &mut HashSet::new(),
+        &mut Vec::new(),
+    );
     SshImportReport {
         mode: "dry_run",
         source_path: source_path.into(),
         writes_files: false,
         connects_to_hosts: false,
-        proposals: ssh_import_proposals_from_config(config),
+        warnings: Vec::new(),
+        proposals: parser.proposals,
     }
 }
 
 pub fn ssh_import_proposals_from_config(config: &str) -> Vec<SshImportProposal> {
-    let mut proposals = Vec::new();
-    let mut current = SshHostBlock::default();
-    let mut inside_match_block = false;
+    ssh_import_report_from_config("ssh_config", config).proposals
+}
 
-    for (line_index, raw_line) in config.lines().enumerate() {
-        let line_number = line_index + 1;
-        let is_indented = raw_line
-            .chars()
-            .next()
-            .is_some_and(|ch| ch.is_ascii_whitespace());
-        let line = strip_ssh_config_comment(raw_line).trim();
-        if line.is_empty() {
-            continue;
+pub fn ssh_import_report_from_path(path: &Path) -> Result<SshImportReport, String> {
+    let contents = std::fs::read_to_string(path)
+        .map_err(|err| format!("ssh-import failed to read {}: {err}", path.display()))?;
+    let mut parser = SshImportParser::default();
+    let mut visited = HashSet::new();
+    let mut warnings = Vec::new();
+    let source_path = path.display().to_string();
+    parser.parse_file_contents(path, &contents, &mut visited, &mut warnings);
+    Ok(SshImportReport {
+        mode: "dry_run",
+        source_path,
+        writes_files: false,
+        connects_to_hosts: false,
+        warnings,
+        proposals: parser.proposals,
+    })
+}
+
+impl SshImportParser {
+    fn parse_file_contents(
+        &mut self,
+        path: &Path,
+        config: &str,
+        visited: &mut HashSet<PathBuf>,
+        warnings: &mut Vec<String>,
+    ) {
+        let identity = canonical_or_original(path);
+        if !visited.insert(identity) {
+            return;
         }
-        let mut parts = line.split_whitespace();
-        let Some(keyword) = parts.next() else {
-            continue;
-        };
-        if keyword.eq_ignore_ascii_case("Host") {
-            if inside_match_block && is_indented {
-                continue;
-            }
-            inside_match_block = false;
-            append_ssh_import_block(&mut proposals, std::mem::take(&mut current));
-            current.aliases = parts.map(ToOwned::to_owned).collect();
-            current.line_number = line_number;
-        } else if keyword.eq_ignore_ascii_case("Match") {
-            append_ssh_import_block(&mut proposals, std::mem::take(&mut current));
-            inside_match_block = true;
-        } else if inside_match_block {
-            continue;
-        } else if keyword.eq_ignore_ascii_case("HostName") {
-            current.host_name = parts.next().map(ToOwned::to_owned);
-        } else if keyword.eq_ignore_ascii_case("User") {
-            current.user = parts.next().map(ToOwned::to_owned);
-        }
+        let source_label = path.display().to_string();
+        let base_dir = path.parent();
+        self.parse_config(&source_label, config, base_dir, visited, warnings);
     }
 
-    append_ssh_import_block(&mut proposals, current);
-    proposals
+    fn parse_config(
+        &mut self,
+        source_label: &str,
+        config: &str,
+        base_dir: Option<&Path>,
+        visited: &mut HashSet<PathBuf>,
+        warnings: &mut Vec<String>,
+    ) {
+        for (line_index, raw_line) in config.lines().enumerate() {
+            let line_number = line_index + 1;
+            let is_indented = raw_line
+                .chars()
+                .next()
+                .is_some_and(|ch| ch.is_ascii_whitespace());
+            let line = strip_ssh_config_comment(raw_line).trim();
+            if line.is_empty() {
+                continue;
+            }
+            let mut parts = line.split_whitespace();
+            let Some(keyword) = parts.next() else {
+                continue;
+            };
+            if keyword.eq_ignore_ascii_case("Host") {
+                if self.inside_match_block && is_indented {
+                    continue;
+                }
+                self.inside_match_block = false;
+                self.append_current_block();
+                self.current.aliases = parts.map(ToOwned::to_owned).collect();
+                self.current.source_label = source_label.to_string();
+                self.current.line_number = line_number;
+            } else if keyword.eq_ignore_ascii_case("Match") {
+                self.append_current_block();
+                self.inside_match_block = true;
+            } else if self.inside_match_block {
+                continue;
+            } else if keyword.eq_ignore_ascii_case("Include") {
+                self.append_current_block();
+                if let Some(base_dir) = base_dir {
+                    for include_path in ssh_include_paths(parts, Some(base_dir), warnings) {
+                        match std::fs::read_to_string(&include_path) {
+                            Ok(contents) => {
+                                self.parse_file_contents(
+                                    &include_path,
+                                    &contents,
+                                    visited,
+                                    warnings,
+                                );
+                            }
+                            Err(err) => warnings.push(format!(
+                                "could not read included SSH config {}: {err}",
+                                include_path.display()
+                            )),
+                        }
+                    }
+                }
+            } else if keyword.eq_ignore_ascii_case("HostName") {
+                self.current.host_name = parts.next().map(ToOwned::to_owned);
+            } else if keyword.eq_ignore_ascii_case("User") {
+                self.current.user = parts.next().map(ToOwned::to_owned);
+            }
+        }
+
+        self.append_current_block();
+    }
+
+    fn append_current_block(&mut self) {
+        append_ssh_import_block(&mut self.proposals, std::mem::take(&mut self.current));
+    }
+}
+
+fn canonical_or_original(path: &Path) -> PathBuf {
+    path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
 }
 
 fn strip_ssh_config_comment(line: &str) -> &str {
@@ -582,11 +674,63 @@ fn strip_ssh_config_comment(line: &str) -> &str {
         .unwrap_or(line)
 }
 
+fn ssh_include_paths<'a>(
+    patterns: impl Iterator<Item = &'a str>,
+    base_dir: Option<&Path>,
+    warnings: &mut Vec<String>,
+) -> Vec<PathBuf> {
+    let mut paths = Vec::new();
+    for pattern in patterns {
+        let resolved = resolve_ssh_include_pattern(pattern, base_dir);
+        let Some(pattern_text) = resolved.to_str() else {
+            warnings.push(format!(
+                "could not expand non-utf8 SSH Include pattern {}",
+                resolved.display()
+            ));
+            continue;
+        };
+        match glob(pattern_text) {
+            Ok(matches) => {
+                paths.extend(matches.filter_map(|entry| match entry {
+                    Ok(path) => Some(path),
+                    Err(err) => {
+                        warnings.push(format!("could not expand SSH Include entry: {err}"));
+                        None
+                    }
+                }));
+            }
+            Err(err) => warnings.push(format!(
+                "invalid SSH Include pattern {}: {err}",
+                resolved.display()
+            )),
+        }
+    }
+    paths.sort_by_key(|path| path.to_string_lossy().to_string());
+    paths
+}
+
+fn resolve_ssh_include_pattern(pattern: &str, base_dir: Option<&Path>) -> PathBuf {
+    if let Some(rest) = pattern.strip_prefix("~/") {
+        if let Some(home) = std::env::var_os("HOME").filter(|home| !home.is_empty()) {
+            return PathBuf::from(home).join(rest);
+        }
+    }
+    let path = PathBuf::from(pattern);
+    if path.is_absolute() {
+        path
+    } else {
+        base_dir
+            .map(|base| base.join(path))
+            .unwrap_or_else(|| PathBuf::from(pattern))
+    }
+}
+
 fn append_ssh_import_block(proposals: &mut Vec<SshImportProposal>, block: SshHostBlock) {
     let SshHostBlock {
         aliases,
         host_name,
         user,
+        source_label,
         line_number,
     } = block;
     for alias in aliases
@@ -597,6 +741,7 @@ fn append_ssh_import_block(proposals: &mut Vec<SshImportProposal>, block: SshHos
             alias,
             host_name.as_deref(),
             user.as_deref(),
+            &source_label,
             line_number,
         ));
     }
@@ -606,6 +751,7 @@ fn ssh_import_proposal(
     alias: String,
     host_name: Option<&str>,
     user: Option<&str>,
+    source_label: &str,
     line_number: usize,
 ) -> SshImportProposal {
     let label = ssh_import_label(&alias, host_name, user);
@@ -613,7 +759,7 @@ fn ssh_import_proposal(
         attach_hint: format!("ssh {alias}"),
         bootstrap_hint: format!("ssh {alias} 'swimmers serve'"),
         overlay_snippet: ssh_import_overlay_snippet(&alias, &label),
-        source: format!("ssh_config:{line_number}"),
+        source: format!("{source_label}:{line_number}"),
         id: alias,
         label,
         kind: "ssh_only",

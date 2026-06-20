@@ -2877,6 +2877,7 @@ dependencies = [
  "dotenvy",
  "fs2",
  "futures",
+ "glob",
  "libc",
  "mermaid-rs-renderer",
  "metrics",

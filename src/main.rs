@@ -388,14 +388,13 @@ fn run_config_ssh_import(dry_run: bool, ssh_config: Option<PathBuf>) -> i32 {
         eprintln!("ssh-import could not resolve ~/.ssh/config; pass --ssh-config <path>");
         return 1;
     };
-    let contents = match std::fs::read_to_string(&path) {
-        Ok(contents) => contents,
+    let report = match cli::ssh_import_report_from_path(&path) {
+        Ok(report) => report,
         Err(err) => {
-            eprintln!("ssh-import failed to read {}: {err}", path.display());
+            eprintln!("{err}");
             return 1;
         }
     };
-    let report = cli::ssh_import_report_from_config(path.display().to_string(), &contents);
     match serde_json::to_string_pretty(&report) {
         Ok(json) => {
             println!("{json}");

@@ -79,6 +79,7 @@ os_pipe = "1"
 libc = "0.2"
 crc32fast = "1.4"
 fs2 = "0.4"
+glob = "0.3"
 cpal = { version = "0.17", optional = true }
 whisper-rs = { version = "0.16", optional = true }
 
