@@ -16,7 +16,7 @@
 **Quick Start**
 
 ```bash
-cargo install swimmers
+curl --proto '=https' --tlsv1.2 -sSf https://raw.githubusercontent.com/build000r/swimmers/main/scripts/install.sh | sh
 swimmers-tui        # opens the aquarium — no server process to manage
 ```
 
@@ -51,24 +51,30 @@ A terminal aquarium for your tmux sessions. Each session becomes an animated fis
 
 ## Installation
 
-### From crates.io
+### Quick install (prebuilt binary)
 
 ```bash
-cargo install swimmers
+curl --proto '=https' --tlsv1.2 -sSf https://raw.githubusercontent.com/build000r/swimmers/main/scripts/install.sh | sh
 ```
+
+Downloads the latest prebuilt binaries from GitHub Releases, verifies their checksums, and installs them to `~/.local/bin` — no Rust toolchain or repo checkout required. Prebuilt platforms: **macOS (Apple Silicon)** and **Linux x86_64**; on anything else the script points you at the source build below.
 
 That installs **two binaries** on your `PATH`:
 
 - `swimmers-tui` — the aquarium TUI. By default it hosts the API in-process, so one command is enough to get started.
 - `swimmers` — the standalone Axum HTTP/WebSocket API server. Use it when you want a long-running headless server, multiple TUI clients against one backend, or remote access over Tailscale. Run it as `swimmers` or, equivalently, `swimmers serve`.
 
-No repo checkout required.
+Override the install location with `SWIMMERS_INSTALL_DIR`, or pin a specific release with `SWIMMERS_VERSION=v0.3.0`. You still need **tmux** at runtime (see Prerequisites).
+
+### From crates.io
+
+> **Planned — not yet published.** Once the crate is on crates.io, `cargo install swimmers` will install both binaries from source. Until then, use the prebuilt installer above or build [from source](#from-source).
 
 ### Prerequisites
 
 | Dependency | Install |
 |------------|---------|
-| Rust toolchain (1.82+) | `curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \| sh` |
+| Rust toolchain (1.82+, source build only) | `curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \| sh` |
 | tmux | `brew install tmux` (macOS) or `apt install tmux` (Debian/Ubuntu) |
 | clawgs (thought rail) | Install/build the `clawgs` binary or set `CLAWGS_BIN=/path/to/clawgs`; verify with `swimmers config doctor` |
 | CMake (voice feature only) | `brew install cmake` (macOS) or `apt install cmake` (Debian/Ubuntu) |
@@ -97,7 +103,7 @@ The `voice` feature builds `whisper-rs`, so you need `cmake` available on your `
 
 ## Quick Start
 
-After `cargo install swimmers`, both `swimmers` and `swimmers-tui` are on your PATH. No clone required.
+After installing (prebuilt binary or source, above), both `swimmers` and `swimmers-tui` are on your PATH. No clone required.
 
 1. **Open the TUI**
 
@@ -653,7 +659,7 @@ launchctl load ~/Library/LaunchAgents/com.swimmers.plist
 | Remote access | REST API, any network | SSH + tmux attach | Local only | SSH + byobu |
 | Native terminal handoff | One keypress from TUI | `tmux attach -t` | Manual | Manual |
 | Metrics/observability | Prometheus `/metrics` | None | None | None |
-| Setup complexity | `cargo install swimmers` | Already installed | Ruby + config files | apt install |
+| Setup complexity | One-line `curl \| sh` (prebuilt binary) | Already installed | Ruby + config files | apt install |
 
 **When to use swimmers:**
 - You run many tmux sessions and want a visual overview

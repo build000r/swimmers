@@ -57,9 +57,49 @@ jobs:
           name: swimmers-linux-amd64-binaries
           path: dist/*
 
+  build-darwin-arm64:
+    name: Build macOS arm64
+    runs-on: macos-14
+    timeout-minutes: 30
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install release smoke dependencies
+        run: brew install tmux
+
+      - name: Build release binaries
+        run: cargo build --release --bin swimmers --bin swimmers-tui
+
+      - name: Smoke native packaged assets
+        run: ./scripts/release-acceptance-smoke.sh native-assets
+
+      - name: Smoke default release binaries
+        run: ./scripts/release-acceptance-smoke.sh default-installed
+        env:
+          SWIMMERS_ACCEPTANCE_BIN_DIR: ${{ github.workspace }}/target/release
+
+      - name: Package tarball
+        run: |
+          mkdir -p dist
+          cp target/release/swimmers dist/swimmers-darwin-arm64
+          cp target/release/swimmers-tui dist/swimmers-tui-darwin-arm64
+          chmod +x dist/swimmers-darwin-arm64 dist/swimmers-tui-darwin-arm64
+          cd dist
+          shasum -a 256 swimmers-darwin-arm64 > swimmers-darwin-arm64.sha256
+          shasum -a 256 swimmers-tui-darwin-arm64 > swimmers-tui-darwin-arm64.sha256
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: swimmers-darwin-arm64-binaries
+          path: dist/*
+
   release:
     name: Create Release
-    needs: build-linux-amd64
+    needs: [build-linux-amd64, build-darwin-arm64]
     runs-on: ubuntu-22.04
     permissions:
       contents: write
