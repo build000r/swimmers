@@ -70,7 +70,7 @@ SWIMMERS_MULTI_SSH_SMOKE_SKIP_JS=1 make multi-ssh-env-smoke
 Those flags exist only to support environments where Rust and Node validation
 run on different machines. The default command remains the release contract.
 
-## Optional Live Devbox Proof
+## Optional Live Target Proof
 
 The live lane is opt-in and non-destructive. First review the plan:
 
@@ -84,13 +84,17 @@ will only issue `GET /health` and `GET /v1/sessions` requests, plus optional
 create sessions, send input, kill tmux, or restart services.
 
 ```bash
-SWIMMERS_LIVE_DEVBOX_TARGET=1 \
+SWIMMERS_LIVE_TARGET_APPROVED=1 \
 SWIMMERS_LIVE_COCKPIT_URL=http://127.0.0.1:3210 \
-SWIMMERS_LIVE_TARGET_ID=skillbox-devbox \
+SWIMMERS_LIVE_TARGET_ID=example-ssh \
 SWIMMERS_LIVE_TARGET_KIND=ssh_only \
 SWIMMERS_LIVE_LOCAL_CWD="$PWD" \
 bash scripts/test-multi-ssh-env-live.sh --live
 ```
+
+`SWIMMERS_LIVE_DEVBOX_TARGET=1` is still accepted as a legacy alias for older
+operator scripts, but new proof runs should use `SWIMMERS_LIVE_TARGET_APPROVED`
+so the lane does not imply a specific host.
 
 For token-auth cockpit APIs, set `SWIMMERS_LIVE_AUTH_TOKEN_ENV` to the name of
 an environment variable containing the bearer token. The script uses the value

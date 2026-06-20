@@ -13,7 +13,7 @@ case "${mode}" in
     ;;
 esac
 
-target_id="${SWIMMERS_LIVE_TARGET_ID:-skillbox-devbox}"
+target_id="${SWIMMERS_LIVE_TARGET_ID:-example-ssh}"
 target_kind="${SWIMMERS_LIVE_TARGET_KIND:-ssh_only}"
 cockpit_url="${SWIMMERS_LIVE_COCKPIT_URL:-}"
 remote_url="${SWIMMERS_LIVE_REMOTE_URL:-}"
@@ -127,12 +127,15 @@ if [[ "${mode}" == "--dry-run" ]]; then
   printf 'attach hint: %s\n' "${attach_hint}"
   printf 'bootstrap hint: %s\n' "${bootstrap_hint}"
   printf 'artifact plan: %s/plan.json\n' "${artifact_dir}"
-  printf 'live mode requires SWIMMERS_LIVE_DEVBOX_TARGET=1 and SWIMMERS_LIVE_COCKPIT_URL\n'
+  printf 'live mode requires SWIMMERS_LIVE_TARGET_APPROVED=1 and SWIMMERS_LIVE_COCKPIT_URL\n'
+  printf 'legacy alias accepted: SWIMMERS_LIVE_DEVBOX_TARGET=1\n'
   exit 0
 fi
 
-if [[ "${SWIMMERS_LIVE_DEVBOX_TARGET:-0}" != "1" ]]; then
-  printf 'refusing live proof: set SWIMMERS_LIVE_DEVBOX_TARGET=1 after reviewing --dry-run output\n' >&2
+live_target_approved="${SWIMMERS_LIVE_TARGET_APPROVED:-${SWIMMERS_LIVE_DEVBOX_TARGET:-0}}"
+if [[ "${live_target_approved}" != "1" ]]; then
+  printf 'refusing live proof: set SWIMMERS_LIVE_TARGET_APPROVED=1 after reviewing --dry-run output\n' >&2
+  printf 'legacy alias accepted: SWIMMERS_LIVE_DEVBOX_TARGET=1\n' >&2
   exit 2
 fi
 
@@ -162,7 +165,7 @@ fetch_json() {
   local path="$2"
   local output="$3"
   local url="${base_url%/}${path}"
-  curl -fsS --max-time "${SWIMMERS_LIVE_CURL_TIMEOUT:-10}" "${auth_args[@]}" "${url}" -o "${output}"
+  curl -fsS --max-time "${SWIMMERS_LIVE_CURL_TIMEOUT:-10}" ${auth_args[@]+"${auth_args[@]}"} "${url}" -o "${output}"
 }
 
 printf 'multi-ssh live acceptance\n'

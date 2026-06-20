@@ -23,7 +23,7 @@ help:
 	'  make remote-auth-smoke      Verify fake remote API launch/read auth and redaction paths' \
 	'  make multi-env-smoke        Verify configured local+remote cockpit fixture contracts' \
 	'  make multi-ssh-env-smoke    Verify v2 local+API+SSH-only fixture contracts' \
-	'  make multi-ssh-env-live-dry-run Print the opt-in live devbox proof plan' \
+	'  make multi-ssh-env-live-dry-run Print the opt-in live target proof plan' \
 	'  make remote-rust-validate-dry-run Print optional remote Cargo validation plan' \
 	'  make remote-rust-validate  Run Rust validation on SWIMMERS_REMOTE_RUST_HOST' \
 	'  make release-acceptance     Verify default installed-binary release smoke' \
