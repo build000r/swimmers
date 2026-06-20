@@ -1145,6 +1145,13 @@ fn configured_bootstrap_hint_suppresses_inline_token_values() {
     let inline_assignment = environment_summary_for_target(&target);
     assert_eq!(inline_assignment.bootstrap_hint, None);
 
+    target.bootstrap_hint = Some(
+        "ssh skillbox-devbox 'AUTH_TOKEN=$AUTH_TOKEN swimmers serve && AUTH_TOKEN=literal-token echo leaked'"
+            .to_string(),
+    );
+    let later_inline_assignment = environment_summary_for_target(&target);
+    assert_eq!(later_inline_assignment.bootstrap_hint, None);
+
     std::env::remove_var("SWIMMERS_REMOTE_TEST_TOKEN");
 }
 

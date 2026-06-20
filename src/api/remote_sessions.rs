@@ -382,7 +382,10 @@ fn bootstrap_hint_has_inline_assignment(env_name: &str, hint: &str) -> bool {
         }
         let after = rest[index + needle.len()..].trim_start();
         let after = after.trim_start_matches(['\'', '"']);
-        return !after.starts_with('$') && !after.starts_with('<');
+        if !after.starts_with('$') && !after.starts_with('<') {
+            return true;
+        }
+        rest = &rest[index + needle.len()..];
     }
     false
 }
