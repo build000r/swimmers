@@ -1161,6 +1161,31 @@ printf '{"effective":[],"recommendations":[]}\n'
     }
 
     #[tokio::test]
+    async fn create_session_rejects_unknown_remote_launch_target() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let api = InProcessApi::new(test_state());
+
+        let err = api
+            .create_session(
+                &dir.path().to_string_lossy(),
+                SpawnTool::Codex,
+                Some("missing-remote".to_string()),
+                Some("run remotely".to_string()),
+            )
+            .await
+            .expect_err("unknown remote target should fail before local create");
+
+        assert!(
+            err.starts_with("LAUNCH_TARGET_UNKNOWN: "),
+            "unexpected error: {err}"
+        );
+        assert!(
+            err.contains("missing-remote") || err.contains("no skillbox-config overlay"),
+            "unexpected remote target error: {err}"
+        );
+    }
+
+    #[tokio::test]
     async fn open_session_keeps_remote_native_handoff_as_adapter_error_string() {
         let api = InProcessApi::new(test_state());
 
