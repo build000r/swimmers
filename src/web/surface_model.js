@@ -206,6 +206,9 @@ function sessionMatchesPreset(session, preset) {
 }
 
 function sessionHasMappedCwd(session) {
+  if (session?.targetKind === "swimmers_api") {
+    return Boolean(String(session?.launchCwd || "").trim());
+  }
   return Boolean(String(session?.launchCwd || session?.canonicalCwd || session?.fullCwd || "").trim());
 }
 
@@ -213,11 +216,12 @@ function sessionCapabilityEnabled(session, key) {
   const capability = String(key || "").trim().toLowerCase();
   const local = session.targetKey === "local";
   const remoteApi = session.targetKind === "swimmers_api";
+  const remoteObservable = remoteApi;
   const remoteReady = remoteApi && session.transportKey === "healthy";
   switch (capability) {
     case "observe":
     case "observe_sessions":
-      return local || remoteReady;
+      return local || remoteObservable;
     case "launch":
     case "launch_session":
       return local || remoteReady;

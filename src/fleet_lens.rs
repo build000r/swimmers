@@ -337,11 +337,14 @@ pub fn session_capability_summary(
     match session.environment.scope {
         SessionEnvironmentScope::Local => Some(EnvironmentCapabilitySummary::local()),
         SessionEnvironmentScope::Remote => match session.environment.target_kind.as_str() {
-            "swimmers_api" => Some(EnvironmentCapabilitySummary::remote_swimmers_api(
-                session.transport_health == TransportHealth::Healthy,
-                session.environment.local_cwd.is_some() || session.environment.remote_cwd.is_some(),
-                false,
-            )),
+            "swimmers_api" => Some(
+                EnvironmentCapabilitySummary::remote_swimmers_api_with_state(
+                    true,
+                    session.transport_health == TransportHealth::Healthy,
+                    session.environment.local_cwd.is_some(),
+                    false,
+                ),
+            ),
             "ssh_only" => Some(EnvironmentCapabilitySummary::ssh_handoff(false)),
             _ => None,
         },
@@ -633,7 +636,7 @@ mod tests {
             },
             "remote",
             remote.cwd.clone(),
-            Some("/Users/b/repos/opensource/swimmers".to_string()),
+            Some("/Users/tester/repos/opensource/swimmers".to_string()),
             "remote_swimmers_api",
         );
         remote.transport_health = TransportHealth::Degraded;
@@ -683,5 +686,108 @@ mod tests {
         assert_eq!(advisory.count, 1);
         assert_eq!(advisory.stale_count, 1);
         assert_eq!(advisory.degraded_count, 1);
+    }
+
+    #[test]
+    fn degraded_remote_sessions_remain_observable_without_write_capabilities() {
+        let mut remote = session(
+            "skillbox::remote",
+            "/srv/skillbox/repos/swimmers",
+            SessionState::Busy,
+        );
+        remote.environment = SessionEnvironmentSummary::remote(
+            &LaunchTargetSummary {
+                id: "skillbox".to_string(),
+                label: "Skillbox devbox".to_string(),
+                kind: "swimmers_api".to_string(),
+                base_url: None,
+                auth_token_env: None,
+                bootstrap_hint: None,
+                path_mappings: Vec::new(),
+            },
+            "remote",
+            remote.cwd.clone(),
+            Some("/Users/tester/repos/opensource/swimmers".to_string()),
+            "remote_swimmers_api",
+        );
+        remote.is_stale = true;
+        remote.transport_health = TransportHealth::Degraded;
+
+        let capabilities = session_capability_summary(&remote).expect("remote capabilities");
+        assert!(capabilities.observe_sessions);
+        assert!(!capabilities.launch_session);
+        assert!(!capabilities.send_input);
+        assert!(!capabilities.group_input);
+        assert!(!capabilities.remote_dir_inventory);
+
+        let observe = preset(
+            "observe",
+            "Observe",
+            "test",
+            vec![FleetLensPresetMatcher::Capability {
+                key: "observe_sessions".to_string(),
+            }],
+        );
+        let send = preset(
+            "send",
+            "Send",
+            "test",
+            vec![FleetLensPresetMatcher::Capability {
+                key: "send_input".to_string(),
+            }],
+        );
+
+        assert!(fleet_preset_matches_session(&observe, &remote, None));
+        assert!(!fleet_preset_matches_session(&send, &remote, None));
+    }
+
+    #[test]
+    fn remote_dir_inventory_capability_requires_mapped_local_cwd() {
+        let target = LaunchTargetSummary {
+            id: "skillbox".to_string(),
+            label: "Skillbox devbox".to_string(),
+            kind: "swimmers_api".to_string(),
+            base_url: None,
+            auth_token_env: None,
+            bootstrap_hint: None,
+            path_mappings: Vec::new(),
+        };
+        let mut mapped = session(
+            "skillbox::mapped",
+            "/srv/skillbox/repos/swimmers",
+            SessionState::Busy,
+        );
+        mapped.environment = SessionEnvironmentSummary::remote(
+            &target,
+            "mapped",
+            mapped.cwd.clone(),
+            Some("/Users/tester/repos/opensource/swimmers".to_string()),
+            "remote_swimmers_api",
+        );
+
+        let mut unmapped = session(
+            "skillbox::unmapped",
+            "/srv/skillbox/repos/unknown",
+            SessionState::Busy,
+        );
+        unmapped.environment = SessionEnvironmentSummary::remote(
+            &target,
+            "unmapped",
+            unmapped.cwd.clone(),
+            None,
+            "remote_swimmers_api",
+        );
+
+        let dirs = preset(
+            "remote-dirs",
+            "Remote dirs",
+            "test",
+            vec![FleetLensPresetMatcher::Capability {
+                key: "remote_dir_inventory".to_string(),
+            }],
+        );
+
+        assert!(fleet_preset_matches_session(&dirs, &mapped, None));
+        assert!(!fleet_preset_matches_session(&dirs, &unmapped, None));
     }
 }

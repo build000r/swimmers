@@ -940,10 +940,25 @@ test("buildSurfaceModel applies capability fleet presets to sessions and environ
       canonical_cwd: "/Users/tester/repos/opensource/swimmers",
     },
   });
+  const unmapped = rawSession({
+    session_id: "unmapped",
+    tmux_name: "unmapped",
+    cwd: "/srv/skillbox/repos/unknown",
+    environment: {
+      scope: "remote",
+      target_id: "portfolio-devbox",
+      target_label: "Portfolio Devbox",
+      target_kind: "swimmers_api",
+      display_host: "Portfolio Devbox",
+      local_cwd: null,
+      remote_cwd: "/srv/skillbox/repos/unknown",
+      canonical_cwd: "/srv/skillbox/repos/unknown",
+    },
+  });
 
   const dirsModel = buildSurfaceModel({
     state: baseState({
-      sessions: [remote],
+      sessions: [remote, unmapped],
       selectedSessionId: "remote",
       fleetPresetId: "remote-dirs",
       fleetPresets: [{
@@ -968,6 +983,7 @@ test("buildSurfaceModel applies capability fleet presets to sessions and environ
 
   assert.deepEqual(dirsModel.sessions.map((session) => session.sessionId), ["remote"]);
   assert.deepEqual(dirsModel.environmentMatrix.map((row) => row.id), ["portfolio-devbox"]);
+  assert.equal(dirsModel.environmentMatrix[0].sessionCount, 1);
 
   const bootstrapModel = buildSurfaceModel({
     state: baseState({
@@ -997,6 +1013,89 @@ test("buildSurfaceModel applies capability fleet presets to sessions and environ
   assert.deepEqual(bootstrapModel.sessions, []);
   assert.deepEqual(bootstrapModel.environmentMatrix.map((row) => row.id), ["skillbox-devbox"]);
   assert.match(bootstrapModel.fleetEmptyMessage, /No sessions match Bootstrap/);
+});
+
+test("capability preset keeps degraded remote sessions observable but not writable", () => {
+  const degradedRemote = rawSession({
+    session_id: "portfolio-devbox::remote",
+    tmux_name: "remote",
+    cwd: "/srv/skillbox/repos/swimmers",
+    is_stale: true,
+    transport_health: "degraded",
+    environment: {
+      scope: "remote",
+      target_id: "portfolio-devbox",
+      target_label: "Portfolio Devbox",
+      target_kind: "swimmers_api",
+      display_host: "Portfolio Devbox",
+      local_cwd: "/Users/tester/repos/opensource/swimmers",
+      remote_cwd: "/srv/skillbox/repos/swimmers",
+      canonical_cwd: "/Users/tester/repos/opensource/swimmers",
+    },
+  });
+  const environments = [{
+    id: "portfolio-devbox",
+    label: "Portfolio Devbox",
+    kind: "swimmers_api",
+    display_host: "Portfolio Devbox",
+    backend_mode: "remote_swimmers_api",
+    status: "Degraded",
+    capabilities: {
+      observe_sessions: true,
+      launch_session: false,
+      send_input: false,
+      group_input: false,
+      remote_dir_inventory: false,
+      advisory_metadata: true,
+      health_probe: true,
+    },
+  }];
+  const fleetPresets = [
+    {
+      id: "observe",
+      label: "Observe",
+      source: "overlay",
+      matchers: [{ type: "capability", key: "observe_sessions" }],
+    },
+    {
+      id: "send",
+      label: "Send",
+      source: "overlay",
+      matchers: [{ type: "capability", key: "send_input" }],
+    },
+  ];
+
+  const observeModel = buildSurfaceModel({
+    state: baseState({
+      sessions: [degradedRemote],
+      selectedSessionId: "portfolio-devbox::remote",
+      fleetPresetId: "observe",
+      fleetPresets,
+      environments,
+    }),
+    boot: { focus_layout: false, franken_term_available: true },
+    websocketOpen: 7,
+  });
+  assert.deepEqual(observeModel.sessions.map((session) => session.sessionId), [
+    "portfolio-devbox::remote",
+  ]);
+  assert.deepEqual(observeModel.environmentMatrix.map((row) => row.id), [
+    "portfolio-devbox",
+  ]);
+
+  const sendModel = buildSurfaceModel({
+    state: baseState({
+      sessions: [degradedRemote],
+      selectedSessionId: "portfolio-devbox::remote",
+      fleetPresetId: "send",
+      fleetPresets,
+      environments,
+    }),
+    boot: { focus_layout: false, franken_term_available: true },
+    websocketOpen: 7,
+  });
+  assert.deepEqual(sendModel.sessions, []);
+  assert.deepEqual(sendModel.environmentMatrix.map((row) => row.id), []);
 });
 
 test("buildSurfaceModel builds display-only project groups across local and remote sessions", () => {

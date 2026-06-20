@@ -991,7 +991,7 @@ fn saved_fleet_lens_capability_matches_thought_entries_and_entities() {
     unmapped.environment = swimmers::types::SessionEnvironmentSummary::remote(
         &target,
         "sess-unmapped",
-        "",
+        "/srv/skillbox/repos/unknown".to_string(),
         None,
         "remote_swimmers_api",
     );
@@ -1023,6 +1023,76 @@ fn saved_fleet_lens_capability_matches_thought_entries_and_entities() {
             .collect::<Vec<_>>(),
         vec![mapped_id]
     );
+}
+
+#[test]
+fn observe_capability_lens_keeps_degraded_remote_sessions_visible_without_send() {
+    let api = MockApi::new();
+    let layout = test_layout(240, 32);
+    let mut app = make_app(api);
+    let target = LaunchTargetSummary {
+        id: "skillbox".to_string(),
+        label: "Skillbox devbox".to_string(),
+        kind: "swimmers_api".to_string(),
+        base_url: None,
+        auth_token_env: None,
+        bootstrap_hint: None,
+        path_mappings: Vec::new(),
+    };
+
+    let remote_id = remote_sessions::namespace_session_id("skillbox", "sess-degraded");
+    let mut remote = session_summary_with_thought(
+        &remote_id,
+        "9",
+        "/srv/skillbox/repos/swimmers",
+        "cached stale remote session remains visible",
+        "2026-03-08T14:00:06Z",
+    );
+    remote.environment = swimmers::types::SessionEnvironmentSummary::remote(
+        &target,
+        "sess-degraded",
+        "/srv/skillbox/repos/swimmers".to_string(),
+        Some(TEST_REPO_SWIMMERS.to_string()),
+        "remote_swimmers_api",
+    );
+    remote.is_stale = true;
+    remote.transport_health = swimmers::types::TransportHealth::Degraded;
+
+    app.capture_thought_updates(
+        std::slice::from_ref(&remote),
+        layout.thought_entry_capacity(),
+    );
+    app.entities = vec![SessionEntity::new(remote, layout.overview_field)];
+
+    assert!(app.set_thought_filter_preset(FleetLensPreset {
+        id: "observe".to_string(),
+        label: "Observe".to_string(),
+        source: "overlay".to_string(),
+        matchers: vec![FleetLensPresetMatcher::Capability {
+            key: "observe_sessions".to_string(),
+        }],
+    }));
+    assert_eq!(visible_entity_ids(&app), vec![remote_id.clone()]);
+    assert_eq!(
+        app.visible_thought_entries(layout.thought_entry_capacity())
+            .into_iter()
+            .map(|entry| entry.session_id.clone())
+            .collect::<Vec<_>>(),
+        vec![remote_id]
+    );
+
+    assert!(app.set_thought_filter_preset(FleetLensPreset {
+        id: "send".to_string(),
+        label: "Send".to_string(),
+        source: "overlay".to_string(),
+        matchers: vec![FleetLensPresetMatcher::Capability {
+            key: "send_input".to_string(),
+        }],
+    }));
+    assert_eq!(visible_entity_ids(&app), Vec::<String>::new());
+    assert!(app
+        .visible_thought_entries(layout.thought_entry_capacity())
+        .is_empty());
 }
 
 #[test]
