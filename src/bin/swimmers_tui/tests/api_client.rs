@@ -932,6 +932,26 @@ async fn startup_preflight_waits_for_slow_local_sessions() {
 }
 
 #[tokio::test]
+async fn api_client_normalizes_trailing_slash_base_url_for_external_calls() {
+    let (base_url, handle) = spawn_delayed_api_server(None, None).await;
+    let client = test_api_client(format!("{base_url}/"), None);
+
+    let sessions = client
+        .fetch_sessions()
+        .await
+        .expect("trailing slash base URL should still fetch sessions");
+    let preflight = client.preflight_startup_access().await;
+
+    handle.abort();
+    assert_eq!(client.base_url, base_url);
+    assert_eq!(sessions.len(), 1);
+    assert!(
+        preflight.is_ok(),
+        "trailing slash base URL should still preflight startup routes"
+    );
+}
+
+#[tokio::test]
 async fn startup_preflight_retries_until_local_listener_is_ready() {
     use axum::http::StatusCode;
     use axum::routing::{get, put};

@@ -36,6 +36,16 @@ impl StartupAccessError {
 }
 
 impl ApiClient {
+    pub(crate) fn normalize_base_url(base_url: impl AsRef<str>) -> String {
+        let trimmed = base_url.as_ref().trim();
+        let normalized = trimmed.trim_end_matches('/');
+        if normalized.is_empty() {
+            trimmed.to_string()
+        } else {
+            normalized.to_string()
+        }
+    }
+
     fn build_http_client(timeout: Duration) -> Result<Client, String> {
         Client::builder()
             .connect_timeout(API_CONNECT_TIMEOUT)
@@ -56,6 +66,7 @@ impl ApiClient {
         let config = load.config;
         let base_url = std::env::var("SWIMMERS_TUI_URL")
             .unwrap_or_else(|_| format!("http://127.0.0.1:{}", config.port));
+        let base_url = Self::normalize_base_url(base_url);
         let auth_token = match config.auth_mode {
             AuthMode::Token => config.auth_token,
             AuthMode::LocalTrust | AuthMode::TailnetTrust => None,
@@ -1293,7 +1304,7 @@ mod response_tests {
             http: ApiClient::build_http_client(API_REQUEST_TIMEOUT).expect("test http client"),
             startup_http: ApiClient::build_http_client(API_STARTUP_REQUEST_TIMEOUT)
                 .expect("test startup http client"),
-            base_url: base_url.to_string(),
+            base_url: ApiClient::normalize_base_url(base_url),
             auth_token: None,
             startup_wait_timeout: API_STARTUP_WAIT_TIMEOUT,
             startup_retry_interval: API_STARTUP_RETRY_INTERVAL,

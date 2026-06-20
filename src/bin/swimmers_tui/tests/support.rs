@@ -175,7 +175,7 @@ fn test_api_client(base_url: String, auth_token: Option<&str>) -> ApiClient {
     ApiClient {
         http: test_http_client(Duration::from_millis(100)),
         startup_http: test_http_client(Duration::from_millis(250)),
-        base_url,
+        base_url: ApiClient::normalize_base_url(base_url),
         auth_token: auth_token.map(str::to_string),
         startup_wait_timeout: Duration::from_millis(400),
         startup_retry_interval: Duration::from_millis(10),
