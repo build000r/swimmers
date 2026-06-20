@@ -303,7 +303,7 @@ fn compare_overlay_plan_entries(a: &OverlayPlanEntry, b: &OverlayPlanEntry) -> s
 }
 
 fn is_swimmers_api_launch_target(target: &LaunchTargetSummary) -> bool {
-    target.kind.trim() == "swimmers_api"
+    target.kind.trim().eq_ignore_ascii_case("swimmers_api")
 }
 
 fn first_client_matching_cwd<'a>(

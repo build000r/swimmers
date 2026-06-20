@@ -241,7 +241,7 @@ function normalizeLaunchTarget(target) {
     return localLaunchTarget();
   }
   const label = String(target?.label || id).trim() || id;
-  const kind = String(target?.kind || "").trim();
+  const kind = normalizeLaunchTargetKind(target?.kind);
   return {
     ...target,
     id,
@@ -249,6 +249,11 @@ function normalizeLaunchTarget(target) {
     kind,
     path_mappings: Array.isArray(target?.path_mappings) ? target.path_mappings : [],
   };
+}
+
+function normalizeLaunchTargetKind(kind) {
+  const normalized = String(kind || "").trim().toLowerCase();
+  return normalized === "ssh" ? "ssh_only" : normalized;
 }
 
 export function normalizeLaunchTargets(targets) {
@@ -347,7 +352,7 @@ export function launchTargetPreviewForPath(path, target) {
 }
 
 function launchTargetConfigBlocker(target) {
-  if (String(target?.kind || "").trim() !== "swimmers_api") {
+  if (normalizeLaunchTargetKind(target?.kind) !== "swimmers_api") {
     return "unsupported target";
   }
   const baseUrl = String(target?.base_url || "").trim();

@@ -313,7 +313,7 @@ test("launch target normalization trims ids and keeps remote selection usable", 
   const targets = normalizeLaunchTargets([{
     id: " devbox ",
     label: " Devbox ",
-    kind: " swimmers_api ",
+    kind: " Swimmers_API ",
     base_url: " http://127.0.0.1:3210 ",
     path_mappings: [{ local_prefix: "/Users/tester/repos", remote_prefix: "/srv/repos" }],
   }]);
@@ -333,6 +333,25 @@ test("launch target normalization trims ids and keeps remote selection usable", 
     launchTargetPreviewForPath("/Users/tester/repos/swimmers", selectedLaunchTargetSummary(el, dirBrowser)).remoteCwd,
     "/srv/repos/swimmers",
   );
+});
+
+test("launch target normalization aliases ssh kind to ssh-only handoff", () => {
+  const targets = normalizeLaunchTargets([{
+    id: " skillbox-devbox ",
+    label: " Skillbox devbox ",
+    kind: " SSH ",
+  }]);
+  const target = targets.find((candidate) => candidate.id === "skillbox-devbox");
+
+  assert.equal(target.kind, "ssh_only");
+  assert.deepEqual(launchTargetPreviewForPath("/Users/tester/repos/swimmers", target), {
+    targetId: "skillbox-devbox",
+    targetLabel: "Skillbox devbox",
+    localCwd: "/Users/tester/repos/swimmers",
+    remoteCwd: null,
+    blocked: false,
+    reason: "handoff",
+  });
 });
 
 test("launch target and batch bar helpers preserve payload and label semantics", () => {

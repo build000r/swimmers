@@ -307,7 +307,11 @@ impl PickerState {
 
     fn visible_entries_for_search(&self, needle: &str) -> Vec<usize> {
         let seen_local_paths = self.local_entry_paths();
-        self.matching_local_entry_indices(needle)
+        let local_matches = self.matching_local_entry_indices(needle);
+        if self.current_group.is_some() {
+            return local_matches.collect();
+        }
+        local_matches
             .chain(self.matching_repo_search_entry_indices(needle, &seen_local_paths))
             .collect()
     }

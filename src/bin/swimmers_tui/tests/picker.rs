@@ -1485,6 +1485,25 @@ fn picker_search_includes_repo_cwd_when_not_in_current_entries() {
 }
 
 #[test]
+fn picker_group_search_does_not_widen_to_global_repo_hits() {
+    let mut response = dir_response(TEST_REPOS_ROOT, &[("frontend", false), ("backend", false)]);
+    response.entries[0].full_path = Some("/Users/tester/repos/frontend".to_string());
+    response.entries[1].full_path = Some("/Users/tester/repos/backend".to_string());
+    let mut picker = PickerState::new(0, 0, response, true, SpawnTool::Codex, None);
+    picker.current_group = Some("frontend".to_string());
+    picker.set_repo_search_entries(
+        repo_search_response(&["/Users/tester/hard/frontend-platform"]).entries,
+    );
+    picker.search = "frontend".to_string();
+
+    assert_eq!(picker.visible_entries(), vec![0]);
+    assert_eq!(
+        picker.batch_dirs_for_visible_entries(),
+        vec!["/Users/tester/repos/frontend"]
+    );
+}
+
+#[test]
 fn picker_search_deduplicates_repo_cwd_already_visible() {
     let mut response = dir_response(TEST_REPOS_ROOT, &[("swimmers", true)]);
     response.entries[0].full_path = Some("/Users/tester/repos/opensource/swimmers".to_string());
