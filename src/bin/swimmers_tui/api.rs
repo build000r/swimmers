@@ -91,10 +91,19 @@ impl ApiClient {
         }
     }
 
+    fn display_base_url(&self) -> String {
+        redacted_backend_url(&self.base_url)
+    }
+
+    fn redact_backend_url_text(&self, text: &str) -> String {
+        redact_backend_url_text(&self.base_url, text)
+    }
+
     pub(crate) fn transport_error(&self, action: &str, err: reqwest::Error) -> String {
-        let detail = root_error_message(&err);
+        let detail = self.redact_backend_url_text(&root_error_message(&err));
+        let display_url = self.display_base_url();
         tracing::warn!(
-            url = %self.base_url,
+            url = %display_url,
             action,
             is_timeout = err.is_timeout(),
             is_connect = err.is_connect(),
@@ -103,7 +112,7 @@ impl ApiClient {
             detail = %detail,
             "tui http transport error"
         );
-        friendly_transport_error_with_detail(&self.base_url, action, &err, &detail)
+        friendly_transport_error_with_detail(&display_url, action, &err, &detail)
     }
 
     pub(crate) fn targets_local_backend(&self) -> bool {
@@ -121,18 +130,19 @@ impl ApiClient {
     }
 
     pub(crate) fn startup_access_error(&self, path: &str, status: reqwest::StatusCode) -> String {
+        let base_url = self.display_base_url();
         match status {
             reqwest::StatusCode::UNAUTHORIZED => format!(
                 "backend at {} requires valid auth for {}. Set AUTH_MODE=token and AUTH_TOKEN to match the target API.",
-                self.base_url, path
+                base_url, path
             ),
             reqwest::StatusCode::FORBIDDEN => format!(
                 "backend at {} denied startup access to {}. Use a token with the required session scope for this TUI instance.",
-                self.base_url, path
+                base_url, path
             ),
             _ => format!(
                 "backend at {} rejected startup access to {} ({status})",
-                self.base_url, path
+                base_url, path
             ),
         }
     }
@@ -173,7 +183,10 @@ impl ApiClient {
         http: &Client,
     ) -> Result<(), StartupAccessError> {
         let url = format!("{}/v1/sessions", self.base_url);
-        tracing::debug!(url = %url, "preflight: GET /v1/sessions");
+        tracing::debug!(
+            url = %redacted_backend_url(&url),
+            "preflight: GET /v1/sessions"
+        );
         let response = self
             .with_auth(http.get(url))
             .send()
@@ -195,7 +208,10 @@ impl ApiClient {
         http: &Client,
     ) -> Result<(), StartupAccessError> {
         let url = format!("{}/v1/selection", self.base_url);
-        tracing::debug!(url = %url, "preflight: PUT /v1/selection (clear)");
+        tracing::debug!(
+            url = %redacted_backend_url(&url),
+            "preflight: PUT /v1/selection (clear)"
+        );
         let response = self
             .with_auth(http.put(url))
             .json(&PublishSelectionRequest { session_id: None })
@@ -224,6 +240,7 @@ impl ApiClient {
     {
         let started = Instant::now();
         let mut attempt: u32 = 0;
+        let display_url = self.display_base_url();
         loop {
             attempt += 1;
             match probe().await {
@@ -231,7 +248,7 @@ impl ApiClient {
                     tracing::info!(
                         attempt,
                         elapsed_ms = started.elapsed().as_millis() as u64,
-                        url = %self.base_url,
+                        url = %display_url,
                         "preflight probe ready"
                     );
                     return Ok(());
@@ -240,7 +257,7 @@ impl ApiClient {
                     tracing::error!(
                         attempt,
                         elapsed_ms = started.elapsed().as_millis() as u64,
-                        url = %self.base_url,
+                        url = %display_url,
                         message = %message,
                         "preflight probe failed (fatal)"
                     );
@@ -252,7 +269,7 @@ impl ApiClient {
                         tracing::error!(
                             attempt,
                             elapsed_ms,
-                            url = %self.base_url,
+                            url = %display_url,
                             message = %message,
                             "preflight probe deadline exceeded"
                         );
@@ -261,7 +278,7 @@ impl ApiClient {
                     tracing::warn!(
                         attempt,
                         elapsed_ms,
-                        url = %self.base_url,
+                        url = %display_url,
                         message = %message,
                         "preflight probe retrying"
                     );
@@ -286,7 +303,7 @@ impl ApiClient {
     pub(crate) async fn preflight_startup_access(&self) -> Result<(), String> {
         let local = self.targets_local_backend();
         tracing::info!(
-            url = %self.base_url,
+            url = %self.display_base_url(),
             local,
             wait_timeout_ms = self.startup_wait_timeout.as_millis() as u64,
             "preflight startup access begin"
@@ -381,14 +398,14 @@ impl ApiClient {
     fn personal_workflows_route_missing_message(&self, route: &str, feature: &str) -> String {
         format!(
             "backend at {} does not expose {route}. {feature} requires SWIMMERS_PERSONAL_WORKFLOWS=1 on the target backend; if this is your local server, relaunch via `make up` or `make tui`.",
-            self.base_url
+            self.display_base_url()
         )
     }
 
     fn session_skills_missing_message(&self) -> String {
         format!(
             "backend at {} does not expose session skills. Skill context requires SWIMMERS_PERSONAL_WORKFLOWS=1 on the target backend; if this is your local server, relaunch via `make up` or `make tui`.",
-            self.base_url
+            self.display_base_url()
         )
     }
 }
@@ -427,6 +444,7 @@ async fn decode_native_mode_response(
     }
 
     if response.status() == reqwest::StatusCode::NOT_FOUND {
+        let base_url = redacted_backend_url(base_url);
         return Err(format!(
             "backend at {base_url} does not support runtime Ghostty handoff placement switching yet. If this is your local server, restart `swimmers` or relaunch via `make tui`."
         ));
@@ -503,6 +521,49 @@ fn friendly_transport_error_with_detail(
         msg.push_str(&format!(" Tail logs: {}", path.display()));
     }
     msg
+}
+
+fn redacted_backend_url(raw_url: &str) -> String {
+    let Ok(mut url) = reqwest::Url::parse(raw_url) else {
+        return "[invalid backend URL]".to_string();
+    };
+    let _ = url.set_username("");
+    let _ = url.set_password(None);
+    url.set_query(None);
+    url.set_fragment(None);
+
+    let mut display = url.to_string();
+    if display.ends_with('/') {
+        display.pop();
+    }
+    display
+}
+
+fn redact_backend_url_text(raw_url: &str, text: &str) -> String {
+    let mut redacted = text.replace(raw_url, &redacted_backend_url(raw_url));
+    let Ok(url) = reqwest::Url::parse(raw_url) else {
+        return redacted;
+    };
+
+    if !url.username().is_empty() {
+        redacted = redacted.replace(url.username(), "[redacted]");
+    }
+    if let Some(password) = url.password().filter(|password| !password.is_empty()) {
+        redacted = redacted.replace(password, "[redacted]");
+    }
+    if let Some(query) = url.query().filter(|query| !query.is_empty()) {
+        redacted = redacted.replace(query, "[redacted]");
+        for (_key, value) in url.query_pairs() {
+            if !value.is_empty() {
+                redacted = redacted.replace(value.as_ref(), "[redacted]");
+            }
+        }
+    }
+    if let Some(fragment) = url.fragment().filter(|fragment| !fragment.is_empty()) {
+        redacted = redacted.replace(fragment, "[redacted]");
+    }
+
+    redacted
 }
 
 pub(crate) trait TuiApi: Send + Sync + 'static {
@@ -930,7 +991,7 @@ impl TuiApi for ApiClient {
             if response.status() == reqwest::StatusCode::NOT_FOUND {
                 return Err(format!(
                     "backend at {} does not support runtime terminal handoff target switching yet. If this is your local server, restart `swimmers` or relaunch via `make tui`.",
-                    self.base_url
+                    self.display_base_url()
                 ));
             }
 
@@ -1066,7 +1127,7 @@ impl TuiApi for ApiClient {
                 "failed to parse dirs response",
                 format!(
                     "backend at {} does not expose /v1/dirs. Click-to-spawn directory browsing requires SWIMMERS_PERSONAL_WORKFLOWS=1 on the target backend; if this is your local server, relaunch via `make up` or `make tui`.",
-                    self.base_url
+                    self.display_base_url()
                 ),
             )
             .await

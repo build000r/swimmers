@@ -1,5 +1,31 @@
 use super::*;
 
+const SECRET_BACKEND_USER: &str = "leaky-user";
+const SECRET_BACKEND_PASSWORD: &str = "leaky-password";
+const SECRET_BACKEND_TOKEN: &str = "leaky-token";
+const SECRET_BACKEND_FRAGMENT: &str = "frag-secret";
+
+fn secret_bearing_backend_url(addr: impl std::fmt::Display) -> String {
+    format!(
+        "http://{SECRET_BACKEND_USER}:{SECRET_BACKEND_PASSWORD}@{addr}/?token={SECRET_BACKEND_TOKEN}#{SECRET_BACKEND_FRAGMENT}"
+    )
+}
+
+fn assert_backend_url_secrets_redacted(message: &str) {
+    for forbidden in [
+        SECRET_BACKEND_USER,
+        SECRET_BACKEND_PASSWORD,
+        SECRET_BACKEND_TOKEN,
+        SECRET_BACKEND_FRAGMENT,
+        "token=",
+    ] {
+        assert!(
+            !message.contains(forbidden),
+            "message leaked {forbidden}: {message}"
+        );
+    }
+}
+
 #[test]
 fn api_client_targets_local_backend_for_loopback_hosts() {
     let client = test_api_client("http://127.0.0.1:3210".to_string(), None);
@@ -10,6 +36,19 @@ fn api_client_targets_local_backend_for_loopback_hosts() {
 
     let remote = test_api_client("http://100.101.123.63:3210".to_string(), None);
     assert!(!remote.targets_local_backend());
+}
+
+#[test]
+fn api_client_startup_errors_redact_secret_bearing_backend_urls() {
+    let client = test_api_client(
+        secret_bearing_backend_url("100.64.1.2:3210"),
+        Some("auth-token"),
+    );
+
+    let error = client.startup_access_error("/v1/sessions", reqwest::StatusCode::UNAUTHORIZED);
+
+    assert!(error.contains("backend at http://100.64.1.2:3210 requires valid auth"));
+    assert_backend_url_secrets_redacted(&error);
 }
 
 #[test]
@@ -171,15 +210,21 @@ async fn api_client_transport_errors_are_actionable() {
     let port = listener.local_addr().expect("local addr").port();
     drop(listener);
 
-    let client = test_api_client(format!("http://127.0.0.1:{port}"), None);
+    let client = test_api_client(
+        secret_bearing_backend_url(format!("127.0.0.1:{port}")),
+        None,
+    );
 
     let error = client
         .fetch_sessions()
         .await
         .expect_err("closed localhost port should fail");
-    assert!(error.contains("swimmers API unavailable at"));
+    assert!(error.contains(&format!(
+        "swimmers API unavailable at http://127.0.0.1:{port}"
+    )));
     assert!(error.contains("Start `swimmers` or set SWIMMERS_TUI_URL."));
     assert!(!error.contains("error sending request for url"));
+    assert_backend_url_secrets_redacted(&error);
 }
 
 #[tokio::test]
@@ -639,7 +684,7 @@ async fn api_client_set_native_app_reports_restart_hint_on_404() {
             .await
             .expect("serve test api");
     });
-    let client = test_api_client(format!("http://{addr}"), None);
+    let client = test_api_client(secret_bearing_backend_url(addr), None);
 
     let error = client
         .set_native_app(NativeDesktopApp::Ghostty)
@@ -647,8 +692,10 @@ async fn api_client_set_native_app_reports_restart_hint_on_404() {
         .expect_err("missing route should surface restart hint");
 
     handle.abort();
+    assert!(error.contains(&format!("backend at http://{addr}")));
     assert!(error.contains("does not support runtime terminal handoff target switching yet"));
     assert!(error.contains("restart `swimmers`"));
+    assert_backend_url_secrets_redacted(&error);
 }
 
 #[tokio::test]
@@ -664,7 +711,7 @@ async fn api_client_set_native_mode_reports_restart_hint_on_404() {
             .await
             .expect("serve test api");
     });
-    let client = test_api_client(format!("http://{addr}"), None);
+    let client = test_api_client(secret_bearing_backend_url(addr), None);
 
     let error = client
         .set_native_mode(GhosttyOpenMode::Add)
@@ -672,8 +719,10 @@ async fn api_client_set_native_mode_reports_restart_hint_on_404() {
         .expect_err("missing route should surface restart hint");
 
     handle.abort();
+    assert!(error.contains(&format!("backend at http://{addr}")));
     assert!(error.contains("does not support runtime Ghostty handoff placement switching yet"));
     assert!(error.contains("restart `swimmers`"));
+    assert_backend_url_secrets_redacted(&error);
 }
 
 #[tokio::test]
@@ -689,7 +738,7 @@ async fn api_client_list_dirs_reports_feature_hint_on_404() {
             .await
             .expect("serve test api");
     });
-    let client = test_api_client(format!("http://{addr}"), None);
+    let client = test_api_client(secret_bearing_backend_url(addr), None);
 
     let error = client
         .list_dirs(None, true, None, None)
@@ -697,9 +746,39 @@ async fn api_client_list_dirs_reports_feature_hint_on_404() {
         .expect_err("missing route should explain the required runtime switch");
 
     handle.abort();
+    assert!(error.contains(&format!("backend at http://{addr}")));
     assert!(error.contains("does not expose /v1/dirs"));
     assert!(error.contains("SWIMMERS_PERSONAL_WORKFLOWS=1"));
     assert!(error.contains("make tui"));
+    assert_backend_url_secrets_redacted(&error);
+}
+
+#[tokio::test]
+async fn api_client_fetch_session_skills_reports_feature_hint_on_404() {
+    use axum::Router;
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind test server");
+    let addr = listener.local_addr().expect("server addr");
+    let handle = tokio::spawn(async move {
+        axum::serve(listener, Router::new())
+            .await
+            .expect("serve test api");
+    });
+    let client = test_api_client(secret_bearing_backend_url(addr), None);
+
+    let error = client
+        .fetch_session_skills("sess-1")
+        .await
+        .expect_err("missing route should explain the required runtime switch");
+
+    handle.abort();
+    assert!(error.contains(&format!("backend at http://{addr}")));
+    assert!(error.contains("does not expose session skills"));
+    assert!(error.contains("SWIMMERS_PERSONAL_WORKFLOWS=1"));
+    assert!(error.contains("make tui"));
+    assert_backend_url_secrets_redacted(&error);
 }
 
 #[tokio::test]
