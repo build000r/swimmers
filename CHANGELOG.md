@@ -4,30 +4,7 @@ All notable changes to swimmers are documented here. The format is based on [Kee
 
 ## [Unreleased]
 
-### Native handoff
-
-- Added a managed `[attention group]` queue for the TUI that opens related local sessions together, prefers project adjacency over raw recency, and refreshes the `swimmers-attention` tmux group in place as visible panes stop waiting.
-
-### Test reliability
-
-- Fixed flaky test failures caused by missing `ENV_LOCK` guards on native cache-mutating tests and non-blocking file lock contention under heavy test parallelism.
-- Hardened `write_executable_script` test helper against ETXTBSY races using atomic rename.
-
-### Build and CI
-
-- Added CI workflow (`.github/workflows/ci.yml`) with test, clippy, format, and rustdoc gates on every push to main and every pull request.
-- Added release profile with thin LTO, symbol stripping, and single codegen unit for smaller binaries.
-
-### Code quality
-
-- Cleaned up clippy warnings: replaced clamp-like patterns, redundant closures, and needless borrows.
-- Boxed oversized enum variants (`FishBowlMode::Mermaid`, `SessionWsEvent::Lifecycle`) to reduce stack frame sizes.
-- Added brief retry to file-lock acquisition for resilience under IO contention.
-- Enforced `cargo fmt` across all source files.
-- Removed dead code (`model_override`, `DismissAttentionPayload`, `ClientOverlay.client_dir`) and replaced stale `FIXME` annotations with proper `#[cfg(test)]` guards.
-- Fixed broken intra-doc link to private `INSPECT_GIT_REPO_CACHE_TTL`.
-
-## [0.3.0] — 2026-05-02
+## [0.3.0] — 2026-06-20
 
 ### Trustworthy glance state evidence
 
@@ -50,6 +27,35 @@ All notable changes to swimmers are documented here. The format is based on [Kee
 - The GitHub release workflow now renders release notes from the matching `CHANGELOG.md` version block and ships that body with each tag, instead of creating empty releases when the assets publish successfully.
 - The GitHub release workflow now publishes `swimmers-tui-linux-amd64` and its SHA-256 checksum alongside the standalone `swimmers-linux-amd64` server asset, matching the two-binary `cargo install swimmers` boundary.
 - The crate package boundary now excludes local Beads, Skillbox, Codex, and other operator-only state so crates.io payloads contain source, assets, tests, and public docs rather than workstation artifacts.
+
+### Native handoff
+
+- Added a managed `[attention group]` queue for the TUI that opens related local sessions together, prefers project adjacency over raw recency, and refreshes the `swimmers-attention` tmux group in place as visible panes stop waiting.
+
+### Test reliability
+
+- Fixed flaky test failures caused by missing `ENV_LOCK` guards on native cache-mutating tests and non-blocking file lock contention under heavy test parallelism.
+- Hardened `write_executable_script` test helper against ETXTBSY races using atomic rename.
+
+### Build and CI
+
+- Added CI workflow (`.github/workflows/ci.yml`) with test, clippy, format, and rustdoc gates on every push to main and every pull request.
+- Added release profile with thin LTO, symbol stripping, and single codegen unit for smaller binaries.
+
+### Distribution
+
+- Added a `curl | sh` installer (`scripts/install.sh`) that downloads prebuilt `swimmers` and `swimmers-tui` binaries from GitHub Releases, verifies their SHA-256 checksums, and installs them to `~/.local/bin` — no Rust toolchain or repo checkout required (`SWIMMERS_INSTALL_DIR` and `SWIMMERS_VERSION` overrides supported).
+- Added macOS Apple Silicon (`darwin-arm64`) prebuilt binaries to the release workflow alongside the existing Linux `x86_64` build, so the one-line installer works on Apple Silicon and Linux without building from source.
+- Reframed README installation to lead with the prebuilt one-liner; `cargo install swimmers` is now marked planned until the crate is published to crates.io.
+
+### Code quality
+
+- Cleaned up clippy warnings: replaced clamp-like patterns, redundant closures, and needless borrows.
+- Boxed oversized enum variants (`FishBowlMode::Mermaid`, `SessionWsEvent::Lifecycle`) to reduce stack frame sizes.
+- Added brief retry to file-lock acquisition for resilience under IO contention.
+- Enforced `cargo fmt` across all source files.
+- Removed dead code (`model_override`, `DismissAttentionPayload`, `ClientOverlay.client_dir`) and replaced stale `FIXME` annotations with proper `#[cfg(test)]` guards.
+- Fixed broken intra-doc link to private `INSPECT_GIT_REPO_CACHE_TTL`.
 
 ## [0.2.0] — 2026-04-16
 
