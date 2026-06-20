@@ -1333,6 +1333,14 @@ fn require_repo_action_path(path: &str) -> Result<&str, ApiServiceError> {
     Ok(requested_path)
 }
 
+fn resolve_local_dir_write_path(path: &str) -> Result<(PathBuf, PathBuf), ApiServiceError> {
+    let requested_path = require_repo_action_path(path)?;
+    let base = dirs_base_path();
+    let canonical_base = base.canonicalize().unwrap_or_else(|_| base.clone());
+    let dir_config = effective_dir_config_for_base(&canonical_base);
+    resolve_target_path_with_group_roots(base, PathBuf::from(requested_path), dir_config.as_ref())
+}
+
 fn restart_action_config(
     canonical_base: &Path,
 ) -> Result<&'static OverlayDirConfig, ApiServiceError> {
@@ -1397,9 +1405,7 @@ fn restart_commands_for_path(
 }
 
 fn plan_restart_action(path: &str) -> Result<RestartActionPlan, ApiServiceError> {
-    let requested_path = require_repo_action_path(path)?;
-    let target = PathBuf::from(requested_path);
-    let (canonical_base, canonical) = resolve_target_path(dirs_base_path(), target)?;
+    let (canonical_base, canonical) = resolve_local_dir_write_path(path)?;
     let config = restart_action_config(&canonical_base)?;
     let commands = restart_commands_for_path(&canonical, config)?;
 
@@ -1452,18 +1458,7 @@ pub async fn start_repo_action_with_executor(
     kind: RepoActionKind,
     executor: Arc<dyn RepoActionExecutor>,
 ) -> Result<DirRepoActionResponse, ApiServiceError> {
-    let requested_path = path.trim();
-    if requested_path.is_empty() {
-        return Err(ApiServiceError::new(
-            StatusCode::BAD_REQUEST,
-            "VALIDATION_FAILED",
-            "path is required",
-        ));
-    }
-
-    let base = dirs_base_path();
-    let target = PathBuf::from(requested_path);
-    let (_canonical_base, canonical) = resolve_target_path(base, target)?;
+    let (_canonical_base, canonical) = resolve_local_dir_write_path(path)?;
 
     let Some(repo_summary) = inspect_git_repo(&canonical).await.ok().flatten() else {
         return Err(ApiServiceError::new(
@@ -1532,18 +1527,7 @@ pub async fn start_dir_repo_action(
 }
 
 pub async fn restart_dir_services(path: &str) -> Result<DirRestartResponse, ApiServiceError> {
-    let requested_path = path.trim();
-    if requested_path.is_empty() {
-        return Err(ApiServiceError::new(
-            StatusCode::BAD_REQUEST,
-            "VALIDATION_FAILED",
-            "path is required",
-        ));
-    }
-
-    let base = dirs_base_path();
-    let target = PathBuf::from(requested_path);
-    let (canonical_base, canonical) = resolve_target_path(base, target)?;
+    let (canonical_base, canonical) = resolve_local_dir_write_path(path)?;
 
     let Some(config) = resolve_dir_config(&canonical_base) else {
         return Err(ApiServiceError::new(

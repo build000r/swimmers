@@ -301,6 +301,17 @@ mod tests {
         fs::write(path.join("README.md"), "dirty\n").expect("write readme");
     }
 
+    fn write_workspace_yaml(path: &Path, repo: &Path) {
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).expect("workspace dir");
+        }
+        let repo = repo
+            .to_string_lossy()
+            .replace('\\', "\\\\")
+            .replace('"', "\\\"");
+        fs::write(path, format!("repos:\n  - path: \"{repo}\"\n")).expect("workspace yaml");
+    }
+
     #[test]
     fn managed_base_child_names_derives_from_service_dirs() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -997,6 +1008,67 @@ mod tests {
         assert_eq!(entry["repo_dirty"], true);
         assert_eq!(entry["repo_action"]["kind"], "commit");
         assert_eq!(entry["repo_action"]["state"], "running");
+    }
+
+    #[tokio::test]
+    async fn start_dir_repo_action_accepts_workspace_group_repo_outside_base() {
+        let _lock = crate::test_support::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        crate::host_actions::clear_inspect_git_repo_cache_for_tests();
+        let dir = tempfile::tempdir().expect("tempdir");
+        let base = dir.path().join("repos");
+        let repo = dir.path().join("outside").join("swimmers");
+        init_dirty_git_repo(&repo);
+        write_workspace_yaml(
+            &base.join(".bv").join("workspaces").join("active.yaml"),
+            &repo,
+        );
+        let _base_env = set_env_var("DIRS_BASE_PATH", base.as_os_str().to_os_string());
+
+        let listed = list_dirs(
+            Extension(AuthInfo::new(OPERATOR_SCOPES.to_vec())),
+            State(test_state()),
+            Query(DirQuery {
+                path: None,
+                managed_only: Some(false),
+                group: Some("active".to_string()),
+                target: None,
+            }),
+        )
+        .await
+        .into_response();
+        assert_eq!(listed.status(), StatusCode::OK);
+        let json = response_json(listed).await;
+        let listed_path = json["entries"]
+            .as_array()
+            .and_then(|entries| entries.first())
+            .and_then(|entry| entry["full_path"].as_str())
+            .expect("listed grouped repo path")
+            .to_string();
+
+        let state = test_state();
+        let response = start_repo_action_with_executor(
+            state.clone(),
+            &listed_path,
+            RepoActionKind::Commit,
+            Arc::new(FakeRepoActionExecutor::sleeping_ok(200)),
+        )
+        .await
+        .expect("grouped outside-base repo action should start");
+
+        assert!(response.ok);
+        assert_eq!(
+            response.status.state,
+            crate::types::RepoActionState::Running
+        );
+        assert_eq!(
+            response.path,
+            repo.canonicalize()
+                .expect("canonical repo")
+                .to_string_lossy()
+                .into_owned()
+        );
     }
 
     #[tokio::test]

@@ -636,7 +636,7 @@ mod tests {
             },
             "remote",
             remote.cwd.clone(),
-            Some("/Users/tester/repos/opensource/swimmers".to_string()),
+            Some("/Users/b/repos/opensource/swimmers".to_string()),
             "remote_swimmers_api",
         );
         remote.transport_health = TransportHealth::Degraded;
