@@ -663,6 +663,26 @@ Host eqbox
 }
 
 #[test]
+fn ssh_import_parses_quoted_directive_arguments() {
+    let config = r#"
+Host quoted
+  HostName "quoted#host.example" # trailing comment
+  User 'skillbox'
+"#;
+
+    let report = ssh_import_report_from_config("/tmp/ssh-config", config);
+
+    assert_eq!(report.proposals.len(), 1);
+    assert_eq!(report.proposals[0].id, "quoted");
+    assert_eq!(report.proposals[0].label, "skillbox@quoted#host.example");
+    assert_eq!(
+        report.proposals[0].host_name.as_deref(),
+        Some("quoted#host.example")
+    );
+    assert_eq!(report.proposals[0].user.as_deref(), Some("skillbox"));
+}
+
+#[test]
 fn ssh_import_report_from_path_expands_included_config_files() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let ssh_dir = tmp.path().join(".ssh");
@@ -747,6 +767,33 @@ Host eq-include
     assert_eq!(report.proposals.len(), 1);
     assert_eq!(report.proposals[0].id, "eq-include");
     assert_eq!(report.proposals[0].label, "aiops@included.example");
+}
+
+#[test]
+fn ssh_import_report_from_path_expands_quoted_include_with_spaces() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let root = tmp.path().join("config");
+    let include_dir = tmp.path().join("config dir");
+    std::fs::create_dir_all(&include_dir).expect("create include dir");
+    let included = include_dir.join("included file.conf");
+    std::fs::write(&root, format!("Include \"{}\"\n", included.display()))
+        .expect("write root config");
+    std::fs::write(
+        &included,
+        r#"
+Host quoted-include
+  HostName "quoted-include.example"
+  User "aiops"
+"#,
+    )
+    .expect("write included config");
+
+    let report = ssh_import_report_from_path(&root).expect("ssh import report");
+
+    assert!(report.warnings.is_empty(), "{:?}", report.warnings);
+    assert_eq!(report.proposals.len(), 1);
+    assert_eq!(report.proposals[0].id, "quoted-include");
+    assert_eq!(report.proposals[0].label, "aiops@quoted-include.example");
 }
 
 #[test]

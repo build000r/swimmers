@@ -614,14 +614,14 @@ impl SshImportParser {
             let Some((keyword, arguments)) = split_ssh_config_directive(line) else {
                 continue;
             };
-            let mut parts = arguments.split_whitespace();
+            let parts = ssh_config_arguments(arguments);
             if keyword.eq_ignore_ascii_case("Host") {
                 if self.inside_match_block && is_indented {
                     continue;
                 }
                 self.inside_match_block = false;
                 self.append_current_block();
-                self.current.aliases = parts.map(ToOwned::to_owned).collect();
+                self.current.aliases = parts;
                 self.current.source_label = source_label.to_string();
                 self.current.line_number = line_number;
             } else if keyword.eq_ignore_ascii_case("Match") {
@@ -632,7 +632,11 @@ impl SshImportParser {
             } else if keyword.eq_ignore_ascii_case("Include") {
                 self.append_current_block();
                 if let Some(base_dir) = base_dir {
-                    for include_path in ssh_include_paths(parts, Some(base_dir), warnings) {
+                    for include_path in ssh_include_paths(
+                        parts.iter().map(String::as_str),
+                        Some(base_dir),
+                        warnings,
+                    ) {
                         match std::fs::read_to_string(&include_path) {
                             Ok(contents) => {
                                 self.parse_file_contents(
@@ -650,9 +654,9 @@ impl SshImportParser {
                     }
                 }
             } else if keyword.eq_ignore_ascii_case("HostName") {
-                self.current.host_name = parts.next().map(ToOwned::to_owned);
+                self.current.host_name = parts.first().cloned();
             } else if keyword.eq_ignore_ascii_case("User") {
-                self.current.user = parts.next().map(ToOwned::to_owned);
+                self.current.user = parts.first().cloned();
             }
         }
 
@@ -669,9 +673,34 @@ fn canonical_or_original(path: &Path) -> PathBuf {
 }
 
 fn strip_ssh_config_comment(line: &str) -> &str {
-    line.split_once('#')
-        .map(|(before, _)| before)
-        .unwrap_or(line)
+    let mut quote = None;
+    let mut escaped = false;
+
+    for (index, ch) in line.char_indices() {
+        if escaped {
+            escaped = false;
+            continue;
+        }
+        if ch == '\\' {
+            escaped = true;
+            continue;
+        }
+        if let Some(quote_ch) = quote {
+            if ch == quote_ch {
+                quote = None;
+            }
+            continue;
+        }
+        if matches!(ch, '"' | '\'') {
+            quote = Some(ch);
+            continue;
+        }
+        if ch == '#' {
+            return &line[..index];
+        }
+    }
+
+    line
 }
 
 fn split_ssh_config_directive(line: &str) -> Option<(&str, &str)> {
@@ -702,6 +731,61 @@ fn split_ssh_config_directive(line: &str) -> Option<(&str, &str)> {
     } else {
         Some((keyword, arguments.trim()))
     }
+}
+
+fn ssh_config_arguments(input: &str) -> Vec<String> {
+    let mut args = Vec::new();
+    let mut current = String::new();
+    let mut quote = None;
+    let mut escaped = false;
+    let mut in_token = false;
+
+    for ch in input.chars() {
+        if escaped {
+            current.push(ch);
+            in_token = true;
+            escaped = false;
+            continue;
+        }
+        if ch == '\\' {
+            escaped = true;
+            in_token = true;
+            continue;
+        }
+        if let Some(quote_ch) = quote {
+            if ch == quote_ch {
+                quote = None;
+            } else {
+                current.push(ch);
+            }
+            in_token = true;
+            continue;
+        }
+        if matches!(ch, '"' | '\'') {
+            quote = Some(ch);
+            in_token = true;
+            continue;
+        }
+        if ch.is_ascii_whitespace() {
+            if in_token {
+                args.push(std::mem::take(&mut current));
+                in_token = false;
+            }
+            continue;
+        }
+
+        current.push(ch);
+        in_token = true;
+    }
+
+    if escaped {
+        current.push('\\');
+    }
+    if in_token {
+        args.push(current);
+    }
+
+    args
 }
 
 fn ssh_include_paths<'a>(
