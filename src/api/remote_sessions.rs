@@ -1053,8 +1053,16 @@ async fn list_remote_sessions_for_target(
     Ok(body
         .sessions
         .into_iter()
+        .filter(is_target_local_session)
         .map(|session| namespace_session_summary(&target, session))
         .collect())
+}
+
+fn is_target_local_session(session: &SessionSummary) -> bool {
+    matches!(
+        session.environment.scope,
+        crate::types::SessionEnvironmentScope::Local
+    )
 }
 
 pub async fn create_remote_session(

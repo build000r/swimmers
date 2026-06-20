@@ -1,9 +1,10 @@
 use super::*;
 use crate::types::{
-    CreateSessionsBatchResult, DirEntry, SessionBatchMembership, SessionGroupInputRequest,
-    SessionGroupInputResponse, SessionGroupInputResult, SessionInputRequest, SessionInputResponse,
-    SessionState, SessionTimelinePinned, SessionTimelineResponse, SpawnTool, ThoughtState,
-    TransportHealth, SUMMARY_CAUSE_REMOTE_POLL_DEGRADED,
+    CreateSessionsBatchResult, DirEntry, SessionBatchMembership, SessionEnvironmentSummary,
+    SessionGroupInputRequest, SessionGroupInputResponse, SessionGroupInputResult,
+    SessionInputRequest, SessionInputResponse, SessionState, SessionTimelinePinned,
+    SessionTimelineResponse, SpawnTool, ThoughtState, TransportHealth,
+    SUMMARY_CAUSE_REMOTE_POLL_DEGRADED,
 };
 use axum::http::HeaderMap;
 use axum::routing::{get, post};
@@ -120,6 +121,35 @@ async fn capture_list_sessions() -> AxumJson<SessionListResponse> {
     })
 }
 
+async fn capture_list_sessions_with_remote_aggregate() -> AxumJson<SessionListResponse> {
+    let mut already_remote = summary("alpha::sess_remote");
+    let upstream_target = LaunchTargetSummary {
+        id: "alpha".to_string(),
+        label: "Alpha".to_string(),
+        kind: "swimmers_api".to_string(),
+        base_url: Some("http://127.0.0.1:3211".to_string()),
+        auth_token_env: None,
+        bootstrap_hint: None,
+        path_mappings: Vec::new(),
+    };
+    already_remote.environment = SessionEnvironmentSummary::remote(
+        &upstream_target,
+        "sess_remote",
+        "/remote/alpha/project",
+        None,
+        "remote_swimmers_api",
+    );
+
+    AxumJson(SessionListResponse {
+        sessions: vec![summary("sess_local"), already_remote],
+        version: 0,
+        repo_themes: Default::default(),
+        environments: Vec::new(),
+        fleet_lens: Default::default(),
+        fleet_presets: Vec::new(),
+    })
+}
+
 async fn capture_timeline(
     axum::extract::Path(session_id): axum::extract::Path<String>,
 ) -> AxumJson<SessionTimelineResponse> {
@@ -151,6 +181,21 @@ async fn spawn_create_server() -> (String, tokio::task::JoinHandle<()>, CaptureS
 
 async fn spawn_list_server() -> (String, tokio::task::JoinHandle<()>) {
     let app = Router::new().route("/v1/sessions", get(capture_list_sessions));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind test server");
+    let addr = listener.local_addr().expect("local addr");
+    let handle = tokio::spawn(async move {
+        axum::serve(listener, app).await.expect("serve test api");
+    });
+    (format!("http://{addr}"), handle)
+}
+
+async fn spawn_list_server_with_remote_aggregate() -> (String, tokio::task::JoinHandle<()>) {
+    let app = Router::new().route(
+        "/v1/sessions",
+        get(capture_list_sessions_with_remote_aggregate),
+    );
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
         .expect("bind test server");
@@ -2023,6 +2068,29 @@ async fn list_remote_sessions_for_target_namespaces_returned_sessions() {
         namespace_session_id("jeremy-skillbox", "sess_1")
     );
     assert_eq!(sessions[0].tmux_name, "[Jeremy Skillbox] 7");
+    handle.abort();
+}
+
+#[tokio::test]
+async fn list_remote_sessions_for_target_drops_remote_aggregates() {
+    let (base_url, handle) = spawn_list_server_with_remote_aggregate().await;
+    let mut target = target();
+    target.base_url = Some(base_url);
+    let client = http_client(REMOTE_LIST_TIMEOUT).expect("http client");
+
+    let sessions = list_remote_sessions_for_target(&client, target, None)
+        .await
+        .expect("remote list");
+
+    assert_eq!(sessions.len(), 1);
+    assert_eq!(
+        sessions[0].session_id,
+        namespace_session_id("jeremy-skillbox", "sess_local")
+    );
+    assert_eq!(
+        sessions[0].environment.remote_session_id.as_deref(),
+        Some("sess_local")
+    );
     handle.abort();
 }
 
