@@ -223,14 +223,54 @@ async fn quick_probe_alive(base_url: &str) -> bool {
 
     match client.get(probe_url).send().await {
         Ok(response) => {
-            tracing::debug!(status = %response.status(), "startup probe saw an existing server");
-            true
+            let status = response.status();
+            if !status.is_success() {
+                tracing::debug!(
+                    status = %status,
+                    "startup probe saw a non-swimmers or unauthorized listener"
+                );
+                return false;
+            }
+
+            match response.json::<serde_json::Value>().await {
+                Ok(payload) if swimmers_health_payload(&payload) => {
+                    tracing::debug!(
+                        status = %status,
+                        "startup probe saw an existing swimmers server"
+                    );
+                    true
+                }
+                Ok(_) => {
+                    tracing::debug!(
+                        status = %status,
+                        "startup probe saw a listener with a non-swimmers health payload"
+                    );
+                    false
+                }
+                Err(err) => {
+                    tracing::debug!(
+                        status = %status,
+                        error = %err,
+                        "startup probe could not parse health payload"
+                    );
+                    false
+                }
+            }
         }
         Err(err) => {
             tracing::debug!(error = %err, "startup probe could not reach server");
             false
         }
     }
+}
+
+fn swimmers_health_payload(payload: &serde_json::Value) -> bool {
+    payload
+        .get("thought_bridge")
+        .is_some_and(serde_json::Value::is_object)
+        && payload
+            .get("dependencies")
+            .is_some_and(serde_json::Value::is_object)
 }
 
 fn is_loopback_target(url: &reqwest::Url) -> bool {
@@ -562,26 +602,41 @@ mod tests {
         format!("http://127.0.0.1:{port}")
     }
 
-    #[tokio::test]
-    async fn ensure_server_probe_existing_server_returns_external() {
+    fn swimmers_health_json() -> &'static str {
+        r#"{"status":"healthy","uptime_secs":0,"thought_bridge":{},"thought_persistence":{},"persistence":{},"dependencies":{}}"#
+    }
+
+    async fn probe_fixture(
+        status: &str,
+        body: &'static str,
+    ) -> (String, tokio::task::JoinHandle<()>) {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
             .expect("bind probe fixture");
         let addr = listener.local_addr().expect("fixture addr");
+        let status = status.to_string();
 
         let server_task = tokio::spawn(async move {
             let (mut stream, _) = listener.accept().await.expect("accept probe request");
             let mut req_buf = [0_u8; 1024];
             let _ = stream.read(&mut req_buf).await;
+            let response = format!(
+                "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
             stream
-                .write_all(
-                    b"HTTP/1.1 401 Unauthorized\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
-                )
+                .write_all(response.as_bytes())
                 .await
-                .expect("write 401 response");
+                .expect("write probe response");
         });
 
         let base_url = format!("http://{addr}");
+        (base_url, server_task)
+    }
+
+    #[tokio::test]
+    async fn ensure_server_probe_existing_server_returns_external() {
+        let (base_url, server_task) = probe_fixture("200 OK", swimmers_health_json()).await;
         let result = ensure_server_with_opts(
             &base_url,
             Duration::from_secs(1),
@@ -589,6 +644,24 @@ mod tests {
         )
         .await;
         assert!(matches!(result, Ok(ServerHandle::External)));
+
+        server_task.await.expect("fixture task join");
+    }
+
+    #[tokio::test]
+    async fn quick_probe_rejects_unauthorized_listener() {
+        let (base_url, server_task) = probe_fixture("401 Unauthorized", "").await;
+
+        assert!(!quick_probe_alive(&base_url).await);
+
+        server_task.await.expect("fixture task join");
+    }
+
+    #[tokio::test]
+    async fn quick_probe_rejects_non_swimmers_health_payload() {
+        let (base_url, server_task) = probe_fixture("200 OK", r#"{"ok":true}"#).await;
+
+        assert!(!quick_probe_alive(&base_url).await);
 
         server_task.await.expect("fixture task join");
     }
