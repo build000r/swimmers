@@ -92,6 +92,31 @@ test("selectedSessionConnectionPlan preserves socket reuse and connect decisions
   }), { type: "connect_socket", sessionId: "sess-1" });
 });
 
+test("selectedSessionConnectionPlan keeps remote sessions on snapshot fallback", () => {
+  const remoteSession = {
+    session_id: "skillbox::sess-1",
+    environment: {
+      scope: "remote",
+      target_id: "skillbox",
+      target_kind: "swimmers_api",
+      remote_session_id: "sess-1",
+    },
+  };
+
+  assert.deepEqual(selectedSessionConnectionPlan({
+    session: remoteSession,
+    terminalSurfaceChecked: true,
+    hasTerminal: false,
+    terminalFallbackActive: true,
+    ws: null,
+    openReadyState: 1,
+  }), {
+    type: "remote_snapshot_fallback",
+    sessionId: "skillbox::sess-1",
+    status: "remote session; using snapshot fallback",
+  });
+});
+
 test("sessionSocketAttachPlan preserves framed output and status copy", () => {
   const resumeUrl = new URL("ws://swimmers.test/ws/sessions/sess-1?framed=1&resume_from_seq=42");
   assert.deepEqual(sessionSocketAttachPlan(resumeUrl), {

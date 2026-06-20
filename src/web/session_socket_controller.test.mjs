@@ -120,6 +120,37 @@ test("connectSelectedSession connects a socket for the selected session", async 
   ]);
 });
 
+test("connectSelectedSession keeps remote sessions in snapshot fallback", async () => {
+  const { calls, controller, sockets, state } = runtimeFixture({
+    session: {
+      session_id: "skillbox::sess_b",
+      environment: {
+        scope: "remote",
+        target_id: "skillbox",
+        target_kind: "swimmers_api",
+        remote_session_id: "sess_b",
+      },
+    },
+    runtime: {
+      setupTerminalSurface: async () => {
+        calls.push(["setupTerminalSurface"]);
+        state.terminalFallbackActive = true;
+        state.terminal = null;
+      },
+    },
+  });
+
+  await controller.connectSelectedSession();
+
+  assert.equal(sockets.length, 0);
+  assert.equal(state.ws, null);
+  assert.deepEqual(calls, [
+    ["setupHudSurface"],
+    ["setupTerminalSurface"],
+    ["setConnectionStatus", "remote session; using snapshot fallback", true],
+  ]);
+});
+
 test("connectSelectedSession disconnects stale sockets before async terminal setup", async () => {
   const gate = deferred();
   const oldSocket = {

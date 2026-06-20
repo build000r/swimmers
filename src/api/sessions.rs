@@ -20,7 +20,7 @@ use crate::session::actor::{InputDeliveryResult, SessionCommand};
 #[cfg(test)]
 use crate::types::{
     AdoptSessionRequest, CreateSessionRequest, CreateSessionsBatchRequest, SessionInputRequest,
-    SessionState, TerminalSnapshot,
+    SessionState,
 };
 #[cfg(test)]
 use crate::types::{
@@ -54,9 +54,9 @@ use self::core_routes::{
 };
 #[cfg(test)]
 use self::core_routes::{
-    delete_session_error_response, parse_delete_session_mode, request_terminal_snapshot,
-    session_input_delivery_response, snapshot_error_response, DeleteSessionQuery,
-    SnapshotRequestError,
+    delete_session_error_response, parse_delete_session_mode, remote_snapshot_response,
+    request_terminal_snapshot, session_input_delivery_response, snapshot_error_response,
+    DeleteSessionQuery, SnapshotRequestError,
 };
 use self::group_input::send_group_input;
 pub use self::group_input::send_group_input_service;

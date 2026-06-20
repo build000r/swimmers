@@ -6,6 +6,7 @@ export {
   surfaceActionFocusTerminalExecutionPlan,
   surfaceActionTrogdorReaderExecutionPlan,
 } from "./surface_action_plans.js";
+import { sessionUsesRemoteSnapshotFallback } from "./remote_session.js";
 
 export function eventClientPoint(event) {
   if (Number.isFinite(event?.clientX) && Number.isFinite(event?.clientY)) {
@@ -756,6 +757,9 @@ export function terminalSurfaceSessionPlan(context = {}) {
   const session = context.session || null;
   if (!session) {
     return { type: "teardown_terminal" };
+  }
+  if (sessionUsesRemoteSnapshotFallback(session)) {
+    return { type: "activate_snapshot_fallback", sessionId: session.session_id, clearText: false };
   }
   return { type: "load_renderer", sessionId: session.session_id };
 }

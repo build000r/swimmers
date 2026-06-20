@@ -8,8 +8,8 @@ use crate::thought::protocol::{SyncRequestSequence, ThoughtDeliveryState};
 use crate::thought::runtime_config::ThoughtConfig;
 use crate::types::{
     ErrorResponse, RestState, SessionGroupInputRequest, SessionPaneTailResponse,
-    SessionTranscriptRecord, StateEvidence, ThoughtSource, ThoughtState, TransportHealth,
-    MAX_SESSION_INPUT_BYTES,
+    SessionTranscriptRecord, StateEvidence, TerminalSnapshot, ThoughtSource, ThoughtState,
+    TransportHealth, MAX_SESSION_INPUT_BYTES,
 };
 use axum::body::to_bytes;
 use axum::extract::{Json, Path, Query, State};
@@ -420,6 +420,32 @@ async fn spawn_remote_pane_tail_ok_server() -> (String, tokio::task::JoinHandle<
         axum::serve(listener, app)
             .await
             .expect("serve remote pane-tail api");
+    });
+    (format!("http://{addr}"), handle)
+}
+
+async fn remote_snapshot_ok(Path(session_id): Path<String>) -> Json<TerminalSnapshot> {
+    Json(TerminalSnapshot {
+        session_id,
+        latest_seq: 17,
+        truncated: false,
+        screen_text: "remote screen output".to_string(),
+    })
+}
+
+async fn spawn_remote_snapshot_ok_server() -> (String, tokio::task::JoinHandle<()>) {
+    let app = axum::Router::new().route(
+        "/v1/sessions/{session_id}/snapshot",
+        axum::routing::get(remote_snapshot_ok),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind remote snapshot server");
+    let addr = listener.local_addr().expect("local addr");
+    let handle = tokio::spawn(async move {
+        axum::serve(listener, app)
+            .await
+            .expect("serve remote snapshot api");
     });
     (format!("http://{addr}"), handle)
 }

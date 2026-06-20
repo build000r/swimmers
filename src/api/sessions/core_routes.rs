@@ -18,7 +18,7 @@ use crate::session::actor::{ActorHandle, InputDeliveryResult, SessionCommand};
 use crate::session::supervisor::TmuxAdoptError;
 use crate::types::{
     AdoptSessionRequest, AdoptSessionResponse, CreateSessionRequest, CreateSessionsBatchRequest,
-    CreateSessionsBatchResponse, EnvironmentListResponse, SessionInputRequest,
+    CreateSessionsBatchResponse, EnvironmentListResponse, LaunchTargetSummary, SessionInputRequest,
     SessionInputResponse, SessionListResponse, SessionState, TerminalSnapshot,
     MAX_SESSION_INPUT_BYTES,
 };
@@ -613,6 +613,48 @@ pub(super) async fn get_snapshot(
     if let Err(resp) = auth.require_scope(AuthScope::SessionsRead) {
         return resp;
     }
+
+    match snapshot_route(&session_id) {
+        Ok(SnapshotRoute::Remote {
+            target,
+            remote_session_id,
+        }) => remote_snapshot_response(&target, remote_session_id).await,
+        Ok(SnapshotRoute::Local) => local_snapshot_response(&state, &session_id).await,
+        Err(err) => err.into_response(),
+    }
+}
+
+enum SnapshotRoute<'a> {
+    Remote {
+        target: LaunchTargetSummary,
+        remote_session_id: &'a str,
+    },
+    Local,
+}
+
+fn snapshot_route(
+    session_id: &str,
+) -> Result<SnapshotRoute<'_>, remote_sessions::RemoteSessionError> {
+    Ok(match remote_sessions::denamespace_for_target(session_id)? {
+        Some((target, remote_session_id)) => SnapshotRoute::Remote {
+            target,
+            remote_session_id,
+        },
+        None => SnapshotRoute::Local,
+    })
+}
+
+pub(super) async fn remote_snapshot_response(
+    target: &LaunchTargetSummary,
+    remote_session_id: &str,
+) -> Response {
+    match remote_sessions::fetch_remote_snapshot(target, remote_session_id).await {
+        Ok(response) => (StatusCode::OK, Json(response)).into_response(),
+        Err(err) => err.into_response(),
+    }
+}
+
+async fn local_snapshot_response(state: &Arc<AppState>, session_id: &str) -> Response {
     let handle = match state.supervisor.get_session(&session_id).await {
         Some(h) => h,
         None => {

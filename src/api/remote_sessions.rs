@@ -24,7 +24,7 @@ use crate::types::{
     LaunchReceipt, LaunchTargetSummary, SessionAgentContextResponse, SessionEnvironmentSummary,
     SessionGitDiffResponse, SessionGroupInputRequest, SessionGroupInputResponse,
     SessionInputRequest, SessionInputResponse, SessionListResponse, SessionPaneTailResponse,
-    SessionSummary, SessionTimelineResponse, SessionTranscriptResponse,
+    SessionSummary, SessionTimelineResponse, SessionTranscriptResponse, TerminalSnapshot,
 };
 
 const REMOTE_LIST_TIMEOUT: Duration = Duration::from_millis(900);
@@ -1557,6 +1557,19 @@ pub async fn fetch_remote_pane_tail(
     get_remote_json(target, &format!("/v1/sessions/{session_id}/pane-tail"))
         .await
         .map(|mut response: SessionPaneTailResponse| {
+            response.session_id = namespace_session_id(&target.id, &response.session_id);
+            response
+        })
+}
+
+pub async fn fetch_remote_snapshot(
+    target: &LaunchTargetSummary,
+    remote_session_id: &str,
+) -> Result<TerminalSnapshot, RemoteSessionError> {
+    let session_id = encode_path_segment(remote_session_id);
+    get_remote_json(target, &format!("/v1/sessions/{session_id}/snapshot"))
+        .await
+        .map(|mut response: TerminalSnapshot| {
             response.session_id = namespace_session_id(&target.id, &response.session_id);
             response
         })

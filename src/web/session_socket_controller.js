@@ -45,6 +45,13 @@ export function createSessionSocketController(runtime) {
       ws: state.ws,
       openReadyState: runtime.WebSocketClass.OPEN,
     });
+    if (plan.type === "remote_snapshot_fallback") {
+      if (state.ws) {
+        runtime.disconnectSocket();
+      }
+      runtime.setConnectionStatus(plan.status, true);
+      return;
+    }
     if (plan.type !== "connect_socket") return;
 
     runtime.disconnectSocket();

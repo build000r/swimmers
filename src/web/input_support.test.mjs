@@ -985,6 +985,21 @@ test("terminalSurfaceSessionPlan preserves selected-session setup gates", () => 
     type: "load_renderer",
     sessionId: "agent-1",
   });
+  assert.deepEqual(terminalSurfaceSessionPlan({
+    session: {
+      session_id: "skillbox::agent-1",
+      environment: {
+        scope: "remote",
+        target_id: "skillbox",
+        target_kind: "swimmers_api",
+        remote_session_id: "agent-1",
+      },
+    },
+  }), {
+    type: "activate_snapshot_fallback",
+    sessionId: "skillbox::agent-1",
+    clearText: false,
+  });
 });
 
 test("terminalSurfaceRendererPlan preserves renderer fallback, reuse, and init decisions", () => {

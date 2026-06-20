@@ -53,6 +53,27 @@ async fn get_snapshot_returns_not_found_for_missing_session() {
 }
 
 #[tokio::test]
+async fn get_snapshot_proxies_namespaced_remote_session() {
+    let (base_url, handle) = spawn_remote_snapshot_ok_server().await;
+    let target = remote_agent_context_target(base_url);
+
+    let response = remote_snapshot_response(&target, "sess/remote?x#frag")
+        .await
+        .into_response();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let json = response_json(response).await;
+    assert_eq!(
+        json["session_id"],
+        remote_sessions::namespace_session_id("remote-test", "sess/remote?x#frag")
+    );
+    assert_eq!(json["latest_seq"], 17);
+    assert_eq!(json["truncated"], false);
+    assert_eq!(json["screen_text"], "remote screen output");
+    handle.abort();
+}
+
+#[tokio::test]
 async fn get_snapshot_returns_actor_unavailable_error() {
     let state = test_state();
     let (cmd_tx, cmd_rx) = mpsc::channel(1);

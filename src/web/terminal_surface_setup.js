@@ -114,6 +114,9 @@ export function createTerminalSurfaceRuntimeHelpers(runtime) {
 
     const sessionPlan = terminalSurfaceSessionPlan({ session: runtime.currentSession() });
     if (sessionPlan.type === "teardown_terminal") { runtime.teardownTerminal(); return; }
+    if (sessionPlan.type === "activate_snapshot_fallback") {
+      return activateTerminalSurfaceFallback(sessionPlan, runtime);
+    }
 
     const mod = await runtime.ensureFrankenTerm();
     const rendererPlan = terminalSurfaceRendererPlan({ hasRendererModule: Boolean(mod), hasTerminal: Boolean(state.terminal), terminalSessionId: state.terminalSessionId, sessionId: sessionPlan.sessionId, terminalFallbackActive: state.terminalFallbackActive });

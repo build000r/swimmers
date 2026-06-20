@@ -1,3 +1,5 @@
+import { sessionUsesRemoteSnapshotFallback } from "./remote_session.js";
+
 export const TERMINAL_OUTPUT_OPCODE = 0x11;
 
 export function buildSessionSocketUrl(session, location, resumeFromSeq = "") {
@@ -29,6 +31,13 @@ export function selectedSessionConnectionPlan(context = {}) {
   }
   if (!context.hasTerminal && !context.terminalFallbackActive) {
     return { type: "await_terminal_surface", sessionId };
+  }
+  if (sessionUsesRemoteSnapshotFallback(session)) {
+    return {
+      type: "remote_snapshot_fallback",
+      sessionId,
+      status: "remote session; using snapshot fallback",
+    };
   }
   const ws = context.ws || null;
   if (ws && ws.readyState <= context.openReadyState && ws.sessionId === sessionId) {
