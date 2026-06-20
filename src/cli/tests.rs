@@ -865,7 +865,7 @@ Include {}
 #[test]
 fn ssh_import_ignores_wildcards_negations_and_shell_unsafe_aliases() {
     let config = r#"
-Host * !blocked devbox? unsafe;alias safe.alias user@host:22
+Host * !blocked -option devbox? unsafe;alias safe.alias user@host:22
   HostName example.test
 "#;
 
@@ -874,6 +874,9 @@ Host * !blocked devbox? unsafe;alias safe.alias user@host:22
     assert_eq!(proposals.len(), 2);
     assert_eq!(proposals[0].id, "safe.alias");
     assert_eq!(proposals[1].id, "user@host:22");
+    assert!(proposals
+        .iter()
+        .all(|proposal| !proposal.id.starts_with('-')));
     assert!(proposals
         .iter()
         .all(|proposal| proposal.trust == "untrusted"));

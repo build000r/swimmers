@@ -306,6 +306,7 @@ fn safe_ssh_alias_for_target(target: &LaunchTargetSummary) -> Option<String> {
     }
     let alias = target.id.trim();
     let safe = !alias.is_empty()
+        && !alias.starts_with('-')
         && alias.bytes().all(|byte| {
             matches!(
                 byte,

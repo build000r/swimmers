@@ -935,6 +935,7 @@ struct SshImportOverlayTarget<'a> {
 fn is_importable_ssh_alias(alias: &str) -> bool {
     !alias.is_empty()
         && !alias.starts_with('!')
+        && !alias.starts_with('-')
         && !alias.contains('*')
         && !alias.contains('?')
         && alias.bytes().all(|byte| {

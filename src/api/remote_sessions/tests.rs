@@ -1275,6 +1275,23 @@ fn environment_summary_refuses_command_hints_for_unsafe_ssh_alias() {
 }
 
 #[test]
+fn environment_summary_refuses_command_hints_for_leading_dash_ssh_alias() {
+    let mut target = target();
+    target.id = "-oProxyCommand=bad".to_string();
+    target.label = "Leading dash SSH alias".to_string();
+    target.kind = "ssh_only".to_string();
+
+    let environment = environment_summary_for_target(&target);
+
+    assert_eq!(environment.kind, "ssh_only");
+    assert_eq!(environment.ssh_alias, None);
+    assert_eq!(environment.attach_hint, None);
+    assert_eq!(environment.bootstrap_hint, None);
+    assert!(!environment.capabilities.ssh_attach_hint);
+    assert!(!environment.capabilities.bootstrap_hint);
+}
+
+#[test]
 fn ssh_only_uses_configured_bootstrap_hint_for_environment_and_receipt() {
     let mut target = target();
     target.id = "skillbox-devbox".to_string();
