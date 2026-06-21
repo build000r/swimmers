@@ -287,7 +287,14 @@ export function mergeWorkbenchTranscriptPage({
       }
     }
     transcript.records = Array.from(byId.values())
-      .sort((left, right) => Number(left?.byte_start || 0) - Number(right?.byte_start || 0))
+      // Total, deterministic order so records sharing a byte_start (or a missing
+      // byte_start defaulted to 0) do not reorder between delta and full fetches.
+      .sort(
+        (left, right) =>
+          Number(left?.byte_start || 0) - Number(right?.byte_start || 0) ||
+          Number(left?.byte_end || 0) - Number(right?.byte_end || 0) ||
+          String(left?.id || "").localeCompare(String(right?.id || "")),
+      )
       .slice(-240);
   }
 

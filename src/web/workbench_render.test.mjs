@@ -7,6 +7,7 @@ import {
   buildWorkbenchWidgetRequestPlan,
   buildWorkbenchWidgetsHtml,
   emptyWorkbenchWidgets,
+  mergeWorkbenchTranscriptPage,
   resetWorkbenchWidgetsState,
   operatorPressureSummary,
   renderTerminalWorkbenchActions,
@@ -268,6 +269,27 @@ test("workbench refresh helpers plan delta fetches and merge transcript pages", 
   assert.equal(widgets.transcriptNextCursor, 64);
   assert.match(widgets.error, /skills: skills unavailable/);
   assert.match(widgets.error, /diffs: diff unavailable/);
+});
+
+test("mergeWorkbenchTranscriptPage orders equal-byte_start records deterministically", () => {
+  const result = mergeWorkbenchTranscriptPage({
+    previous: { selected_turn_id: "t", records: [{ id: "b", byte_start: 5 }] },
+    nextTranscript: {
+      selected_turn_id: "t",
+      records: [
+        { id: "c", byte_start: 5 },
+        { id: "a", byte_start: 5 },
+      ],
+    },
+    canDeltaTranscript: true,
+    selectedTurnId: "t",
+  });
+  // All records share byte_start 5, so the id tie-break gives a stable a,b,c
+  // order regardless of merge insertion order.
+  assert.deepEqual(
+    result.transcript.records.map((record) => record.id),
+    ["a", "b", "c"],
+  );
 });
 
 test("workbench widget reset preserves request sequence and clears payload", () => {
