@@ -351,6 +351,17 @@ pub fn resolve_target_path_with_group_roots(
         ));
     }
 
+    // A regular file under the base passes the canonicalize + base checks but is
+    // not listable; report it as a client-side not-a-directory error instead of
+    // letting read_dir fail later as a 500.
+    if !canonical.is_dir() {
+        return Err(ApiServiceError::new(
+            StatusCode::NOT_FOUND,
+            "DIR_NOT_FOUND",
+            format!("not a directory: {}", canonical.display()),
+        ));
+    }
+
     Ok((canonical_base, canonical))
 }
 
@@ -1179,6 +1190,22 @@ mod tests {
                 .expect("group source descendant path should be browsable");
 
         assert_eq!(resolved, child.canonicalize().expect("canonical child"));
+    }
+
+    #[test]
+    fn resolve_target_path_with_group_roots_rejects_a_regular_file() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let base = dir.path().join("repos");
+        std::fs::create_dir_all(&base).expect("base");
+        let file = base.join("README.md");
+        std::fs::write(&file, "x").expect("file");
+
+        // A regular file under the base passes canonicalize + base checks but is
+        // not listable; it must be a 404, not a 500 from a later read_dir.
+        let err = resolve_target_path_with_group_roots(base, file, None)
+            .expect_err("a regular file is not a directory");
+        assert_eq!(err.status, StatusCode::NOT_FOUND);
+        assert_eq!(err.code, "DIR_NOT_FOUND");
     }
 
     #[test]
