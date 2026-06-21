@@ -725,7 +725,10 @@ export function renderDirEntries(
   renderLaunchTargetOptions(response, { el, dirBrowser, preferredLaunchTarget });
 
   const entries = visibleDirEntries(rawEntries, path, normalizedDirSearch(dirBrowser));
-  const selectablePaths = dirBrowserSelectablePathSet(entries, path);
+  // Prune selections only against the full directory listing, not the
+  // search-filtered `entries` — otherwise typing a search term silently and
+  // permanently drops batch selections that the filter merely hid.
+  const listingPaths = dirBrowserSelectablePathSet(rawEntries, path);
   const managed = Boolean(el.dirsManagedOnly.checked);
   const view = {
     groups,
@@ -747,7 +750,7 @@ export function renderDirEntries(
   }
 
   for (const selectedPath of Array.from(selected)) {
-    if (!selectablePaths.has(selectedPath)) {
+    if (!listingPaths.has(selectedPath)) {
       selected.delete(selectedPath);
     }
   }

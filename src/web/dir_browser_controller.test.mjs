@@ -187,6 +187,33 @@ test("directory browser controller delegates dynamic view rendering while preser
   assert.equal(syncCount(), 1);
 });
 
+test("directory browser controller keeps batch selections that the search filter merely hides", () => {
+  const { runtime, state } = createRuntime({
+    renderDirBrowserView() {
+      return true;
+    },
+  });
+  state.dirBrowser.search = "swim";
+  state.dirBrowser.batchSelected = new Set(["/srv/repos/swimmers", "/srv/repos/clean"]);
+
+  const controller = createDirBrowserController(runtime);
+  controller.renderDirEntries({
+    path: "/srv/repos",
+    groups: [],
+    entries: [
+      { name: "swimmers", full_path: "/srv/repos/swimmers" },
+      { name: "clean", full_path: "/srv/repos/clean" },
+    ],
+  });
+
+  // "clean" is hidden by the "swim" search but is still in the listing, so its
+  // selection must survive — pruning is against the full listing, not the view.
+  assert.deepEqual(
+    Array.from(state.dirBrowser.batchSelected).sort(),
+    ["/srv/repos/clean", "/srv/repos/swimmers"],
+  );
+});
+
 test("directory browser controller scopes listings to the selected remote target", async () => {
   const calls = [];
   const { runtime, state } = createRuntime({
