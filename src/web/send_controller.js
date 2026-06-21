@@ -232,6 +232,11 @@ export function createSendController(runtime = {}) {
 
   async function handleSendFormSubmit(event) {
     event.preventDefault();
+    // Re-entrancy guard: the input is only cleared on success, so a second
+    // submit while the send is in flight would resend the same line.
+    if (state.sending) {
+      return false;
+    }
     const plan = sendSheetSubmitPlan({
       readOnly: state.readOnly,
       text: el.sendInput.value,
@@ -242,6 +247,7 @@ export function createSendController(runtime = {}) {
     if (plan.type === "ignore") {
       return false;
     }
+    state.sending = true;
     try {
       rememberSendHistory(plan.text);
       const result = plan.type === "group"
@@ -259,6 +265,8 @@ export function createSendController(runtime = {}) {
       setUtilityStatus(status.label, status.muted, status.ttlMs);
       syncSheetActionAvailability();
       return false;
+    } finally {
+      state.sending = false;
     }
   }
 

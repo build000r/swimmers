@@ -212,6 +212,35 @@ test("form submit preserves history, statuses, close, refresh, and failure avail
   ]);
 });
 
+test("form submit ignores a re-entrant submit while a send is in flight", async () => {
+  let inputPosts = 0;
+  let release;
+  const pending = new Promise((resolve) => {
+    release = resolve;
+  });
+  const f = fixture({
+    runtime: {
+      apiFetch: async (path) => {
+        if (String(path).includes("/input")) {
+          inputPosts += 1;
+          await pending;
+        }
+        return jsonResponse({ delivered: true });
+      },
+    },
+  });
+  f.state.selectedSessionId = "sess_0";
+  f.el.sendInput.value = "continue\n";
+
+  const first = f.controller.handleSendFormSubmit({ preventDefault() {} });
+  // The first send is hung in flight; a second submit must not resend the line.
+  await f.controller.handleSendFormSubmit({ preventDefault() {} });
+  assert.equal(inputPosts, 1);
+
+  release();
+  await first;
+});
+
 test("open send sheet resets line mode, renders history, updates hints, and opens sheet", () => {
   const { calls, controller, el, state } = fixture();
   state.sendHistory = ["previous"];
