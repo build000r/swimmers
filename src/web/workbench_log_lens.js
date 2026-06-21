@@ -134,20 +134,27 @@ function renderHighlightedLogLine(line, query) {
     return escapeHtml(text || " ");
   }
 
-  const lower = text.toLowerCase();
+  // Match against the ORIGINAL text by lowercasing each candidate window, not by
+  // pre-lowercasing the whole line: toLowerCase() is not UTF-16-length-preserving
+  // for some code points (e.g. U+0130 'İ' -> 'i̇'), so slicing the original text
+  // with offsets from a pre-lowercased copy drifts the highlight onto the wrong
+  // characters.
   const lowerNeedle = needle.toLowerCase();
+  const span = needle.length;
   let cursor = 0;
+  let i = 0;
   let html = "";
-  while (cursor < text.length) {
-    const index = lower.indexOf(lowerNeedle, cursor);
-    if (index < 0) {
-      html += escapeHtml(text.slice(cursor));
-      break;
+  while (i + span <= text.length) {
+    if (text.slice(i, i + span).toLowerCase() === lowerNeedle) {
+      html += escapeHtml(text.slice(cursor, i));
+      html += `<mark class="workbench-log-mark">${escapeHtml(text.slice(i, i + span))}</mark>`;
+      i += span;
+      cursor = i;
+    } else {
+      i += 1;
     }
-    html += escapeHtml(text.slice(cursor, index));
-    html += `<mark class="workbench-log-mark">${escapeHtml(text.slice(index, index + needle.length))}</mark>`;
-    cursor = index + needle.length;
   }
+  html += escapeHtml(text.slice(cursor));
   return html || escapeHtml(text || " ");
 }
 

@@ -72,6 +72,25 @@ test("workbench log lens preserves lens controls, filters, data attrs, highlight
   assert.equal(html.includes("& check"), false);
 });
 
+test("workbench log lens highlights match correctly across a Unicode case-fold length change", () => {
+  // 'İ' (U+0130) lowercases to two UTF-16 units, so computing match offsets on a
+  // pre-lowercased copy and slicing the original would drift the <mark> onto the
+  // wrong characters. The highlight must wrap the literal 'stan', not 'tanb'.
+  const html = renderWorkbenchLogLens("İstanbul build", {
+    logState: { mode: "lens", filter: "all", query: "stan" },
+  });
+  assert.equal(
+    html.includes('<mark class="workbench-log-mark">stan</mark>'),
+    true,
+    "highlight must wrap the literal match 'stan'"
+  );
+  assert.equal(
+    html.includes('<mark class="workbench-log-mark">tanb</mark>'),
+    false,
+    "highlight must not drift past the case-fold length change"
+  );
+});
+
 test("workbench log lens preserves raw and empty output states", () => {
   const rawHtml = renderWorkbenchLogLens("cargo test <unit>", {
     emptyText: "No <output>.",
