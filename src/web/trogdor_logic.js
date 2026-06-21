@@ -78,6 +78,12 @@ export function trogdorClawgKey(session) {
   return `${sessionId}:${updated}:${stableTextHash(text)}`;
 }
 
+// Each thought update mints a fresh read-progress key (sessionId:updated:hash),
+// so without a bound the persisted map grows forever until the localStorage
+// quota throws and progress silently stops saving. Cap to the most recently
+// written entries (object key order is insertion order, oldest first).
+export const MAX_TROGDOR_READ_PROGRESS_ENTRIES = 500;
+
 export function parseTrogdorReadProgress(raw) {
   try {
     const parsed = typeof raw === "string" ? JSON.parse(raw || "{}") : raw;
@@ -91,7 +97,15 @@ export function parseTrogdorReadProgress(raw) {
         progress[key] = Math.floor(index);
       }
     }
-    return progress;
+    const keys = Object.keys(progress);
+    if (keys.length <= MAX_TROGDOR_READ_PROGRESS_ENTRIES) {
+      return progress;
+    }
+    const bounded = {};
+    for (const key of keys.slice(keys.length - MAX_TROGDOR_READ_PROGRESS_ENTRIES)) {
+      bounded[key] = progress[key];
+    }
+    return bounded;
   } catch (_error) {
     return {};
   }

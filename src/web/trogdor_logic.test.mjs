@@ -9,6 +9,7 @@ import {
   loadTrogdorReadProgress,
   markTrogdorBurntSessionsInMap,
   markTrogdorSessionsRespondedState,
+  MAX_TROGDOR_READ_PROGRESS_ENTRIES,
   normalizeTrogdorSessionIds,
   parseTrogdorReadProgress,
   pruneTrogdorBurntSessionMap,
@@ -120,6 +121,20 @@ test("Trogdor action cues, clawg keys, and raw rest detection are stable", () =>
   assert.equal(trogdorPrimaryActionCue(item), "awaiting_user");
   assert.equal(trogdorSessionAwaitingUser(item), true);
   assert.equal(trogdorSessionHasReadyClawg(item), true);
+});
+
+test("Trogdor read progress is bounded to the most recent entries", () => {
+  const total = MAX_TROGDOR_READ_PROGRESS_ENTRIES + 25;
+  const raw = {};
+  for (let i = 0; i < total; i += 1) {
+    raw[`key-${String(i).padStart(5, "0")}`] = i;
+  }
+  const parsed = parseTrogdorReadProgress(JSON.stringify(raw));
+  const keys = Object.keys(parsed);
+  assert.equal(keys.length, MAX_TROGDOR_READ_PROGRESS_ENTRIES);
+  // Oldest entries are dropped; the newest are retained.
+  assert.equal(keys.includes("key-00000"), false);
+  assert.equal(keys.at(-1), `key-${String(total - 1).padStart(5, "0")}`);
 });
 
 test("Trogdor read progress helpers sanitize, clamp, complete, and serialize", () => {
