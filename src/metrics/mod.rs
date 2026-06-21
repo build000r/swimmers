@@ -86,7 +86,10 @@ pub fn init_metrics() -> PrometheusHandle {
     // are never pruned.
     let handle = PrometheusBuilder::new()
         .idle_timeout(
-            MetricKindMask::GAUGE | MetricKindMask::COUNTER,
+            // HISTOGRAM too: swimmers_thought_generation_seconds is labeled with
+            // session_id and emitted per-session, so without it that series would
+            // leak unbounded across session churn — the very leak this bounds.
+            MetricKindMask::GAUGE | MetricKindMask::COUNTER | MetricKindMask::HISTOGRAM,
             Some(Duration::from_secs(600)),
         )
         .install_recorder()
