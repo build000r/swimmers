@@ -32,6 +32,60 @@ export function restoreWorkbenchWidgetOpenState(container, openByTitle) {
   }
 }
 
+function workbenchActiveFieldSelector(element) {
+  if (!element || typeof element.getAttributeNames !== "function") {
+    return "";
+  }
+  const tag = String(element.tagName || "").toUpperCase();
+  if (tag !== "INPUT" && tag !== "TEXTAREA") {
+    return "";
+  }
+  for (const name of element.getAttributeNames()) {
+    if (typeof name === "string" && name.startsWith("data-workbench")) {
+      return `[${name}]`;
+    }
+  }
+  return "";
+}
+
+// Capture the focused workbench text field (and its caret) before the widget
+// subtree is rewritten, so it can be restored afterward. Without this, every
+// keystroke in the log-search input destroyed and recreated the input, losing
+// focus and caret — making multi-character search effectively impossible.
+function captureWorkbenchActiveField(container) {
+  const doc = container && typeof container === "object" ? container.ownerDocument : null;
+  const active = doc && typeof doc === "object" ? doc.activeElement : null;
+  if (!active || typeof container.contains !== "function" || !container.contains(active)) {
+    return null;
+  }
+  const selector = workbenchActiveFieldSelector(active);
+  if (!selector) {
+    return null;
+  }
+  const start = typeof active.selectionStart === "number" ? active.selectionStart : null;
+  const end = typeof active.selectionEnd === "number" ? active.selectionEnd : null;
+  return { selector, start, end };
+}
+
+function restoreWorkbenchActiveField(container, captured) {
+  if (!captured || typeof container?.querySelector !== "function") {
+    return;
+  }
+  const field = container.querySelector(captured.selector);
+  if (!field || typeof field.focus !== "function") {
+    return;
+  }
+  field.focus();
+  if (captured.start !== null && typeof field.setSelectionRange === "function") {
+    const end = captured.end !== null ? captured.end : captured.start;
+    try {
+      field.setSelectionRange(captured.start, end);
+    } catch (_error) {
+      // Some input types reject setSelectionRange; focus alone is enough.
+    }
+  }
+}
+
 export function writeWorkbenchWidgetsHtmlToDom(nextHtml, runtime = {}) {
   return writeWorkbenchWidgetsViewToDom({
     html: String(nextHtml || ""),
@@ -52,6 +106,7 @@ export function writeWorkbenchWidgetsViewToDom(view, runtime = {}) {
   const prevScrollTop =
     scroller && typeof scroller.scrollTop === "number" ? scroller.scrollTop : 0;
   const openByTitle = workbenchWidgetOpenStateByTitle(container);
+  const activeField = captureWorkbenchActiveField(container);
 
   const renderedByIsland = typeof runtime.renderWorkbenchWidgetsView === "function" &&
     runtime.renderWorkbenchWidgetsView(view) === true;
@@ -60,6 +115,7 @@ export function writeWorkbenchWidgetsViewToDom(view, runtime = {}) {
   }
   runtime.widgets.lastHtml = nextHtml;
   restoreWorkbenchWidgetOpenState(container, openByTitle);
+  restoreWorkbenchActiveField(container, activeField);
 
   if (scroller && typeof runtime.requestAnimationFrame === "function") {
     runtime.requestAnimationFrame(() => {

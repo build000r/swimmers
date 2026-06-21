@@ -220,3 +220,46 @@ test("writeWorkbenchWidgetsViewToDom falls back to legacy HTML when React view d
   assert.equal(widgets.lastHtml, "<details class=\"workbench-widget\">fallback</details>");
   assert.equal(scroller.scrollTop, 12);
 });
+
+test("writeWorkbenchWidgetsViewToDom restores focus and caret to the active workbench field", () => {
+  const newInput = {
+    tagName: "INPUT",
+    focused: false,
+    selectionRange: null,
+    focus() {
+      this.focused = true;
+    },
+    setSelectionRange(start, end) {
+      this.selectionRange = [start, end];
+    },
+  };
+  const activeInput = {
+    tagName: "INPUT",
+    getAttributeNames() {
+      return ["class", "data-workbench-log-search"];
+    },
+    selectionStart: 3,
+    selectionEnd: 3,
+  };
+  const container = {
+    innerHTML: "old",
+    ownerDocument: { activeElement: activeInput },
+    contains(element) {
+      return element === activeInput;
+    },
+    querySelectorAll() {
+      return [];
+    },
+    querySelector(selector) {
+      return selector === "[data-workbench-log-search]" ? newInput : null;
+    },
+  };
+
+  writeWorkbenchWidgetsViewToDom(
+    { html: "<input data-workbench-log-search />" },
+    { container, widgets: { lastHtml: "old" } },
+  );
+
+  assert.equal(newInput.focused, true);
+  assert.deepEqual(newInput.selectionRange, [3, 3]);
+});
