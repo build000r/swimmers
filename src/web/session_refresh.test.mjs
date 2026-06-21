@@ -332,6 +332,38 @@ test("runSessionRefresh keeps sessions when optional telemetry endpoints fail", 
   ]);
 });
 
+test("runSessionRefresh bails when a newer refresh supersedes it (no stale resurrection)", async () => {
+  const runtime = {
+    state: {
+      followPublishedSelection: false,
+      sessions: [{ session_id: "current" }],
+      environments: [],
+      selectedSessionId: null,
+      trogdorAtlasOpen: false,
+      readOnly: true,
+      token: "",
+      sessionRefreshSeq: 0,
+    },
+    apiFetch: async (path) => {
+      // A newer refresh starts while this one's fetch is in flight.
+      runtime.state.sessionRefreshSeq += 1;
+      return { path, json: async () => ({ sessions: [{ session_id: "stale" }], environments: [] }) };
+    },
+    apiMaybeFetch: async () => null,
+    responseJson: async (response, normalizer) => normalizer(await response.json()),
+    responseJsonOrNull: async (response, normalizer = (value) => value) =>
+      response ? normalizer(await response.json()) : null,
+    applyOperatorPressure: () => {},
+    applyBackendHealth: () => {},
+    syncTrogdorCueTransitions: () => {},
+    normalizeSessionId: (sessionId) => sessionId || null,
+  };
+
+  await runSessionRefresh(runtime);
+
+  assert.deepEqual(runtime.state.sessions, [{ session_id: "current" }]);
+});
+
 test("runSessionRefresh preserves refresh error reset behavior", async () => {
   const calls = [];
   const runtime = {

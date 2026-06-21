@@ -193,6 +193,9 @@ export function createTerminalSurfaceController(runtime) {
       state.ws.close();
       state.ws = null;
     }
+    // Input-ack waiters can never be resolved once the socket is gone; clear them
+    // so the map can't grow unbounded across flaky reconnects / dropped acks.
+    state.pendingInputMessages?.clear?.();
   }
 
   function surfaceBusy() {

@@ -1592,6 +1592,11 @@ async function handleAuthTokenButtonAction(action) {
     state.readOnly = false;
     syncWriteAccess();
   }
+  // The terminal socket only sends the auth token in its open handshake, so a
+  // token change must drop the live socket; the subsequent refresh reconnects it
+  // and re-authenticates, otherwise the new operator/observer privilege never
+  // takes effect on the already-open stream.
+  disconnectSocket();
   closeSheets();
   return refreshSessions().then(() => true);
 }

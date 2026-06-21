@@ -128,6 +128,12 @@ export function backendHealthWarningText(health) {
 }
 
 export async function runSessionRefresh(runtime) {
+  // Monotonic guard (mirrors agent-context/workbench refresh): concurrent
+  // /v1/sessions fetches resolve last-writer-wins, so a slow pre-delete response
+  // landing after a newer one would resurrect a just-deleted session. Only the
+  // latest-started refresh may commit.
+  const seq = (runtime.state.sessionRefreshSeq || 0) + 1;
+  runtime.state.sessionRefreshSeq = seq;
   try {
     const requestPlan = sessionRefreshRequestPlan(runtime.state.followPublishedSelection);
     const publishedRequest = requestPlan.selectionPath
@@ -145,6 +151,9 @@ export async function runSessionRefresh(runtime) {
       normalizeOperatorPressureResponse,
     );
     const healthPayload = await runtime.responseJsonOrNull(healthResponse);
+    if (runtime.state.sessionRefreshSeq !== seq) {
+      return;
+    }
     runtime.state.sessions = Array.isArray(payload.sessions) ? payload.sessions : [];
     runtime.state.environments = Array.isArray(payload.environments) ? payload.environments : [];
     runtime.state.fleetLens = payload.fleet_lens || null;
@@ -155,7 +164,10 @@ export async function runSessionRefresh(runtime) {
     await applySessionRefreshSelection(publishedResponse, runtime);
     await runSessionRefreshSuccessSideEffects(runtime);
   } catch (error) {
-    applySessionRefreshError(error, runtime);
+    // A superseded refresh must not clear the newer one's sessions on error.
+    if (runtime.state.sessionRefreshSeq === seq) {
+      applySessionRefreshError(error, runtime);
+    }
   }
 }
 
