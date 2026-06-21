@@ -372,20 +372,35 @@ fn remote_attach_hint(
     ssh_attach_hint_for_alias(safe_ssh_alias)
 }
 
+/// Upper bound on a configured remote attach template, rejected up front rather
+/// than failing opaquely on the post-substitution osascript argument cap.
+const MAX_REMOTE_ATTACH_TEMPLATE_LEN: usize = 512;
+
 fn safe_remote_attach_command_template(target: &LaunchTargetSummary) -> Option<&str> {
     let template = target.remote_attach_command_template.as_deref()?.trim();
+    if template.is_empty() || template.len() > MAX_REMOTE_ATTACH_TEMPLATE_LEN {
+        return None;
+    }
     if !template.contains("{tmux_target}") {
         return None;
     }
-    let safe = !template.is_empty()
-        && !template.starts_with('-')
-        && template.chars().all(|ch| {
-            ch.is_ascii_alphanumeric()
-                || matches!(
-                    ch,
-                    '_' | '-' | '.' | '/' | ':' | ' ' | '\'' | '=' | '@' | '{' | '}'
-                )
-        });
+    // Defense in depth: only accept the documented `ssh ... tmux attach` shape.
+    // The character allowlist below already blocks separator-based injection,
+    // but on its own it would still accept a metacharacter-free template that is
+    // itself an arbitrary command (e.g. `/tmp/x.sh {tmux_target}`) typed into the
+    // operator's local shell. Requiring the template to launch ssh and run a
+    // tmux attach keeps a poisoned overlay from smuggling an unrelated command.
+    let launches_ssh = template.starts_with("exec ssh ") || template.starts_with("ssh ");
+    if !launches_ssh || !template.contains("tmux attach") {
+        return None;
+    }
+    let safe = template.chars().all(|ch| {
+        ch.is_ascii_alphanumeric()
+            || matches!(
+                ch,
+                '_' | '-' | '.' | '/' | ':' | ' ' | '\'' | '=' | '@' | '{' | '}'
+            )
+    });
     safe.then_some(template)
 }
 

