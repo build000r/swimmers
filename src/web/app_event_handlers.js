@@ -187,6 +187,19 @@ export function createAppEventHandlers(runtime = {}) {
     if ((event.ctrlKey || event.metaKey) && !event.altKey && event.code === "KeyK") {
       event.preventDefault();
       openCommandPalette();
+      return;
+    }
+    // The terminal stage, fallback, and mobile keyboard proxy each dispatch the
+    // full shortcut table via their own keydown listeners. Handle document-level
+    // focus (e.g. a fresh load before any session is selected) here so the rest
+    // of the table is not dead, without double-dispatching when one of those
+    // surfaces is focused.
+    const target = event.target;
+    const dispatchedBySurface =
+      typeof target?.closest === "function" &&
+      target.closest("#terminal-stage, #terminal-fallback, #mobile-kb-proxy");
+    if (!dispatchedBySurface) {
+      handleGlobalShortcut(event);
     }
   }
 
@@ -357,6 +370,7 @@ export function createAppEventHandlers(runtime = {}) {
   return {
     bindEvents,
     handleCommandPaletteEvent,
+    handleDocumentCommandPaletteShortcut,
     handleGlobalShortcut,
     handleMobileKeyboardProxyInput,
     handleMobileKeyboardProxyKeydown,

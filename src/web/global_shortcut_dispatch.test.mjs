@@ -79,3 +79,10 @@ test("runGlobalShortcutAction dispatches escape and ctrl-shift side effects", ()
     ["refreshSessions"],
   ]);
 });
+
+test("runGlobalShortcutAction toggles the trogdor atlas and syncs the reader", () => {
+  const { calls, runtime } = buildRuntime({ state: { trogdorAtlasOpen: false } });
+  runGlobalShortcutAction({ type: "toggle_trogdor_atlas" }, runtime);
+  assert.equal(runtime.state.trogdorAtlasOpen, true);
+  assert.deepEqual(calls, [["renderHudSurface"], ["syncTrogdorReaderTimer"]]);
+});

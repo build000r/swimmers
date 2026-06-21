@@ -151,6 +151,9 @@ test("globalShortcutPlan preserves ctrl-shift commands and gated handled no-ops"
   assert.deepEqual(globalShortcutPlan({ ctrlKey: true, shiftKey: true, code: "KeyM" }), {
     type: "open_mermaid",
   });
+  assert.deepEqual(globalShortcutPlan({ ctrlKey: true, shiftKey: true, code: "KeyG" }), {
+    type: "toggle_trogdor_atlas",
+  });
   assert.deepEqual(globalShortcutPlan({ ctrlKey: true, shiftKey: true, code: "KeyP" }), {
     type: "toggle_follow",
   });

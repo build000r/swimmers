@@ -22,6 +22,16 @@ export function runGlobalShortcutAction(plan, runtime) {
       // reader's interval so it does not keep rendering a hidden surface.
       runtime.syncTrogdorReaderTimer();
       break;
+    case "toggle_trogdor_atlas":
+      // Mirrors toggleTrogdorAtlasSurfaceAction: open when closed, close (and
+      // reset hover/reader state) when open, then sync the reader interval.
+      Object.assign(
+        runtime.state,
+        runtime.trogdorAtlasTransitionState("toggle", runtime.state.trogdorAtlasOpen),
+      );
+      runtime.renderHudSurface();
+      runtime.syncTrogdorReaderTimer();
+      break;
     case "exit_select_mode":
       runtime.setSelectMode(false);
       break;

@@ -123,6 +123,8 @@ export function globalShortcutPlan(event, context = {}) {
       return context.hoveredLinkUrl ? { type: "copy_hovered_link" } : { type: "handled" };
     case "KeyR":
       return { type: "refresh_sessions" };
+    case "KeyG":
+      return { type: "toggle_trogdor_atlas" };
     default:
       return { type: "unhandled" };
   }

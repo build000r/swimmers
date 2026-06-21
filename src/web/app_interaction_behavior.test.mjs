@@ -610,6 +610,43 @@ test("global shortcut handler preserves side effects and handled no-ops", () => 
   assert.equal(web.handleGlobalShortcut({ ctrlKey: true, shiftKey: true, code: "KeyZ" }), false);
 });
 
+test("document command-palette shortcut delegates the table only when focus is off-surface", () => {
+  resetWebState();
+  web.state.activeSheet = null;
+
+  // Off-surface focus (target not inside a dispatching surface): the full table
+  // is delegated, so Ctrl+Shift+A opens the auth sheet.
+  web.handleDocumentCommandPaletteShortcut({
+    ctrlKey: true,
+    shiftKey: true,
+    code: "KeyA",
+    target: { closest: () => null },
+    preventDefault() {},
+  });
+  assert.equal(web.state.activeSheet, "auth");
+
+  // On-surface focus (target inside a dispatching surface): that surface's own
+  // listener already handled it, so the document handler must not double-fire.
+  web.state.activeSheet = null;
+  web.handleDocumentCommandPaletteShortcut({
+    ctrlKey: true,
+    shiftKey: true,
+    code: "KeyA",
+    target: { closest: () => ({}) },
+    preventDefault() {},
+  });
+  assert.equal(web.state.activeSheet, null);
+
+  // Ctrl+K opens the palette regardless of the focus target.
+  web.handleDocumentCommandPaletteShortcut({
+    ctrlKey: true,
+    code: "KeyK",
+    target: { closest: () => ({}) },
+    preventDefault() {},
+  });
+  assert.equal(web.state.activeSheet, "palette");
+});
+
 test("mobile keyboard key handler preserves shortcut precedence, close, and forwarding", () => {
   resetWebState();
   web.state.selectedSessionId = "sess_0";

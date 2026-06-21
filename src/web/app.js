@@ -1951,6 +1951,7 @@ const {
 const {
   bindEvents,
   handleCommandPaletteEvent,
+  handleDocumentCommandPaletteShortcut,
   handleGlobalShortcut,
   handleMobileKeyboardProxyInput,
   handleMobileKeyboardProxyKeydown,
@@ -2304,6 +2305,7 @@ export const __swimmersWebTest = {
   handleTerminalFallbackKeyEvent,
   handleTerminalFallbackPasteEvent,
   handleGlobalShortcut,
+  handleDocumentCommandPaletteShortcut,
   handleMobileKeyboardProxyKeydown,
   handleMobileKeyboardProxyInput,
   sendTerminalControlKey,
