@@ -180,7 +180,10 @@ export function createSessionSocketController(runtime) {
     }
     const frame = decodeTerminalOutputFrame(bytes);
     if (!frame) {
-      return bytes;
+      // Framed mode but the bytes did not decode (too short / wrong opcode):
+      // drop them instead of feeding the raw opcode+seq header as terminal
+      // output. feedTerminalBytes treats a non-Uint8Array as a no-op.
+      return null;
     }
     if (ws.sessionId) {
       state.lastTerminalSeqBySession.set(ws.sessionId, frame.seq);

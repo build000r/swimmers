@@ -103,6 +103,30 @@ function runtimeFixture(overrides = {}) {
   };
 }
 
+test("terminalPayloadFromSocketBytes drops undecodable framed bytes and unwraps valid frames", () => {
+  const { controller, state } = runtimeFixture();
+  const framedWs = { sessionId: "sess_b", framedOutput: true };
+
+  // Too short to be a valid 0x11 output frame: dropped, not fed as raw bytes.
+  assert.equal(
+    controller.terminalPayloadFromSocketBytes(new Uint8Array([0x11, 0, 0]), framedWs),
+    null,
+  );
+
+  // A valid frame (opcode 0x11 + 8-byte big-endian seq + payload) is unwrapped
+  // and records the high-water seq.
+  const valid = new Uint8Array([0x11, 0, 0, 0, 0, 0, 0, 0, 5, 0xab, 0xcd]);
+  assert.deepEqual(
+    controller.terminalPayloadFromSocketBytes(valid, framedWs),
+    new Uint8Array([0xab, 0xcd]),
+  );
+  assert.equal(state.lastTerminalSeqBySession.get("sess_b"), "5");
+
+  // Non-framed transport passes bytes through unchanged.
+  const raw = new Uint8Array([1, 2, 3]);
+  assert.equal(controller.terminalPayloadFromSocketBytes(raw, { framedOutput: false }), raw);
+});
+
 test("connectSelectedSession connects a socket for the selected session", async () => {
   const { calls, controller, sockets, state } = runtimeFixture();
 
