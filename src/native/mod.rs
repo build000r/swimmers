@@ -35,7 +35,6 @@ use attention_group::ATTENTION_GROUP_TMUX_NAME;
 pub use attention_group::{
     attention_group_attach_command, clear_native_attention_group, open_native_attention_group,
 };
-use ghostty_open::open_or_focus_ghostty_session;
 #[cfg(test)]
 use ghostty_open::parse_osascript_output;
 #[cfg(test)]
@@ -43,11 +42,12 @@ use ghostty_open::{
     cached_ghostty_preview_term_id, clear_ghostty_preview_term_cache,
     remember_ghostty_preview_term_id,
 };
+use ghostty_open::{open_or_focus_ghostty_attach_command, open_or_focus_ghostty_session};
 #[cfg(test)]
 use host::host_is_loopback;
-pub use iterm::open_or_focus_iterm_session;
 #[cfg(test)]
 use iterm::{build_iterm_attach_command, build_iterm_display_name, is_transient_iterm_open_error};
+pub use iterm::{open_or_focus_iterm_attach_command, open_or_focus_iterm_session};
 #[cfg(test)]
 use osascript::NativeScriptError;
 use osascript::{
@@ -108,6 +108,34 @@ pub async fn open_native_session(
         NativeDesktopApp::Iterm => open_or_focus_iterm_session(session_id, tmux_name, cwd).await,
         NativeDesktopApp::Ghostty => {
             open_or_focus_ghostty_session(session_id, tmux_name, cwd, ghostty_mode).await
+        }
+    }
+}
+
+pub async fn open_native_attach_command(
+    app: NativeDesktopApp,
+    ghostty_mode: GhosttyOpenMode,
+    session_id: &str,
+    tmux_name: &str,
+    cwd: &str,
+    attach_command: &str,
+    display_name: &str,
+) -> Result<NativeDesktopOpenResponse> {
+    match app {
+        NativeDesktopApp::Iterm => {
+            open_or_focus_iterm_attach_command(session_id, tmux_name, attach_command, display_name)
+                .await
+        }
+        NativeDesktopApp::Ghostty => {
+            open_or_focus_ghostty_attach_command(
+                session_id,
+                tmux_name,
+                cwd,
+                attach_command,
+                display_name,
+                ghostty_mode,
+            )
+            .await
         }
     }
 }

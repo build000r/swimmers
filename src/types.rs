@@ -449,6 +449,10 @@ pub struct LaunchTargetSummary {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub auth_token_env: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ssh_alias: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub remote_attach_command_template: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bootstrap_hint: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub path_mappings: Vec<LaunchPathMapping>,
@@ -462,6 +466,8 @@ impl LaunchTargetSummary {
             kind: "local".to_string(),
             base_url: None,
             auth_token_env: None,
+            ssh_alias: None,
+            remote_attach_command_template: None,
             bootstrap_hint: None,
             path_mappings: Vec::new(),
         }
@@ -502,6 +508,8 @@ pub struct SessionEnvironmentSummary {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub launch_source: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub remote_attach_command: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub local_cwd: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub remote_cwd: Option<String>,
@@ -540,6 +548,7 @@ impl SessionEnvironmentSummary {
             display_host: target.label.clone(),
             remote_session_id: Some(remote_session_id.into()),
             launch_source: Some(launch_source.into()),
+            remote_attach_command: None,
             local_cwd,
             remote_cwd: (!remote_cwd.is_empty()).then_some(remote_cwd),
             canonical_cwd,
@@ -558,6 +567,7 @@ impl Default for SessionEnvironmentSummary {
             display_host: "local".to_string(),
             remote_session_id: None,
             launch_source: Some("local_supervisor".to_string()),
+            remote_attach_command: None,
             local_cwd: None,
             remote_cwd: None,
             canonical_cwd: None,
@@ -606,15 +616,23 @@ impl EnvironmentCapabilitySummary {
     pub fn remote_swimmers_api(
         ready: bool,
         has_path_mappings: bool,
+        has_safe_ssh_alias: bool,
         has_bootstrap_hint: bool,
     ) -> Self {
-        Self::remote_swimmers_api_with_state(ready, ready, has_path_mappings, has_bootstrap_hint)
+        Self::remote_swimmers_api_with_state(
+            ready,
+            ready,
+            has_path_mappings,
+            has_safe_ssh_alias,
+            has_bootstrap_hint,
+        )
     }
 
     pub fn remote_swimmers_api_with_state(
         observe_sessions: bool,
         write_ready: bool,
         has_path_mappings: bool,
+        has_safe_ssh_alias: bool,
         has_bootstrap_hint: bool,
     ) -> Self {
         Self {
@@ -623,8 +641,8 @@ impl EnvironmentCapabilitySummary {
             send_input: write_ready,
             group_input: write_ready,
             remote_dir_inventory: write_ready && has_path_mappings,
-            native_attach: false,
-            ssh_attach_hint: false,
+            native_attach: has_safe_ssh_alias,
+            ssh_attach_hint: has_safe_ssh_alias,
             bootstrap_hint: has_bootstrap_hint,
             advisory_metadata: true,
             health_probe: true,

@@ -86,6 +86,9 @@ export function remoteNativeHandoffMessage(session, environments = []) {
     return "";
   }
   const environment = sessionEnvironment(session);
+  if (nonEmptyString(environment.remote_attach_command)) {
+    return "";
+  }
   const remoteSession = splitRemoteSessionId(session);
   const summary = environmentSummaryForSession(session, environments);
   const targetLabel = nonEmptyString(
@@ -112,8 +115,8 @@ export function remoteNativeHandoffMessage(session, environments = []) {
   const cwdLine = handoffCwdLine(session, environment);
   const targetSuffix = targetId && targetId !== targetLabel ? ` (${targetId})` : "";
   return [
-    `Remote handoff: local native open cannot open this remote terminal.`,
-    `Open Swimmers on ${targetLabel}${targetSuffix} to attach.`,
+    `Remote handoff: no SSH attach command is configured for this remote terminal.`,
+    `Add ssh_alias to ${targetLabel}${targetSuffix} to attach.`,
     `backend: ${mode}`,
     `remote session: ${remoteSessionId}`,
     cwdLine,

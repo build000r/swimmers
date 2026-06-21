@@ -810,6 +810,8 @@ fn clicking_remote_swimmer_shows_handoff_without_native_open() {
         kind: "swimmers_api".to_string(),
         base_url: Some("http://100.64.1.2:3210/?token=secret".to_string()),
         auth_token_env: Some("SWIMMERS_TOKEN".to_string()),
+        ssh_alias: None,
+        remote_attach_command_template: None,
         bootstrap_hint: None,
         path_mappings: Vec::new(),
     };
@@ -838,7 +840,7 @@ fn clicking_remote_swimmer_shows_handoff_without_native_open() {
         .expect("handoff message");
     assert_eq!(
         message,
-        "remote handoff: local native open cannot open this remote terminal; open Swimmers on Skillbox devbox (skillbox) for sess-7 @ /srv/skillbox/repos/dev via remote Swimmers API"
+        "remote handoff: no SSH attach command is configured for this remote terminal; add ssh_alias to Skillbox devbox (skillbox) and retry sess-7 @ /srv/skillbox/repos/dev via remote Swimmers API"
     );
     assert!(!message.contains("secret"));
     assert!(!message.contains("SWIMMERS_TOKEN"));
@@ -1116,6 +1118,8 @@ fn ssh_only_launch_target_persists_across_picker_reopen_without_remote_inventory
                 kind: "ssh_only".to_string(),
                 base_url: None,
                 auth_token_env: None,
+                ssh_alias: None,
+                remote_attach_command_template: None,
                 bootstrap_hint: Some("ssh skillbox-devbox 'swimmers serve'".to_string()),
                 path_mappings: Vec::new(),
             },
@@ -1353,6 +1357,8 @@ fn picker_commit_action_blocks_remote_target_before_local_write() {
                     kind: "swimmers_api".to_string(),
                     base_url: None,
                     auth_token_env: None,
+                    ssh_alias: None,
+                    remote_attach_command_template: None,
                     bootstrap_hint: None,
                     path_mappings: Vec::new(),
                 },

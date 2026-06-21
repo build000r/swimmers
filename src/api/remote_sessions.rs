@@ -144,6 +144,7 @@ pub fn namespace_session_summary(
     mut session: SessionSummary,
 ) -> SessionSummary {
     let remote_session_id = session.session_id.clone();
+    let remote_tmux_name = session.tmux_name.clone();
     let remote_cwd = session.cwd.clone();
     let local_cwd = map_remote_cwd_to_local(target, &remote_cwd);
     session.cwd = local_cwd.clone().unwrap_or_else(|| remote_cwd.clone());
@@ -151,13 +152,15 @@ pub fn namespace_session_summary(
     if !session.tmux_name.starts_with('[') {
         session.tmux_name = format!("[{}] {}", target.label, session.tmux_name);
     }
-    session.environment = SessionEnvironmentSummary::remote(
+    let mut environment = SessionEnvironmentSummary::remote(
         target,
         remote_session_id,
         remote_cwd,
         local_cwd,
         "remote_swimmers_api",
     );
+    environment.remote_attach_command = remote_native_attach_command(target, &remote_tmux_name);
+    session.environment = environment;
     session
 }
 
@@ -186,6 +189,8 @@ fn environment_summary_for_target(target: &LaunchTargetSummary) -> EnvironmentSu
     let kind = normalized_target_kind(target);
     let is_swimmers_api = kind == "swimmers_api";
     let safe_ssh_alias = safe_ssh_alias_for_target(target);
+    let has_remote_attach_command =
+        remote_native_attach_configured(target, safe_ssh_alias.as_deref());
     let bootstrap_hint = environment_bootstrap_hint(target, safe_ssh_alias.as_deref());
     let health = if is_swimmers_api {
         remote_target_environment_health(target)
@@ -200,7 +205,7 @@ fn environment_summary_for_target(target: &LaunchTargetSummary) -> EnvironmentSu
         display_host: target.label.clone(),
         capabilities: environment_capabilities(
             target,
-            safe_ssh_alias.is_some(),
+            has_remote_attach_command,
             bootstrap_hint.is_some(),
             &health,
         ),
@@ -217,7 +222,7 @@ fn environment_summary_for_target(target: &LaunchTargetSummary) -> EnvironmentSu
         },
         path_mapping_count: target.path_mappings.len(),
         ssh_alias: safe_ssh_alias.clone(),
-        attach_hint: ssh_attach_hint_for_alias(safe_ssh_alias.as_deref()),
+        attach_hint: remote_attach_hint(target, safe_ssh_alias.as_deref()),
         bootstrap_hint,
         status: health.status,
         last_seen_at: health.last_seen_at,
@@ -266,6 +271,7 @@ fn environment_capabilities(
             remote_api_observe_ready(target, health),
             remote_api_write_ready(target, health),
             !target.path_mappings.is_empty(),
+            has_safe_ssh_alias,
             has_bootstrap_hint,
         ),
         "ssh_only" => EnvironmentCapabilitySummary::ssh_handoff(has_safe_ssh_alias),
@@ -301,10 +307,17 @@ fn non_api_target_environment_health(kind: &str) -> RemoteTargetHealth {
 }
 
 fn safe_ssh_alias_for_target(target: &LaunchTargetSummary) -> Option<String> {
-    if normalized_target_kind(target) != "ssh_only" {
-        return None;
-    }
-    let alias = target.id.trim();
+    let kind = normalized_target_kind(target);
+    let alias = match kind.as_str() {
+        "ssh_only" => target
+            .ssh_alias
+            .as_deref()
+            .map(str::trim)
+            .filter(|alias| !alias.is_empty())
+            .unwrap_or_else(|| target.id.trim()),
+        "swimmers_api" => target.ssh_alias.as_deref()?.trim(),
+        _ => return None,
+    };
     let safe = !alias.is_empty()
         && !alias.starts_with('-')
         && alias.bytes().all(|byte| {
@@ -325,6 +338,88 @@ fn safe_ssh_alias_for_target(target: &LaunchTargetSummary) -> Option<String> {
 
 fn ssh_attach_hint_for_alias(alias: Option<&str>) -> Option<String> {
     alias.map(|alias| format!("ssh {alias}"))
+}
+
+pub(crate) fn remote_native_attach_command(
+    target: &LaunchTargetSummary,
+    remote_tmux_name: &str,
+) -> Option<String> {
+    let tmux_target = safe_remote_tmux_target(remote_tmux_name)?;
+    if let Some(template) = safe_remote_attach_command_template(target) {
+        return Some(template.replace("{tmux_target}", &tmux_target));
+    }
+    let alias = safe_ssh_alias_for_target(target)?;
+    Some(format!(
+        "exec ssh {} -t 'tmux attach-session -t {tmux_target}'",
+        shell_quote_token(&alias)
+    ))
+}
+
+fn remote_native_attach_configured(
+    target: &LaunchTargetSummary,
+    safe_ssh_alias: Option<&str>,
+) -> bool {
+    safe_ssh_alias.is_some() || safe_remote_attach_command_template(target).is_some()
+}
+
+fn remote_attach_hint(
+    target: &LaunchTargetSummary,
+    safe_ssh_alias: Option<&str>,
+) -> Option<String> {
+    if safe_remote_attach_command_template(target).is_some() {
+        return Some("configured remote attach command".to_string());
+    }
+    ssh_attach_hint_for_alias(safe_ssh_alias)
+}
+
+fn safe_remote_attach_command_template(target: &LaunchTargetSummary) -> Option<&str> {
+    let template = target.remote_attach_command_template.as_deref()?.trim();
+    if !template.contains("{tmux_target}") {
+        return None;
+    }
+    let safe = !template.is_empty()
+        && !template.starts_with('-')
+        && template.chars().all(|ch| {
+            ch.is_ascii_alphanumeric()
+                || matches!(
+                    ch,
+                    '_' | '-' | '.' | '/' | ':' | ' ' | '\'' | '=' | '@' | '{' | '}'
+                )
+        });
+    safe.then_some(template)
+}
+
+fn safe_remote_tmux_target(tmux_name: &str) -> Option<String> {
+    let tmux_name = tmux_name.trim();
+    let safe = !tmux_name.is_empty()
+        && !tmux_name.starts_with('-')
+        && tmux_name.bytes().all(
+            |byte| matches!(byte, b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'.' | b'_' | b'-'),
+        );
+    safe.then(|| format!("={tmux_name}"))
+}
+
+fn shell_quote_token(value: &str) -> String {
+    if value.is_empty() {
+        return "''".to_string();
+    }
+    if value.bytes().all(|byte| {
+        matches!(
+            byte,
+            b'A'..=b'Z'
+                | b'a'..=b'z'
+                | b'0'..=b'9'
+                | b'.'
+                | b'_'
+                | b'-'
+                | b'@'
+                | b':'
+                | b'/'
+        )
+    }) {
+        return value.to_string();
+    }
+    format!("'{}'", value.replace('\'', "'\\''"))
 }
 
 fn ssh_bootstrap_hint_for_alias(alias: Option<&str>) -> Option<String> {
@@ -845,6 +940,25 @@ pub async fn list_remote_sessions() -> Vec<SessionSummary> {
     }
 
     list_remote_sessions_for_targets(targets).await
+}
+
+pub(crate) async fn fetch_remote_session_summary(
+    session_id: &str,
+) -> Result<Option<SessionSummary>, RemoteSessionError> {
+    let Some((target, remote_session_id)) = denamespace_for_target(session_id)? else {
+        return Ok(None);
+    };
+    let client = http_client(REMOTE_LIST_TIMEOUT)?;
+    let auth_token = remote_auth_token(&target)?;
+    let sessions = list_remote_sessions_for_target(&client, target, auth_token).await?;
+    Ok(sessions.into_iter().find(|session| {
+        session.session_id == session_id
+            || session
+                .environment
+                .remote_session_id
+                .as_deref()
+                .is_some_and(|candidate| candidate == remote_session_id)
+    }))
 }
 
 fn remote_polling_enabled_for_environment() -> bool {

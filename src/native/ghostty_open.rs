@@ -39,6 +39,45 @@ pub(super) async fn open_or_focus_ghostty_session(
     Ok(result)
 }
 
+pub(super) async fn open_or_focus_ghostty_attach_command(
+    session_id: &str,
+    tmux_name: &str,
+    cwd: &str,
+    attach_command: &str,
+    display_name: &str,
+    mode: GhosttyOpenMode,
+) -> Result<NativeDesktopOpenResponse> {
+    let _guard = super::NATIVE_OPEN_LOCK.lock().await;
+    let script = super::script_path_for_app(NativeDesktopApp::Ghostty)?;
+    if !script.exists() {
+        return Err(anyhow!(
+            "native Ghostty script missing: {}",
+            script.display()
+        ));
+    }
+    if let Some(reason) = super::ghostty_unavailable_reason() {
+        return Err(anyhow!(reason));
+    }
+
+    let active_tab_id = active_ghostty_tab_for_mode(mode).await;
+    let known_term_id = known_ghostty_term_for_mode(mode, session_id, active_tab_id.as_deref());
+    let mut result = run_ghostty_open_script(
+        &script,
+        session_id,
+        tmux_name,
+        cwd,
+        attach_command,
+        display_name,
+        mode,
+        known_term_id.as_deref(),
+    )
+    .await?;
+
+    mark_stale_swap_fallback(mode, known_term_id.as_deref(), &mut result);
+    remember_ghostty_open_result(mode, session_id, active_tab_id, &result).await;
+    Ok(result)
+}
+
 async fn prepare_ghostty_open_context(
     session_id: &str,
     tmux_name: &str,

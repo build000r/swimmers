@@ -6,6 +6,7 @@ use crate::thought::protocol::SyncRequestSequence;
 use crate::thought::runtime_config::ThoughtConfig;
 use crate::types::{
     DirGroupMembershipUpdateRequest, DirRepoSearchResponse, LaunchPathMapping, LaunchTargetSummary,
+    SessionEnvironmentSummary,
 };
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -60,12 +61,40 @@ fn service_mapped_launch_target(
         kind: "swimmers_api".to_string(),
         base_url: Some("http://127.0.0.1:3210".to_string()),
         auth_token_env: None,
+        ssh_alias: None,
+        remote_attach_command_template: None,
         bootstrap_hint: None,
         path_mappings: vec![LaunchPathMapping {
             local_prefix: local_prefix.to_string_lossy().into_owned(),
             remote_prefix: remote_prefix.to_string(),
         }],
     }
+}
+
+#[test]
+fn remote_native_script_tmux_name_uses_sanitized_remote_session_id() {
+    let target = service_mapped_launch_target("portfolio-devbox", Path::new("/local"), "/remote");
+    let mut session = SessionSummary::live(
+        "portfolio-devbox::sess_101",
+        "[Portfolio Devbox] devbox-3",
+        SessionState::Idle,
+        None,
+        Default::default(),
+        "/remote/swimmers",
+        None,
+        0,
+        0,
+        Utc::now(),
+    );
+    session.environment = SessionEnvironmentSummary::remote(
+        &target,
+        "sess[bad]|7",
+        "/remote/swimmers",
+        Some("/local/swimmers".to_string()),
+        "remote_swimmers_api",
+    );
+
+    assert_eq!(remote_native_script_tmux_name(&session), "sess-bad--7");
 }
 
 struct SleepingRepoActionExecutor;

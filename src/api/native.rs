@@ -6,7 +6,7 @@ use crate::api::service::{
     native_status_for_host as native_status_for_host_service, open_native_attention_group_for_host,
     open_native_session_for_host, NativeOpenServiceError,
 };
-use crate::api::{remote_sessions, AppState};
+use crate::api::AppState;
 use crate::auth::{AuthInfo, AuthScope};
 use crate::types::{
     NativeAttentionGroupOpenRequest, NativeDesktopConfigRequest, NativeDesktopModeRequest,
@@ -48,20 +48,7 @@ fn require_native_write_scope(auth: &AuthInfo) -> Result<(), Response> {
     auth.require_scope(AuthScope::SessionsWrite)
 }
 
-fn reject_remote_native_session(session_id: &str) -> Option<Response> {
-    remote_sessions::split_remote_session_id(session_id)?;
-
-    Some(api_error_msg(
-        &NATIVE_DESKTOP_UNAVAILABLE,
-        "remote sessions are visible locally, but native terminal handoff must be opened on the target host",
-    ))
-}
-
 fn native_open_session_id(body: &NativeDesktopOpenRequest) -> Result<&str, Response> {
-    if let Some(resp) = reject_remote_native_session(&body.session_id) {
-        return Err(resp);
-    }
-
     Ok(&body.session_id)
 }
 
@@ -259,7 +246,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn native_open_rejects_remote_session_id_before_handoff() {
+    async fn native_open_reports_unknown_remote_target_without_handoff() {
         let response = native_open(
             Extension(AuthInfo::new(OPERATOR_SCOPES.to_vec())),
             State(test_state()),
@@ -276,7 +263,7 @@ mod tests {
         assert_eq!(json["code"], NATIVE_DESKTOP_UNAVAILABLE.code);
         assert_eq!(
             json["message"],
-            "remote sessions are visible locally, but native terminal handoff must be opened on the target host"
+            "LAUNCH_TARGET_UNKNOWN: remote session target 'target' is not configured"
         );
     }
 

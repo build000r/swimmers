@@ -111,6 +111,14 @@ pub(super) fn remote_native_handoff_message(session: &SessionSummary) -> Option<
     if session.environment.scope != SessionEnvironmentScope::Remote {
         return None;
     }
+    if session
+        .environment
+        .remote_attach_command
+        .as_deref()
+        .is_some_and(|command| !command.trim().is_empty())
+    {
+        return None;
+    }
 
     let target = first_non_empty([
         Some(session.environment.display_host.as_str()),
@@ -142,7 +150,7 @@ pub(super) fn remote_native_handoff_message(session: &SessionSummary) -> Option<
     let cwd_suffix = cwd.map(|cwd| format!(" @ {cwd}")).unwrap_or_default();
 
     Some(format!(
-        "remote handoff: local native open cannot open this remote terminal; open Swimmers on {target}{target_suffix} for {remote_session_id}{cwd_suffix} via {mode}"
+        "remote handoff: no SSH attach command is configured for this remote terminal; add ssh_alias to {target}{target_suffix} and retry {remote_session_id}{cwd_suffix} via {mode}"
     ))
 }
 
@@ -336,6 +344,8 @@ mod tests {
             kind: "swimmers_api".to_string(),
             base_url: Some("http://100.64.1.2:3210/?token=secret".to_string()),
             auth_token_env: Some("SWIMMERS_TOKEN".to_string()),
+            ssh_alias: None,
+            remote_attach_command_template: None,
             bootstrap_hint: None,
             path_mappings: Vec::new(),
         };
@@ -379,9 +389,48 @@ mod tests {
 
         assert_eq!(
             message,
-            "remote handoff: local native open cannot open this remote terminal; open Swimmers on Skillbox devbox (skillbox) for sess-7 @ /srv/skillbox/repos/swimmers via remote Swimmers API"
+            "remote handoff: no SSH attach command is configured for this remote terminal; add ssh_alias to Skillbox devbox (skillbox) and retry sess-7 @ /srv/skillbox/repos/swimmers via remote Swimmers API"
         );
         assert!(!message.contains("secret"));
         assert!(!message.contains("SWIMMERS_TOKEN"));
+    }
+
+    #[test]
+    fn remote_native_handoff_message_allows_configured_attach_command() {
+        let mut session = SessionSummary {
+            session_id: "skillbox::sess-7".to_string(),
+            tmux_name: "[Skillbox devbox] 7".to_string(),
+            state: SessionState::Idle,
+            current_command: None,
+            state_evidence: swimmers::types::StateEvidence::new("osc133_prompt"),
+            cwd: "/Users/b/repos/swimmers".to_string(),
+            tool: None,
+            token_count: 0,
+            context_limit: 0,
+            thought: None,
+            thought_state: swimmers::types::ThoughtState::Holding,
+            thought_source: swimmers::types::ThoughtSource::CarryForward,
+            thought_updated_at: None,
+            rest_state: RestState::Drowsy,
+            commit_candidate: false,
+            action_cues: Vec::new(),
+            objective_changed_at: None,
+            last_skill: None,
+            is_stale: false,
+            attached_clients: 0,
+            stale_attached_clients: 0,
+            transport_health: TransportHealth::Healthy,
+            last_activity_at: Utc::now(),
+            repo_theme_id: None,
+            batch: None,
+            environment: Default::default(),
+        };
+        session.environment.scope = SessionEnvironmentScope::Remote;
+        session.environment.remote_attach_command = Some(
+            "exec ssh skillbox@skillbox-portfolio-devbox -t 'tmux attach-session -t =7'"
+                .to_string(),
+        );
+
+        assert_eq!(remote_native_handoff_message(&session), None);
     }
 }

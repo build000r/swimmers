@@ -7,6 +7,8 @@ fn remote_target(id: &str, label: &str) -> swimmers::types::LaunchTargetSummary 
         kind: "swimmers_api".to_string(),
         base_url: Some("http://127.0.0.1:3210".to_string()),
         auth_token_env: None,
+        ssh_alias: None,
+        remote_attach_command_template: None,
         bootstrap_hint: None,
         path_mappings: Vec::new(),
     }
@@ -928,6 +930,8 @@ fn thought_panel_header_summarizes_cross_host_inbox() {
             kind: "swimmers_api".to_string(),
             base_url: None,
             auth_token_env: None,
+            ssh_alias: None,
+            remote_attach_command_template: None,
             bootstrap_hint: None,
             path_mappings: Vec::new(),
         },
@@ -1192,7 +1196,7 @@ fn thought_panel_environment_detail_renders_down_api_health_and_bootstrap_hint()
         backend_mode: "remote_swimmers_api".to_string(),
         display_host: "Skillbox API".to_string(),
         capabilities: swimmers::types::EnvironmentCapabilitySummary::remote_swimmers_api(
-            false, true, true,
+            false, true, false, true,
         ),
         base_url: Some("http://192.0.2.10:3210/".to_string()),
         auth: swimmers::types::EnvironmentAuthSummary {

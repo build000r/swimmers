@@ -149,6 +149,7 @@ export interface SessionEnvironmentSummary {
   display_host: string;
   remote_session_id: Nullable<string>;
   launch_source: Nullable<string>;
+  remote_attach_command: Nullable<string>;
   local_cwd: Nullable<string>;
   remote_cwd: Nullable<string>;
   canonical_cwd: Nullable<string>;
@@ -486,6 +487,8 @@ export interface LaunchTargetSummary {
   kind: string;
   base_url: Nullable<string>;
   auth_token_env: Nullable<string>;
+  ssh_alias: Nullable<string>;
+  remote_attach_command_template: Nullable<string>;
   bootstrap_hint: Nullable<string>;
   path_mappings: LaunchPathMapping[];
 }

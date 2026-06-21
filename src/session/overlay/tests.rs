@@ -20,6 +20,8 @@ fn test_launch_target(id: &str, label: &str, kind: &str) -> LaunchTargetSummary 
         kind: kind.to_string(),
         base_url: None,
         auth_token_env: None,
+        ssh_alias: None,
+        remote_attach_command_template: None,
         bootstrap_hint: None,
         path_mappings: Vec::new(),
     }
@@ -32,6 +34,8 @@ fn mapped_launch_target(id: &str, local_prefix: &str, remote_prefix: &str) -> La
         kind: "swimmers_api".to_string(),
         base_url: Some("http://127.0.0.1:3210".to_string()),
         auth_token_env: None,
+        ssh_alias: None,
+        remote_attach_command_template: None,
         bootstrap_hint: None,
         path_mappings: vec![crate::types::LaunchPathMapping {
             local_prefix: local_prefix.to_string(),
@@ -361,6 +365,8 @@ fn parse_agent_launch_injects_local_and_filters_unknown_defaults() {
             kind: Some("swimmers_api".to_string()),
             base_url: Some("http://remote.test:3210".to_string()),
             auth_token_env: Some("REMOTE_TOKEN".to_string()),
+            ssh_alias: Some("remote-ssh".to_string()),
+            remote_attach_command_template: None,
             bootstrap_hint: None,
             path_mappings: vec![DevSanityLaunchPathMapping {
                 local_prefix: Some("/local".to_string()),
@@ -389,6 +395,7 @@ fn parse_agent_launch_injects_local_and_filters_unknown_defaults() {
         .expect("remote target");
     assert_eq!(remote.label, "remote");
     assert_eq!(remote.kind, "swimmers_api");
+    assert_eq!(remote.ssh_alias.as_deref(), Some("remote-ssh"));
     assert_eq!(remote.path_mappings[0].local_prefix, "/local");
     assert_eq!(remote.path_mappings[0].remote_prefix, "/remote");
 }
@@ -408,6 +415,8 @@ fn parse_agent_launch_trims_target_identity_and_filters_blank_ids() {
                 kind: Some(" swimmers_api ".to_string()),
                 base_url: Some("http://remote.test:3210".to_string()),
                 auth_token_env: None,
+                ssh_alias: None,
+                remote_attach_command_template: None,
                 bootstrap_hint: None,
                 path_mappings: Vec::new(),
             },
@@ -417,6 +426,8 @@ fn parse_agent_launch_trims_target_identity_and_filters_blank_ids() {
                 kind: Some("swimmers_api".to_string()),
                 base_url: Some("http://blank.test:3210".to_string()),
                 auth_token_env: None,
+                ssh_alias: None,
+                remote_attach_command_template: None,
                 bootstrap_hint: None,
                 path_mappings: Vec::new(),
             },
@@ -458,6 +469,8 @@ fn parse_agent_launch_ignores_blank_or_empty_expanded_path_mappings() {
             kind: Some("swimmers_api".to_string()),
             base_url: Some("http://remote.test:3210".to_string()),
             auth_token_env: None,
+            ssh_alias: None,
+            remote_attach_command_template: None,
             bootstrap_hint: None,
             path_mappings: vec![
                 DevSanityLaunchPathMapping {
@@ -1094,6 +1107,8 @@ fn overlay_health_reports_load_age_and_remote_target_count_without_probe() {
         kind: " Swimmers_API ".to_string(),
         base_url: Some("http://example.test:3210".to_string()),
         auth_token_env: Some("REMOTE_TOKEN".to_string()),
+        ssh_alias: None,
+        remote_attach_command_template: None,
         bootstrap_hint: None,
         path_mappings: Vec::new(),
     };

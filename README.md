@@ -178,7 +178,11 @@ V2 environment cockpit setups use three target kinds:
 - `local` is the implicit loopback/in-process target.
 - `swimmers_api` is a trusted remote Swimmers backend, usually reached over a
   Tailnet or token-auth URL. It can observe, launch, and send input only through
-  that configured API.
+  that configured API. Add `ssh_alias` when the local native terminal should
+  attach to remote tmux sessions through SSH. For hosts where tmux is not in the
+  SSH login environment, set `remote_attach_command_template` instead. The
+  template must include `{tmux_target}`, which Swimmers replaces with a safe
+  exact tmux target such as `=swimmers-api`.
 - `ssh_only` is inventory and handoff only. It can show attach/bootstrap hints
   such as `ssh skillbox-devbox` or `ssh skillbox-devbox 'swimmers serve'`, but
   it is not treated as a live session source until that host has a trusted
@@ -208,9 +212,19 @@ dev_sanity:
         kind: swimmers_api
         base_url: http://100.101.123.63:3210
         auth_token_env: SWIMMERS_DEVBOX_TOKEN
+        ssh_alias: skillbox-devbox
         path_mappings:
           - local_prefix: /Users/me/repos/opensource
             remote_prefix: /srv/devbox/repos/opensource
+      - id: conference-wsl
+        label: Conference WSL
+        kind: swimmers_api
+        base_url: http://127.0.0.1:3213
+        auth_token_env: null
+        remote_attach_command_template: "exec ssh win-wsl-host -t 'wsl.exe -d Ubuntu --exec tmux attach-session -t {tmux_target}'"
+        path_mappings:
+          - local_prefix: /Users/me/repos
+            remote_prefix: /home/worker/repos
       - id: skillbox-devbox
         label: Skillbox SSH
         kind: ssh_only

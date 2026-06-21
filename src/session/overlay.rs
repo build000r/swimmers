@@ -605,6 +605,10 @@ struct DevSanityLaunchTarget {
     #[serde(default)]
     auth_token_env: Option<String>,
     #[serde(default)]
+    ssh_alias: Option<String>,
+    #[serde(default)]
+    remote_attach_command_template: Option<String>,
+    #[serde(default)]
     bootstrap_hint: Option<String>,
     #[serde(default)]
     path_mappings: Vec<DevSanityLaunchPathMapping>,
@@ -1048,6 +1052,10 @@ fn parse_launch_target(target: DevSanityLaunchTarget) -> Option<LaunchTargetSumm
         id,
         base_url: target.base_url,
         auth_token_env: target.auth_token_env,
+        ssh_alias: target.ssh_alias.and_then(nonempty_launch_metadata),
+        remote_attach_command_template: target
+            .remote_attach_command_template
+            .and_then(nonempty_launch_metadata),
         bootstrap_hint: target.bootstrap_hint.and_then(nonempty_launch_metadata),
         path_mappings: parse_launch_path_mappings(target.path_mappings),
     })

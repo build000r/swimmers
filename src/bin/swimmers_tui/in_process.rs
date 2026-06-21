@@ -383,12 +383,6 @@ impl TuiApi for InProcessApi {
         // Mirrors: src/api/native.rs:96 (native_open)
         let session_id = session_id.to_string();
         Box::pin(async move {
-            if remote_sessions::split_remote_session_id(&session_id).is_some() {
-                return Err(
-                    "remote sessions are visible locally, but native terminal handoff must be opened on the target host"
-                        .to_string(),
-                );
-            }
             open_native_session_for_host(&self.state, "localhost", &session_id)
                 .await
                 .map_err(native_open_error_message)
@@ -1186,7 +1180,7 @@ printf '{"effective":[],"recommendations":[]}\n'
     }
 
     #[tokio::test]
-    async fn open_session_keeps_remote_native_handoff_as_adapter_error_string() {
+    async fn open_session_reports_unknown_remote_target_as_adapter_error_string() {
         let api = InProcessApi::new(test_state());
 
         let err = api
@@ -1196,7 +1190,7 @@ printf '{"effective":[],"recommendations":[]}\n'
 
         assert_eq!(
             err,
-            "remote sessions are visible locally, but native terminal handoff must be opened on the target host"
+            "LAUNCH_TARGET_UNKNOWN: remote session target 'target-host' is not configured"
         );
     }
 

@@ -342,6 +342,11 @@ pub fn session_capability_summary(
                     true,
                     session.transport_health == TransportHealth::Healthy,
                     session.environment.local_cwd.is_some(),
+                    session
+                        .environment
+                        .remote_attach_command
+                        .as_deref()
+                        .is_some_and(|command| !command.trim().is_empty()),
                     false,
                 ),
             ),
@@ -631,6 +636,8 @@ mod tests {
                 kind: "swimmers_api".to_string(),
                 base_url: None,
                 auth_token_env: None,
+                ssh_alias: None,
+                remote_attach_command_template: None,
                 bootstrap_hint: None,
                 path_mappings: Vec::new(),
             },
@@ -702,6 +709,8 @@ mod tests {
                 kind: "swimmers_api".to_string(),
                 base_url: None,
                 auth_token_env: None,
+                ssh_alias: None,
+                remote_attach_command_template: None,
                 bootstrap_hint: None,
                 path_mappings: Vec::new(),
             },
@@ -749,6 +758,8 @@ mod tests {
             kind: "swimmers_api".to_string(),
             base_url: None,
             auth_token_env: None,
+            ssh_alias: None,
+            remote_attach_command_template: None,
             bootstrap_hint: None,
             path_mappings: Vec::new(),
         };

@@ -34,6 +34,24 @@ pub async fn open_or_focus_iterm_session(
     open_iterm_with_retries(session_id, tmux_name, &context).await
 }
 
+pub async fn open_or_focus_iterm_attach_command(
+    session_id: &str,
+    tmux_name: &str,
+    attach_command: &str,
+    display_name: &str,
+) -> Result<NativeDesktopOpenResponse> {
+    let _guard = super::NATIVE_OPEN_LOCK.lock().await;
+    let script = super::script_path_for_app(NativeDesktopApp::Iterm)?;
+    ensure_iterm_script_exists(&script)?;
+    let context = ItermOpenContext {
+        script,
+        attach_command: attach_command.to_string(),
+        display_name: display_name.to_string(),
+        known_pane_id: super::cached_pane_id(session_id),
+    };
+    open_iterm_with_retries(session_id, tmux_name, &context).await
+}
+
 async fn prepare_iterm_open_context(
     session_id: &str,
     tmux_name: &str,

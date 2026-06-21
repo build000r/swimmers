@@ -22,6 +22,8 @@ fn target() -> LaunchTargetSummary {
         kind: "swimmers_api".to_string(),
         base_url: Some("http://127.0.0.1:3210".to_string()),
         auth_token_env: None,
+        ssh_alias: None,
+        remote_attach_command_template: None,
         bootstrap_hint: None,
         path_mappings: vec![
             LaunchPathMapping {
@@ -130,6 +132,8 @@ async fn capture_list_sessions_with_remote_aggregate() -> AxumJson<SessionListRe
         kind: "swimmers_api".to_string(),
         base_url: Some("http://127.0.0.1:3211".to_string()),
         auth_token_env: None,
+        ssh_alias: None,
+        remote_attach_command_template: None,
         bootstrap_hint: None,
         path_mappings: Vec::new(),
     };
@@ -1020,6 +1024,59 @@ fn namespaces_remote_session_summary() {
 }
 
 #[test]
+fn namespace_session_summary_adds_configured_remote_native_attach_command() {
+    let mut target = target();
+    target.ssh_alias = Some("skillbox@skillbox-portfolio-devbox".to_string());
+
+    let session = namespace_session_summary(&target, summary("sess_0"));
+
+    assert_eq!(
+        session.environment.remote_attach_command.as_deref(),
+        Some("exec ssh skillbox@skillbox-portfolio-devbox -t 'tmux attach-session -t =7'")
+    );
+}
+
+#[test]
+fn namespace_session_summary_uses_configured_remote_attach_template() {
+    let mut target = target();
+    target.remote_attach_command_template = Some(
+        "exec ssh win-wsl-host -t 'wsl.exe -d Ubuntu --exec tmux attach-session -t {tmux_target}'"
+            .to_string(),
+    );
+
+    let session = namespace_session_summary(&target, summary("sess_0"));
+
+    assert_eq!(
+        session.environment.remote_attach_command.as_deref(),
+        Some("exec ssh win-wsl-host -t 'wsl.exe -d Ubuntu --exec tmux attach-session -t =7'")
+    );
+}
+
+#[test]
+fn namespace_session_summary_rejects_unsafe_remote_attach_template() {
+    let mut target = target();
+    target.remote_attach_command_template = Some(
+        "exec ssh win-wsl-host -t 'tmux attach-session -t {tmux_target}; rm -rf /'".to_string(),
+    );
+
+    let session = namespace_session_summary(&target, summary("sess_0"));
+
+    assert_eq!(session.environment.remote_attach_command, None);
+}
+
+#[test]
+fn namespace_session_summary_suppresses_remote_attach_command_for_unsafe_tmux_name() {
+    let mut target = target();
+    target.ssh_alias = Some("skillbox@skillbox-portfolio-devbox".to_string());
+    let mut session = summary("sess_unsafe");
+    session.tmux_name = "team session".to_string();
+
+    let session = namespace_session_summary(&target, session);
+
+    assert_eq!(session.environment.remote_attach_command, None);
+}
+
+#[test]
 fn namespace_session_summary_preserves_unmapped_remote_cwd_as_display_cwd() {
     let target = target();
     let mut remote_only = summary("sess_remote_only");
@@ -1162,6 +1219,44 @@ fn environment_summary_surfaces_configured_bootstrap_hint_for_down_swimmers_api_
     );
     assert_eq!(environment.capabilities.bootstrap_hint, true);
     assert_eq!(environment.capabilities.observe_sessions, false);
+}
+
+#[test]
+fn environment_summary_surfaces_configured_ssh_alias_for_swimmers_api_target() {
+    let mut target = target();
+    target.ssh_alias = Some("skillbox@skillbox-portfolio-devbox".to_string());
+
+    let environment = environment_summary_for_target(&target);
+
+    assert_eq!(
+        environment.ssh_alias.as_deref(),
+        Some("skillbox@skillbox-portfolio-devbox")
+    );
+    assert_eq!(
+        environment.attach_hint.as_deref(),
+        Some("ssh skillbox@skillbox-portfolio-devbox")
+    );
+    assert!(environment.capabilities.native_attach);
+    assert!(environment.capabilities.ssh_attach_hint);
+}
+
+#[test]
+fn environment_summary_surfaces_configured_remote_attach_template() {
+    let mut target = target();
+    target.remote_attach_command_template = Some(
+        "exec ssh win-wsl-host -t 'wsl.exe -d Ubuntu --exec tmux attach-session -t {tmux_target}'"
+            .to_string(),
+    );
+
+    let environment = environment_summary_for_target(&target);
+
+    assert_eq!(environment.ssh_alias, None);
+    assert_eq!(
+        environment.attach_hint.as_deref(),
+        Some("configured remote attach command")
+    );
+    assert!(environment.capabilities.native_attach);
+    assert!(environment.capabilities.ssh_attach_hint);
 }
 
 #[test]

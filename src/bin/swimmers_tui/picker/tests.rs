@@ -151,6 +151,8 @@ mod picker {
             kind: "remote".to_string(),
             base_url: None,
             auth_token_env: None,
+            ssh_alias: None,
+            remote_attach_command_template: None,
             bootstrap_hint: None,
             path_mappings: Vec::new(),
         }
@@ -163,6 +165,8 @@ mod picker {
             kind: "swimmers_api".to_string(),
             base_url: Some("http://127.0.0.1:3210".to_string()),
             auth_token_env: None,
+            ssh_alias: None,
+            remote_attach_command_template: None,
             bootstrap_hint: None,
             path_mappings: vec![
                 LaunchPathMapping {

@@ -75,6 +75,24 @@ fn validate_osascript_script_arg_allows_shell_quoted_attach_command() {
 }
 
 #[test]
+fn validate_osascript_script_arg_allows_ssh_remote_attach_command() {
+    validate_osascript_script_arg(
+        "attach_command",
+        "exec ssh skillbox@skillbox-portfolio-devbox -t 'tmux attach-session -t =devbox-3'",
+    )
+    .expect("remote SSH attach command should be accepted for attach_command");
+}
+
+#[test]
+fn validate_osascript_script_arg_allows_wsl_remote_attach_command() {
+    validate_osascript_script_arg(
+        "attach_command",
+        "exec ssh win-wsl-host -t 'wsl.exe -d Ubuntu --exec tmux attach-session -t =swimmers-api'",
+    )
+    .expect("remote WSL attach command should be accepted for attach_command");
+}
+
+#[test]
 fn validate_osascript_script_arg_rejects_newline_payload() {
     let err = validate_osascript_script_arg("tmux_name", "line1\nline2").unwrap_err();
     let typed = err

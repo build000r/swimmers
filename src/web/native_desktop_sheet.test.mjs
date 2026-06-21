@@ -119,8 +119,8 @@ test("remote handoff copy uses non-secret session environment metadata", () => {
   assert.equal(
     remoteNativeHandoffMessage(session, environments),
     [
-      "Remote handoff: local native open cannot open this remote terminal.",
-      "Open Swimmers on Skillbox devbox (skillbox) to attach.",
+      "Remote handoff: no SSH attach command is configured for this remote terminal.",
+      "Add ssh_alias to Skillbox devbox (skillbox) to attach.",
       "backend: remote Swimmers API",
       "remote session: sess_7",
       "remote cwd: /srv/skillbox/repos/swimmers",
@@ -155,7 +155,7 @@ test("remote handoff availability trims scope metadata", async () => {
   await controller.openSelectedNativeSession();
 
   assert.equal(calls.fetches.length, 0);
-  assert.match(state.nativeDesktop.error, /local native open cannot open this remote terminal/);
+  assert.match(state.nativeDesktop.error, /no SSH attach command is configured/);
   assert.match(state.nativeDesktop.error, /remote cwd: \/srv\/skillbox\/repos\/swimmers/);
 });
 
@@ -178,8 +178,8 @@ test("remote handoff falls back to namespaced session id and avoids false remote
   assert.equal(
     remoteNativeHandoffMessage(session, environments),
     [
-      "Remote handoff: local native open cannot open this remote terminal.",
-      "Open Swimmers on Skillbox devbox (skillbox) to attach.",
+      "Remote handoff: no SSH attach command is configured for this remote terminal.",
+      "Add ssh_alias to Skillbox devbox (skillbox) to attach.",
       "backend: remote Swimmers API",
       "remote session: sess_7",
       "local mapped cwd: /Users/b/repos/opensource/swimmers",
@@ -240,7 +240,7 @@ test("renderNativeStatusForm surfaces remote backend handoff in status copy", ()
     app_id: "iterm",
   });
 
-  assert.match(el.nativeStatusCopy.textContent, /local native open cannot open this remote terminal/);
+  assert.match(el.nativeStatusCopy.textContent, /no SSH attach command is configured/);
   assert.match(el.nativeStatusCopy.textContent, /backend: remote Swimmers API/);
   assert.match(el.nativeStatusCopy.textContent, /Skillbox devbox/);
   assert.match(el.nativeStatusCopy.textContent, /sess_7/);
@@ -346,7 +346,7 @@ test("openSelectedNativeSession posts the selected session id and reports pane d
   assert.equal(calls.sync, 1);
 });
 
-test("openSelectedNativeSession shows remote handoff instead of posting local native open", async () => {
+test("openSelectedNativeSession shows setup guidance when remote attach command is missing", async () => {
   const { calls, controller, el, state } = fixture({
     environments: [{ id: "skillbox", backend_mode: "remote_swimmers_api" }],
     session: {
@@ -367,13 +367,37 @@ test("openSelectedNativeSession shows remote handoff instead of posting local na
   await controller.openSelectedNativeSession();
 
   assert.equal(calls.fetches.length, 0);
-  assert.match(state.nativeDesktop.error, /local native open cannot open this remote terminal/);
+  assert.match(state.nativeDesktop.error, /no SSH attach command is configured/);
   assert.match(state.nativeDesktop.error, /backend: remote Swimmers API/);
   assert.match(state.nativeDesktop.error, /Skillbox devbox \(skillbox\)/);
   assert.match(state.nativeDesktop.error, /remote session: sess_7/);
   assert.match(state.nativeDesktop.error, /remote cwd: \/srv\/skillbox\/repos\/swimmers/);
   assert.equal(el.nativeStatusResult.classList.contains("error"), true);
   assert.equal(calls.sync, 1);
+});
+
+test("openSelectedNativeSession posts remote sessions when attach command is configured", async () => {
+  const { calls, controller, el, state } = fixture({
+    responses: [{ session_id: "skillbox::sess_7", pane_id: "%51" }],
+    session: {
+      session_id: "skillbox::sess_7",
+      tmux_name: "[Skillbox] devbox-3",
+      environment: {
+        scope: "remote",
+        target_id: "skillbox",
+        remote_session_id: "sess_7",
+        remote_attach_command:
+          "exec ssh skillbox@skillbox-portfolio-devbox -t 'tmux attach-session -t =devbox-3'",
+      },
+    },
+  });
+
+  await controller.openSelectedNativeSession();
+
+  assert.equal(calls.fetches[0][0], "/v1/native/open");
+  assert.deepEqual(JSON.parse(calls.fetches[0][1].body), { session_id: "skillbox::sess_7" });
+  assert.equal(state.nativeDesktop.result, "Opened skillbox::sess_7 in native app (%51).");
+  assert.equal(el.nativeStatusResult.classList.contains("error"), false);
 });
 
 test("openSelectedNativeSession is a no-op without a selected session", async () => {

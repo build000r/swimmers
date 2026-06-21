@@ -197,4 +197,5 @@ fn is_allowed_osascript_script_arg_char(field: &'static str, ch: char) -> bool {
     ch.is_ascii_alphanumeric()
         || matches!(ch, '_' | '-' | '.' | '/' | ':' | ' ')
         || (osascript_arg_allows_shell_quotes(field) && matches!(ch, '\'' | '='))
+        || (osascript_arg_allows_shell_quotes(field) && ch == '@')
 }

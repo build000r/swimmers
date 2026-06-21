@@ -56,6 +56,8 @@ fn app_layout_shows_thought_rail_for_remote_attention_inbox() {
             kind: "swimmers_api".to_string(),
             base_url: None,
             auth_token_env: None,
+            ssh_alias: None,
+            remote_attach_command_template: None,
             bootstrap_hint: None,
             path_mappings: Vec::new(),
         },

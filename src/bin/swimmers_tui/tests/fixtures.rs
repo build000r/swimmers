@@ -302,6 +302,8 @@ fn dir_response_with_launch_targets(path: &str, names: &[(&str, bool)]) -> DirLi
             kind: "swimmers_api".to_string(),
             base_url: Some("http://100.105.106.104:3210".to_string()),
             auth_token_env: Some("SWIMMERS_JEREMY_AUTH_TOKEN".to_string()),
+            ssh_alias: None,
+            remote_attach_command_template: None,
             bootstrap_hint: None,
             path_mappings: vec![LaunchPathMapping {
                 local_prefix: TEST_REPOS_ROOT.to_string(),

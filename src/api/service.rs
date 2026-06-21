@@ -1555,6 +1555,19 @@ pub async fn open_native_session_for_host(
 ) -> Result<NativeDesktopOpenResponse, NativeOpenServiceError> {
     let app = *state.native_desktop_app.read().await;
     let ghostty_mode = *state.ghostty_open_mode.read().await;
+
+    // Remote namespaced ids (`target::session`) resolve their launch target
+    // before the platform/host gate, so an unknown or unmapped target returns a
+    // target-specific error (e.g. LAUNCH_TARGET_UNKNOWN) consistently across
+    // operating systems instead of being masked by the macOS-only platform gate
+    // on Linux/CI. Local ids keep the prior order: the platform/host gate runs
+    // before the live session lookup so non-loopback callers are rejected first.
+    let remote_summary = if remote_sessions::split_remote_session_id(session_id).is_some() {
+        Some(fetch_native_open_summary(state, session_id).await?)
+    } else {
+        None
+    };
+
     let status = native::support_for_host(host, app);
     if !status.supported {
         return Err(NativeOpenServiceError::Unsupported {
@@ -1562,13 +1575,41 @@ pub async fn open_native_session_for_host(
         });
     }
 
-    let summary = fetch_live_summary(state, session_id)
-        .await
-        .map_err(|error| NativeOpenServiceError::Internal(error.to_string()))?
-        .ok_or(NativeOpenServiceError::SessionNotFound)?;
+    let summary = match remote_summary {
+        Some(summary) => summary,
+        None => fetch_native_open_summary(state, session_id).await?,
+    };
 
     if summary.state == SessionState::Exited {
         return Err(NativeOpenServiceError::SessionExited);
+    }
+
+    if let Some(attach_command) = summary.environment.remote_attach_command.as_deref() {
+        let display_name = remote_native_display_name(&summary);
+        let tmux_name = remote_native_script_tmux_name(&summary);
+        return native::open_native_attach_command(
+            app,
+            ghostty_mode,
+            &summary.session_id,
+            &tmux_name,
+            &summary.cwd,
+            attach_command,
+            &display_name,
+        )
+        .await
+        .map_err(|error| NativeOpenServiceError::Internal(error.to_string()));
+    }
+
+    if matches!(
+        summary.environment.scope,
+        crate::types::SessionEnvironmentScope::Remote
+    ) {
+        return Err(NativeOpenServiceError::Unsupported {
+            reason: Some(
+                "remote native handoff needs a configured safe ssh_alias for this launch target"
+                    .to_string(),
+            ),
+        });
     }
 
     native::open_native_session(
@@ -1580,6 +1621,62 @@ pub async fn open_native_session_for_host(
     )
     .await
     .map_err(|error| NativeOpenServiceError::Internal(error.to_string()))
+}
+
+async fn fetch_native_open_summary(
+    state: &Arc<AppState>,
+    session_id: &str,
+) -> Result<SessionSummary, NativeOpenServiceError> {
+    if remote_sessions::split_remote_session_id(session_id).is_some() {
+        return remote_sessions::fetch_remote_session_summary(session_id)
+            .await
+            .map_err(|error| NativeOpenServiceError::Unsupported {
+                reason: Some(error.display_message("native open")),
+            })?
+            .ok_or(NativeOpenServiceError::SessionNotFound);
+    }
+
+    fetch_live_summary(state, session_id)
+        .await
+        .map_err(|error| NativeOpenServiceError::Internal(error.to_string()))?
+        .ok_or(NativeOpenServiceError::SessionNotFound)
+}
+
+fn remote_native_display_name(summary: &SessionSummary) -> String {
+    let target = summary.environment.target_label.trim();
+    let tmux_name = summary.tmux_name.trim();
+    match (target.is_empty(), tmux_name.is_empty()) {
+        (false, false) => format!("{target} {tmux_name}"),
+        (false, true) => target.to_string(),
+        (true, false) => tmux_name.to_string(),
+        (true, true) => "remote session".to_string(),
+    }
+}
+
+fn remote_native_script_tmux_name(summary: &SessionSummary) -> String {
+    let raw = summary
+        .environment
+        .remote_session_id
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or(summary.session_id.as_str());
+    let mut safe = raw
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-' | '.' | '/' | ':' | ' ') {
+                ch
+            } else {
+                '-'
+            }
+        })
+        .collect::<String>();
+    safe.truncate(96);
+    let safe = safe.trim_matches(['-', ' ']).trim();
+    if safe.is_empty() {
+        "remote-session".to_string()
+    } else {
+        safe.to_string()
+    }
 }
 
 #[cfg(test)]

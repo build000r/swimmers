@@ -188,6 +188,7 @@ export function normalizeSessionEnvironmentSummary(value) {
     display_host: stringValue(environment.display_host, remote ? "" : "local"),
     remote_session_id: optionalString(environment.remote_session_id),
     launch_source: optionalString(environment.launch_source),
+    remote_attach_command: optionalString(environment.remote_attach_command),
     local_cwd: optionalString(environment.local_cwd),
     remote_cwd: optionalString(environment.remote_cwd),
     canonical_cwd: optionalString(environment.canonical_cwd),
@@ -598,6 +599,8 @@ export function normalizeLaunchTargetSummary(value) {
     kind: stringValue(target.kind, "local"),
     base_url: optionalString(target.base_url),
     auth_token_env: optionalString(target.auth_token_env),
+    ssh_alias: optionalString(target.ssh_alias),
+    remote_attach_command_template: optionalString(target.remote_attach_command_template),
     bootstrap_hint: optionalString(target.bootstrap_hint),
     path_mappings: objectArray(target.path_mappings).map((mapping) => ({
       ...mapping,
