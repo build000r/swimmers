@@ -235,6 +235,17 @@ impl BridgeHealthState {
         inner.shutdown_reason.clone()
     }
 
+    /// Resolves with the self-fence reason once the thought bridge has been
+    /// unhealthy past `self_fence_after`.
+    ///
+    /// This signal is INTENTIONALLY ADVISORY (swimmers-n39m): it is surfaced in
+    /// the health snapshot (`shutdown_requested` / `shutdown_reason`) for
+    /// observability and is available for a future opt-in consumer, but it is
+    /// deliberately NOT wired to complete the server's shutdown — a thought
+    /// bridge fault must never take down session/terminal management. The
+    /// `bridge_self_fence_does_not_complete_server_shutdown_signal` test in
+    /// startup.rs enforces that contract; treat this as a designed seam, not
+    /// dead machinery to remove.
     pub async fn wait_for_shutdown_request(&self) -> String {
         let mut rx = self.shutdown_tx.subscribe();
         loop {
