@@ -341,3 +341,56 @@ fn build_flat_rows_stops_before_older_entry_that_cannot_fit() {
         vec!["new", "new"]
     );
 }
+
+fn grouped_test_row(line: &str) -> ThoughtRowLayout {
+    ThoughtRowLayout {
+        session_rect: None,
+        text_rect: None,
+        mermaid_rect: None,
+        mermaid_label: None,
+        launch_rect: None,
+        commit_rect: None,
+        send_rect: None,
+        plan_rect: None,
+        plan_schema_path: None,
+        plan_slug: None,
+        group_session_ids: None,
+        session_id: String::new(),
+        cwd: String::new(),
+        label: String::new(),
+        tmux_name: String::new(),
+        line: line.to_string(),
+        color: Color::White,
+    }
+}
+
+#[test]
+fn window_grouped_rows_never_orphans_entries_from_their_header() {
+    let h = |n: &str| grouped_test_row(&format!("v group {n}"));
+    let e = |n: &str| grouped_test_row(&format!("  entry {n}"));
+    let lines = |rows: &[ThoughtRowLayout]| rows.iter().map(|r| r.line.clone()).collect::<Vec<_>>();
+
+    // Window naively starts mid-group A; A's header is prepended so its entries
+    // are not orphaned, and group B's header is already in view.
+    let windowed = window_grouped_rows(
+        vec![h("A"), e("a1"), e("a2"), e("a3"), h("B"), e("b1")],
+        &[0, 4],
+        3,
+    );
+    assert_eq!(
+        lines(&windowed),
+        vec!["v group A", "v group B", "  entry b1"]
+    );
+
+    // A single group whose entries alone exceed capacity still keeps its header
+    // (a naive tail-chop or "advance to next header" would orphan or empty it).
+    let windowed = window_grouped_rows(vec![h("A"), e("a1"), e("a2"), e("a3"), e("a4")], &[0], 2);
+    assert_eq!(lines(&windowed), vec!["v group A", "  entry a4"]);
+
+    // Window that already starts on a header is returned from that header.
+    let windowed = window_grouped_rows(vec![h("A"), e("a1"), h("B"), e("b1")], &[0, 2], 2);
+    assert_eq!(lines(&windowed), vec!["v group B", "  entry b1"]);
+
+    // No overflow: every row is kept.
+    assert_eq!(window_grouped_rows(vec![h("A"), e("a1")], &[0], 5).len(), 2);
+}

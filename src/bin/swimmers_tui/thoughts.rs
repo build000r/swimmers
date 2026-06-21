@@ -2657,15 +2657,48 @@ fn build_grouped_rows<C: TuiApi>(
 
     let groups = build_thought_groups(entries, group_by);
     let mut rows = Vec::new();
+    let mut header_indices = Vec::new();
     for group in &groups {
+        header_indices.push(rows.len());
         rows.push(group_header_row(app, group, group_by, thought_content));
         for entry in &group.entries {
             rows.extend(build_rows_for_panel_entry(entry, thought_content));
         }
     }
 
-    let start = rows.len().saturating_sub(entry_capacity);
-    rows[start..].to_vec()
+    window_grouped_rows(rows, &header_indices, entry_capacity)
+}
+
+/// Keep the newest `entry_capacity` rows without orphaning a group's entries
+/// from its header. A blind tail-chop can begin the visible window mid-group,
+/// dropping the group's header while keeping its entry rows (orphaned, unlabeled
+/// rows at the top of the panel). When the window would start after a header,
+/// prepend that group's header and drop the oldest in-window entry row to stay
+/// within capacity -- this also covers a single group whose entries alone exceed
+/// the capacity, where simply advancing to the next header would show nothing.
+fn window_grouped_rows(
+    rows: Vec<ThoughtRowLayout>,
+    header_indices: &[usize],
+    entry_capacity: usize,
+) -> Vec<ThoughtRowLayout> {
+    if rows.len() <= entry_capacity {
+        return rows;
+    }
+    let naive_start = rows.len() - entry_capacity;
+    let group_header_at_or_before = header_indices
+        .iter()
+        .copied()
+        .rev()
+        .find(|&idx| idx <= naive_start)
+        .unwrap_or(0);
+    if group_header_at_or_before < naive_start {
+        let mut windowed = Vec::with_capacity(entry_capacity);
+        windowed.push(rows[group_header_at_or_before].clone());
+        windowed.extend_from_slice(&rows[naive_start + 1..]);
+        windowed
+    } else {
+        rows[naive_start..].to_vec()
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
