@@ -228,6 +228,11 @@ export function createThoughtConfigSheetController(runtime = {}) {
     if (!nextDraft) {
       return;
     }
+    // Re-entrancy guard: a second save while a PUT is in flight would resend the
+    // same If-Match version and could trip a spurious version conflict.
+    if (state.thoughtConfig.loading) {
+      return;
+    }
 
     state.thoughtConfig.loading = true;
     setResult("Saving thought config...");

@@ -255,6 +255,21 @@ test("save puts draft config, refreshes sessions, and preserves save result stat
   assert.equal(state.thoughtConfig.loading, false);
 });
 
+test("save ignores a re-entrant call while a save is already in flight", async () => {
+  const { calls, controller, el, state } = fixture({ responses: [{ version: 6 }] });
+  state.thoughtConfig.config = { enabled: true, backend: "grok", model: "old" };
+  state.thoughtConfig.version = 5;
+  el.thoughtConfigEnabled.checked = false;
+  el.thoughtConfigBackend.value = "grok";
+  el.thoughtConfigModel.value = "grok-fast";
+  state.thoughtConfig.loading = true; // a save is already in flight
+
+  await controller.save();
+
+  // The re-entrancy guard must skip the duplicate PUT.
+  assert.equal(calls.fetches.length, 0);
+});
+
 test("save omits If-Match when no version is known", async () => {
   const { calls, controller, el, state } = fixture({ responses: [{ version: 1 }] });
   state.thoughtConfig.config = { enabled: true, backend: "grok", model: "old" };
