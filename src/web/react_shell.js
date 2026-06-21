@@ -49,6 +49,15 @@ export function SwimmersRootShell({ boot }) {
     },
     h(TerminalSurface),
     createTrogdorAtlasIslandElement(h),
+    // Must mirror the SSR shell's last child (mod.rs): the speed-reader's
+    // aria-live region. If the React tree omits it, hydration drops the node and
+    // screen-reader announcements silently die on the React-shell path.
+    h("div", {
+      className: "trogdor-reader-announce",
+      id: "trogdor-reader-announce",
+      "aria-live": "polite",
+      "aria-atomic": "true",
+    }),
   );
 }
 

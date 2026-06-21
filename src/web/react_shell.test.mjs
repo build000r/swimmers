@@ -83,6 +83,15 @@ test("React shell keeps terminal and Trogdor container identity across observabl
   assert.deepEqual(resolveStableShellContainers(documentRef), before);
 });
 
+test("React shell renders the speed-reader aria-live region so SSR hydration keeps it", () => {
+  const shell = SwimmersRootShell({ boot: {} });
+  const children = [].concat(shell.props.children);
+  const announce = children.find((child) => child?.props?.id === "trogdor-reader-announce");
+  assert.ok(announce, "shell must render #trogdor-reader-announce to match the SSR shell");
+  assert.equal(announce.props["aria-live"], "polite");
+  assert.equal(announce.props["aria-atomic"], "true");
+});
+
 test("React shell identity guard catches synchronous container replacement", () => {
   const { documentRef, replace } = fakeDocument();
   const handle = mountSwimmersRootShell({

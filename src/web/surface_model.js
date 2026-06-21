@@ -316,7 +316,7 @@ function addFleetBucket(buckets, kind, key, label, session) {
     advisory_count: 0,
   };
   bucket.count += 1;
-  if (session.isStale || session.transportLabel !== "healthy") bucket.degraded_count += 1;
+  if (session.isStale || session.transportKey !== "healthy") bucket.degraded_count += 1;
   if (session.isStale) bucket.stale_count += 1;
   if (session.readinessKey === "needs_attention") bucket.attention_count += 1;
   if (session.commitCandidate) bucket.commit_ready_count += 1;
