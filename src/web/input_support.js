@@ -205,28 +205,18 @@ export function mobileKeyboardKeydownPlan(context = {}) {
   };
 }
 
-function mobileKeyboardInputKeyEvent(key) {
-  return {
-    kind: "key",
-    phase: "down",
-    key,
-    code: key,
-    mods: 0,
-    repeat: false,
-  };
-}
-
 export function mobileKeyboardInputPlan(event, context = {}) {
   if (context.readOnly || !context.hasCurrentSession) {
     return { type: "clear" };
   }
   const inputType = String(event?.inputType || "");
   const text = typeof event?.data === "string" ? event.data : String(context.proxyValue ?? "");
-  if (inputType === "deleteContentBackward") {
-    return { type: "forward_event", event: mobileKeyboardInputKeyEvent("Backspace") };
-  }
-  if (inputType === "insertLineBreak") {
-    return { type: "forward_event", event: mobileKeyboardInputKeyEvent("Enter") };
+  // Enter/Backspace are owned exclusively by the keydown path
+  // (mobileKeyboardKeyPlan -> "forward_key"). Forwarding them here too would
+  // deliver the keystroke twice on browsers that fire both a named keydown and
+  // the matching input event, so treat these control input types as no-ops.
+  if (inputType === "deleteContentBackward" || inputType === "insertLineBreak") {
+    return { type: "clear" };
   }
   return { type: "send_text", text };
 }
@@ -886,6 +876,43 @@ export function terminalInputDockPlan(context = {}) {
   };
 }
 
+// The mobile control strip and workbench offset from --terminal-input-dock-height.
+// Keep the historical constant as a floor so wrapping echo can only grow the dock,
+// never shrink the offsets below the original layout.
+export const TERMINAL_INPUT_DOCK_FLOOR_PX = 196;
+
+// Pure writer for the dock-height custom property. The measured height is clamped
+// to the floor and rounded up to a whole pixel, then written via the injected
+// `setProperty` (so it is node-testable with a fake style target). Returns the
+// CSS value that was (or would be) written.
+export function writeTerminalInputDockHeight(measuredHeight, options = {}) {
+  const { setProperty, floorPx = TERMINAL_INPUT_DOCK_FLOOR_PX } = options;
+  const numeric = Number.isFinite(measuredHeight) ? measuredHeight : 0;
+  const height = Math.max(floorPx, Math.ceil(numeric));
+  const value = `${height}px`;
+  if (typeof setProperty === "function") {
+    setProperty("--terminal-input-dock-height", value);
+  }
+  return value;
+}
+
+// Body class that swaps the mobile workbench from its 40vh clamp to a near
+// full-height sheet. Reuses the same body-class plumbing pattern as
+// `terminal-workbench-open`.
+export const TERMINAL_WORKBENCH_EXPANDED_CLASS = "terminal-workbench-expanded";
+
+export function nextTerminalWorkbenchExpanded(current) {
+  return !current;
+}
+
+// Node-testable writer: toggles the expanded body class on an injected body-like
+// object (anything exposing `classList.toggle`) and returns the applied state.
+export function setTerminalWorkbenchExpandedClass(body, expanded) {
+  const next = Boolean(expanded);
+  body?.classList?.toggle?.(TERMINAL_WORKBENCH_EXPANDED_CLASS, next);
+  return next;
+}
+
 export function terminalZoomPercentLabel(zoom) {
   return `${Math.round(zoom * 100)}%`;
 }
@@ -1163,6 +1190,16 @@ export function terminalStageFocusExecutorPlan(plan = {}) {
     return { type: "ignore", forwardEvent: false, event: null };
   }
   return { type: "forward_event", forwardEvent: true, event: plan.event };
+}
+
+// True while an IME (CJK, accented, etc.) is mid-composition. Browsers fire
+// intermediate `keydown` events during composition — flagged via `isComposing`
+// or the legacy `keyCode === 229` sentinel — that must NOT be forwarded into the
+// terminal, or they corrupt the eventual committed text. The committed value
+// arrives through the `input`/`compositionend` path, which this guard leaves
+// untouched.
+export function isImeCompositionKeydown(event) {
+  return Boolean(event) && (event.isComposing === true || event.keyCode === 229);
 }
 
 export function terminalStageKeydownPlan(context = {}) {

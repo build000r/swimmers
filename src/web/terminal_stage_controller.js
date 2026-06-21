@@ -1,5 +1,6 @@
 import { surfaceActionAt, surfaceConsumesPointer } from "./rendered_surface.js";
 import {
+  isImeCompositionKeydown,
   shouldIgnoreSyntheticClick,
   terminalStageClickPlan,
   terminalStageKeydownPlan,
@@ -158,6 +159,11 @@ export function createTerminalStageController(runtime = {}) {
   }
 
   function handleTerminalStageKeydown(event) {
+    // Bail on intermediate IME composition keydowns so CJK/accented input is not
+    // corrupted; the committed text still arrives via the input event.
+    if (isImeCompositionKeydown(event)) {
+      return;
+    }
     const globalShortcutHandled = handleGlobalShortcut(event);
     const shouldCaptureTerminalKey = !globalShortcutHandled && shouldCaptureKey(event);
     const plan = terminalStageKeydownPlan({ globalShortcutHandled, shouldCaptureKey: shouldCaptureTerminalKey, beginsResponse: shouldCaptureTerminalKey && keyBeginsTrogdorResponse(event) });

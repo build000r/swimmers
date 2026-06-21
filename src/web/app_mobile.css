@@ -74,6 +74,9 @@
   .terminal-input-dock {
     grid-template-columns: auto minmax(0, 1fr);
     padding: 9px 10px 11px;
+    /* Floor matches --terminal-input-dock-height's default so wrapping echo can
+       only grow the dock (and the measured-height offsets), never collapse it. */
+    min-height: var(--terminal-input-dock-height, 196px);
   }
 
   .terminal-key-strip {
@@ -126,6 +129,17 @@
     width: auto;
     max-height: 40vh;
     padding: 10px;
+  }
+
+  /* Expanded sheet: swap the 40vh clamp for a near full-height surface so the
+     flagship Activity/Diffs/Logs/Artifacts/Skills panels are usable on mobile.
+     Uses dvh so the height tracks the on-screen keyboard, and subtracts the
+     measured dock height plus the workbench's bottom offset and a small margin.
+     NOTE: exact target height and affordance placement need design + device
+     review. */
+  body.terminal-workbench-expanded .terminal-workbench {
+    top: 8px;
+    max-height: calc(100dvh - var(--terminal-input-dock-height) - 16px);
   }
 
   .workbench-header {

@@ -6,6 +6,9 @@ import {
   surfaceActionDispatchContextPlan, surfaceActionDispatchPlan, surfaceActionExecutionContextPlan, surfaceActionExecutionPlan, surfaceActionFocusTerminalExecutionPlan, surfaceActionTrogdorReaderExecutionPlan,
   terminalDestroyStatePatch,
   terminalPaintProbeSchedulePlan, terminalPaintVerificationPlan, terminalPresentationPlan, terminalToolsAvailabilityPlan,
+  writeTerminalInputDockHeight,
+  nextTerminalWorkbenchExpanded,
+  setTerminalWorkbenchExpandedClass,
 } from "./input_support.js";
 import { createAppEventHandlers } from "./app_event_handlers.js";
 import { createTerminalStageController } from "./terminal_stage_controller.js";
@@ -188,6 +191,7 @@ const state = {
   inputSequence: 0,
   pendingInputMessages: new Map(),
   terminalWorkbenchOpen: true,
+  terminalWorkbenchExpanded: false,
   agentContextSessionId: null,
   agentContextLoading: false,
   agentContextPayload: null,
@@ -2285,6 +2289,68 @@ async function mountMermaidSheetReactIsland() {
   });
 }
 
+// Drive --terminal-input-dock-height from the dock's measured height so the
+// mobile control strip / workbench (which offset from that custom property) track
+// the dock as it grows when the input echo wraps, instead of overlapping it.
+function installTerminalInputDockResizeObserver() {
+  const dock = el.terminalInputDock;
+  const ResizeObserverCtor = globalThis.ResizeObserver;
+  if (!dock || typeof ResizeObserverCtor !== "function") {
+    return null;
+  }
+  const writeHeight = () => {
+    writeTerminalInputDockHeight(dock.getBoundingClientRect?.().height, {
+      setProperty: (name, value) => document.documentElement.style.setProperty(name, value),
+    });
+  };
+  const observer = new ResizeObserverCtor(writeHeight);
+  observer.observe(dock);
+  writeHeight();
+  return observer;
+}
+
+// Apply the mobile "expand workbench" body class from the current state. Reuses
+// the same body-class plumbing pattern as terminal-workbench-open.
+function syncTerminalWorkbenchExpanded() {
+  setTerminalWorkbenchExpandedClass(document.body, state.terminalWorkbenchExpanded);
+  if (el.terminalWorkbenchExpandToggle) {
+    el.terminalWorkbenchExpandToggle.setAttribute(
+      "aria-pressed",
+      state.terminalWorkbenchExpanded ? "true" : "false",
+    );
+    el.terminalWorkbenchExpandToggle.textContent = state.terminalWorkbenchExpanded ? "Collapse" : "Expand";
+  }
+}
+
+function setTerminalWorkbenchExpanded(expanded) {
+  state.terminalWorkbenchExpanded = Boolean(expanded);
+  syncTerminalWorkbenchExpanded();
+}
+
+// Inject the expand affordance into the workbench header (the server-rendered
+// HTML lives in Rust, so the button is created here). Placement/visuals are a
+// mobile affordance pending design + device review.
+function installTerminalWorkbenchExpandToggle() {
+  const workbench = el.terminalWorkbench;
+  if (!workbench || el.terminalWorkbenchExpandToggle) {
+    return;
+  }
+  const header = workbench.querySelector(".workbench-header") || workbench;
+  const button = document.createElement("button");
+  button.id = "terminal-workbench-expand";
+  button.type = "button";
+  button.className = "workbench-expand-toggle";
+  button.title = "Expand workbench to a full-height sheet";
+  button.setAttribute("aria-pressed", "false");
+  button.textContent = "Expand";
+  button.addEventListener("click", () => {
+    setTerminalWorkbenchExpanded(nextTerminalWorkbenchExpanded(state.terminalWorkbenchExpanded));
+  });
+  header.appendChild(button);
+  el.terminalWorkbenchExpandToggle = button;
+  syncTerminalWorkbenchExpanded();
+}
+
 async function init() {
   reactShell = await mountReactRootShell();
   commandPaletteIsland = await mountCommandPaletteReactIsland();
@@ -2299,6 +2365,8 @@ async function init() {
   mermaidSheetIsland = await mountMermaidSheetReactIsland();
   loadInitialState();
   bindEvents();
+  installTerminalInputDockResizeObserver();
+  installTerminalWorkbenchExpandToggle();
   setUtilityStatus(defaultUtilityLabel(), true);
   syncWriteAccess();
   setLoadingState(boot.franken_term_available, boot.franken_term_available ? "Loading rendered control surface..." : "Snapshot fallback mode");

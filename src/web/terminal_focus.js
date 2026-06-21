@@ -1,4 +1,5 @@
 import {
+  isImeCompositionKeydown,
   terminalFallbackFocusPlan,
   terminalFallbackKeydownPlan,
   terminalFallbackPastePlan,
@@ -78,6 +79,11 @@ export function createTerminalFocusController(runtime = {}) {
 
   function shouldCaptureKey(event) {
     if (!currentSession() || state.readOnly || state.activeSheet) {
+      return false;
+    }
+    // Never capture intermediate IME composition keydowns — the committed text
+    // is delivered through the input/compositionend path instead.
+    if (isImeCompositionKeydown(event)) {
       return false;
     }
     if (event.metaKey) {

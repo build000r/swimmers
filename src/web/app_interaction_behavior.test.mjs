@@ -733,16 +733,19 @@ test("mobile keyboard input handler preserves clears, control events, and text s
   assert.equal(sent.length, 0);
 
   web.state.readOnly = false;
+  // Enter/Backspace are owned exclusively by the keydown channel now, so the
+  // matching input-event control types are no-ops here. This prevents the PTY
+  // from receiving the keystroke twice on browsers that fire both a named
+  // keydown and the corresponding input event.
+  const sentBeforeControl = sent.length;
   web.el.mobileKeyboardProxy.value = "delete sentinel";
-  assert.equal(web.handleMobileKeyboardProxyInput({ inputType: "deleteContentBackward", data: null }), true);
+  assert.equal(web.handleMobileKeyboardProxyInput({ inputType: "deleteContentBackward", data: null }), false);
   assert.equal(web.el.mobileKeyboardProxy.value, "");
-  assert.equal(sent.at(-1).type, "input_text");
-  assert.equal(sent.at(-1).data, "\x7f");
+  assert.equal(sent.length, sentBeforeControl);
 
   web.el.mobileKeyboardProxy.value = "newline sentinel";
-  assert.equal(web.handleMobileKeyboardProxyInput({ inputType: "insertLineBreak", data: null }), true);
-  assert.equal(sent.at(-1).type, "input_text");
-  assert.equal(sent.at(-1).data, "\r");
+  assert.equal(web.handleMobileKeyboardProxyInput({ inputType: "insertLineBreak", data: null }), false);
+  assert.equal(sent.length, sentBeforeControl);
 
   web.el.mobileKeyboardProxy.value = "fallback";
   assert.equal(web.handleMobileKeyboardProxyInput({ inputType: "insertText", data: "typed" }), true);

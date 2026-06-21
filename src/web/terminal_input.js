@@ -1,5 +1,6 @@
 import {
   inputAckActionPlan,
+  isImeCompositionKeydown,
   terminalComposerControlAction,
 } from "./input_support.js";
 import {
@@ -153,6 +154,11 @@ export function createTerminalInputController(runtime) {
   }
 
   function forwardTerminalKeyDown(event) {
+    // Drop intermediate IME composition keydowns; the committed text arrives via
+    // the input/compositionend path so this keeps CJK/accented input intact.
+    if (isImeCompositionKeydown(event)) {
+      return;
+    }
     forwardTerminalEvent({
       kind: "key",
       phase: "down",

@@ -9,6 +9,7 @@ import {
   nextAttentionSessionPlan,
   initialStateBootPlan,
   inputAckActionPlan,
+  isImeCompositionKeydown,
   lifecycleDeletedSessionPatchPlan,
   mobileKeyboardInputExecutorPlan,
   mobileKeyboardInputPlan,
@@ -45,6 +46,11 @@ import {
   terminalZoomPercentLabel,
   terminalZoomPersistencePlan,
   terminalToolsAvailabilityPlan,
+  writeTerminalInputDockHeight,
+  TERMINAL_INPUT_DOCK_FLOOR_PX,
+  nextTerminalWorkbenchExpanded,
+  setTerminalWorkbenchExpandedClass,
+  TERMINAL_WORKBENCH_EXPANDED_CLASS,
 } from "./input_support.js";
 
 test("eventClientPoint uses direct pointer coordinates when present", () => {
@@ -545,34 +551,16 @@ test("mobileKeyboardInputPlan preserves clear, control, and inserted text decisi
     { inputType: "insertText", data: "x" },
     { readOnly: false, hasCurrentSession: false, proxyValue: "ignored" },
   ), { type: "clear" });
+  // Enter/Backspace are owned by the keydown path, so the input event is a
+  // no-op for the corresponding control input types (no duplicate keystroke).
   assert.deepEqual(mobileKeyboardInputPlan(
     { inputType: "deleteContentBackward" },
     { hasCurrentSession: true },
-  ), {
-    type: "forward_event",
-    event: {
-      kind: "key",
-      phase: "down",
-      key: "Backspace",
-      code: "Backspace",
-      mods: 0,
-      repeat: false,
-    },
-  });
+  ), { type: "clear" });
   assert.deepEqual(mobileKeyboardInputPlan(
     { inputType: "insertLineBreak" },
     { hasCurrentSession: true },
-  ), {
-    type: "forward_event",
-    event: {
-      kind: "key",
-      phase: "down",
-      key: "Enter",
-      code: "Enter",
-      mods: 0,
-      repeat: false,
-    },
-  });
+  ), { type: "clear" });
   assert.deepEqual(mobileKeyboardInputPlan(
     { inputType: "insertText", data: "typed" },
     { hasCurrentSession: true, proxyValue: "fallback" },
@@ -610,6 +598,29 @@ test("mobileKeyboardInputExecutorPlan preserves clear, forward, send, and unknow
     text: "",
   });
   assert.deepEqual(mobileKeyboardInputExecutorPlan({ type: "unknown", text: "ignored" }), ignored);
+});
+
+test("Enter/Backspace are forwarded exactly once across the keydown + input channels", () => {
+  // A soft keyboard that fires BOTH a named keydown and the matching input event
+  // must not deliver Enter/Backspace twice. The keydown channel owns the
+  // keystroke; the input channel is a no-op for the control input types.
+  for (const [key, inputType] of [["Enter", "insertLineBreak"], ["Backspace", "deleteContentBackward"]]) {
+    const keydown = mobileKeyboardKeydownPlan({
+      globalShortcutHandled: false,
+      keyPlan: mobileKeyboardKeyPlan({ key }, { hasCurrentSession: true }),
+      beginsResponse: false,
+    });
+    const input = mobileKeyboardInputExecutorPlan(
+      mobileKeyboardInputPlan({ inputType }, { hasCurrentSession: true }),
+    );
+
+    // Exactly one channel forwards the key.
+    assert.equal(keydown.forwardKey, true);
+    assert.equal(input.forwardEvent, null);
+    assert.equal(input.sendText, false);
+    const forwardCount = (keydown.forwardKey ? 1 : 0) + (input.forwardEvent ? 1 : 0) + (input.sendText ? 1 : 0);
+    assert.equal(forwardCount, 1);
+  }
 });
 
 test("terminalComposerControlAction preserves modifier, selection, and empty-input gates", () => {
@@ -1974,4 +1985,82 @@ test("nextAttentionSessionPlan cycles through attention sessions and wraps", () 
   // None needing attention -> no-op.
   assert.deepEqual(nextAttentionSessionPlan(sessions, "a", () => false), { type: "none" });
   assert.deepEqual(nextAttentionSessionPlan([], null, needs), { type: "none" });
+});
+
+test("terminal workbench expanded toggle sets and clears the body class", () => {
+  const calls = [];
+  const body = {
+    has: false,
+    classList: {
+      toggle(name, force) {
+        calls.push([name, force]);
+        this._owner.has = Boolean(force);
+        return Boolean(force);
+      },
+    },
+  };
+  body.classList._owner = body;
+
+  // Toggling flips the state...
+  let expanded = false;
+  expanded = nextTerminalWorkbenchExpanded(expanded);
+  assert.equal(expanded, true);
+  assert.equal(setTerminalWorkbenchExpandedClass(body, expanded), true);
+  assert.equal(body.has, true);
+
+  // ...and toggling again clears it.
+  expanded = nextTerminalWorkbenchExpanded(expanded);
+  assert.equal(expanded, false);
+  assert.equal(setTerminalWorkbenchExpandedClass(body, expanded), false);
+  assert.equal(body.has, false);
+
+  assert.deepEqual(calls, [
+    [TERMINAL_WORKBENCH_EXPANDED_CLASS, true],
+    [TERMINAL_WORKBENCH_EXPANDED_CLASS, false],
+  ]);
+
+  // Tolerates a missing body / classList without throwing.
+  assert.equal(setTerminalWorkbenchExpandedClass(null, true), true);
+  assert.equal(setTerminalWorkbenchExpandedClass({}, false), false);
+});
+
+test("writeTerminalInputDockHeight clamps to the floor and writes the custom property", () => {
+  const writes = [];
+  const setProperty = (name, value) => writes.push([name, value]);
+
+  // A measured height above the floor drives the property to the measured value.
+  assert.equal(
+    writeTerminalInputDockHeight(248, { setProperty }),
+    "248px",
+  );
+  // Below the floor (or a wrapping that would shrink it) is clamped up to the floor.
+  assert.equal(writeTerminalInputDockHeight(120, { setProperty }), `${TERMINAL_INPUT_DOCK_FLOOR_PX}px`);
+  // Sub-pixel measurements round up so the offset never lands a fraction short.
+  assert.equal(writeTerminalInputDockHeight(248.2, { setProperty }), "249px");
+  // Non-finite measurements fall back to the floor instead of producing NaNpx.
+  assert.equal(writeTerminalInputDockHeight(undefined, { setProperty }), `${TERMINAL_INPUT_DOCK_FLOOR_PX}px`);
+
+  assert.deepEqual(writes, [
+    ["--terminal-input-dock-height", "248px"],
+    ["--terminal-input-dock-height", `${TERMINAL_INPUT_DOCK_FLOOR_PX}px`],
+    ["--terminal-input-dock-height", "249px"],
+    ["--terminal-input-dock-height", `${TERMINAL_INPUT_DOCK_FLOOR_PX}px`],
+  ]);
+
+  // Without a setter it stays pure and just returns the computed value.
+  assert.equal(writeTerminalInputDockHeight(300), "300px");
+});
+
+test("isImeCompositionKeydown flags intermediate composition keydowns only", () => {
+  // Intermediate IME composition keydowns must be detected so they are NOT
+  // forwarded into the terminal (they would corrupt CJK/accented input).
+  assert.equal(isImeCompositionKeydown({ key: "a", isComposing: true }), true);
+  assert.equal(isImeCompositionKeydown({ key: "Process", keyCode: 229 }), true);
+  assert.equal(isImeCompositionKeydown({ key: "a", isComposing: true, keyCode: 229 }), true);
+  // Ordinary keydowns (committed text / hardware keys) still pass through.
+  assert.equal(isImeCompositionKeydown({ key: "a", isComposing: false, keyCode: 65 }), false);
+  assert.equal(isImeCompositionKeydown({ key: "Enter" }), false);
+  assert.equal(isImeCompositionKeydown({}), false);
+  assert.equal(isImeCompositionKeydown(null), false);
+  assert.equal(isImeCompositionKeydown(undefined), false);
 });
