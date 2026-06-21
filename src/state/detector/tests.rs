@@ -92,6 +92,65 @@ fn liveness_confirmation_upgrades_locally_inferred_busy_evidence() {
 }
 
 #[test]
+fn noop_redetection_preserves_evidence_without_restamping() {
+    // Regression (swimmers-lzll): re-detecting the identical state + cause +
+    // command must NOT rebuild StateEvidence. Rebuilding re-stamps observed_at,
+    // which then compares unequal and makes the actor spuriously re-broadcast
+    // session_state on every ~2s liveness/redetection tick for a quiet session.
+    let mut d = StateDetector::new();
+    d.set_state(
+        SessionState::Busy,
+        Some(None),
+        std::time::Instant::now(),
+        "fallback_non_prompt_output",
+    );
+    let first = d.state_evidence();
+
+    // Identical re-detection: no-op, evidence (incl. observed_at) preserved.
+    d.set_state(
+        SessionState::Busy,
+        Some(None),
+        std::time::Instant::now(),
+        "fallback_non_prompt_output",
+    );
+    assert_eq!(
+        first,
+        d.state_evidence(),
+        "no-op re-detection must not re-stamp evidence"
+    );
+
+    // A different cause at the same state still re-stamps (legit upgrade).
+    d.set_state(
+        SessionState::Busy,
+        None,
+        std::time::Instant::now(),
+        "liveness_has_children",
+    );
+    assert_eq!(d.state_evidence().cause, "liveness_has_children");
+
+    // A new command at the same state + cause is NOT a no-op: the command must
+    // still apply (and the evidence rebuild lets the change broadcast).
+    d.set_state(
+        SessionState::Busy,
+        Some(Some("cmd-a".to_string())),
+        std::time::Instant::now(),
+        "osc133_command",
+    );
+    assert_eq!(d.get_state().1.as_deref(), Some("cmd-a"));
+    d.set_state(
+        SessionState::Busy,
+        Some(Some("cmd-b".to_string())),
+        std::time::Instant::now(),
+        "osc133_command",
+    );
+    assert_eq!(
+        d.get_state().1.as_deref(),
+        Some("cmd-b"),
+        "a changed command at the same state+cause must still apply"
+    );
+}
+
+#[test]
 fn consume_private_string_byte_handles_escape_and_st_terminators() {
     let mut esc_pending = false;
     let mut consumed = 0;

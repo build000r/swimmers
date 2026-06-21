@@ -925,8 +925,23 @@ impl StateDetector {
         cause: &'static str,
     ) {
         let prev = self.state;
+        // A re-detection that changes neither the state, the cause, nor the
+        // command is a no-op: rebuilding StateEvidence would only re-stamp a
+        // fresh observed_at, which then compares unequal and spuriously
+        // re-broadcasts session_state -- e.g. the ~2s liveness re-confirmation
+        // of a quiet busy session (swimmers-lzll). Preserve the existing
+        // evidence in that case so no event is emitted. A real state change, a
+        // different cause, or a new command still rebuilds and re-stamps it.
+        let command_unchanged = match &command_update {
+            None => true,
+            Some(cmd) => cmd == &self.current_command,
+        };
+        let is_noop_redetection =
+            new_state == prev && self.state_evidence.cause == cause && command_unchanged;
         self.state = new_state;
-        self.state_evidence = StateEvidence::new(cause);
+        if !is_noop_redetection {
+            self.state_evidence = StateEvidence::new(cause);
+        }
         self.apply_command_update(command_update);
         self.update_attention_timer_for_transition(prev, new_state);
         self.emit_state_transition(prev, new_state, cause);
