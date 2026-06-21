@@ -211,8 +211,9 @@ impl SessionSupervisor {
         // at startup after an overnight idle should wake up already drowsy,
         // not reset to Active before transcript sync has a chance to mark it
         // as waiting on the user).
-        let last_activity_override = self.persisted_last_activity(&session_id).await;
-        let batch = self.persisted_batch(&session_id).await;
+        let persisted = self.persisted_session(&session_id).await;
+        let last_activity_override = persisted.as_ref().map(|ps| ps.last_activity_at);
+        let batch = persisted.and_then(|ps| ps.batch);
 
         match crate::session::actor::SessionActor::spawn(
             session_id.clone(),
@@ -646,16 +647,26 @@ impl SessionSupervisor {
             self.bump_id_counter_from_session_id(&session_id);
         }
 
+        // Read the persisted record once, and only when a field actually falls
+        // back to it, rather than re-loading the registry per field.
+        let persisted = if stale_seed
+            .as_ref()
+            .is_none_or(|summary| summary.batch.is_none())
+        {
+            self.persisted_session(&session_id).await
+        } else {
+            None
+        };
         let last_activity_override = match stale_seed.as_ref() {
             Some(summary) => Some(summary.last_activity_at),
-            None => self.persisted_last_activity(&session_id).await,
+            None => persisted.as_ref().map(|ps| ps.last_activity_at),
         };
         let batch = match stale_seed
             .as_ref()
             .and_then(|summary| summary.batch.clone())
         {
             Some(batch) => Some(batch),
-            None => self.persisted_batch(&session_id).await,
+            None => persisted.and_then(|ps| ps.batch),
         };
 
         Ok(AdoptSessionPlan {

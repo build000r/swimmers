@@ -1090,10 +1090,11 @@ impl SessionSupervisor {
     // Persistence
     // -----------------------------------------------------------------------
 
-    /// Look up the persisted `last_activity_at` for a session id so a
-    /// discovered/adopted actor can resume in the correct rest state instead
-    /// of resetting its fatigue ladder to "Active" on every restart.
-    async fn persisted_last_activity(&self, session_id: &str) -> Option<chrono::DateTime<Utc>> {
+    /// Load the persisted record for a session id with a single registry read,
+    /// so a discovered/adopted actor can resume both its `last_activity_at`
+    /// rest state and its batch membership without re-reading and
+    /// re-deserializing the whole registry once per field.
+    async fn persisted_session(&self, session_id: &str) -> Option<PersistedSession> {
         let store = {
             let guard = self.persistence.read().await;
             guard.as_ref().cloned()?
@@ -1103,20 +1104,6 @@ impl SessionSupervisor {
             .await
             .into_iter()
             .find(|ps| ps.session_id == session_id)
-            .map(|ps| ps.last_activity_at)
-    }
-
-    async fn persisted_batch(&self, session_id: &str) -> Option<SessionBatchMembership> {
-        let store = {
-            let guard = self.persistence.read().await;
-            guard.as_ref().cloned()?
-        };
-        store
-            .load_sessions()
-            .await
-            .into_iter()
-            .find(|ps| ps.session_id == session_id)
-            .and_then(|ps| ps.batch)
     }
 
     /// Persist the current session registry to disk.
