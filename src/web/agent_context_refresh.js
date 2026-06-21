@@ -8,6 +8,12 @@ export function agentContextRefreshStartPlan(context = {}) {
   if (!context.hasSession || context.trogdorAtlasOpen) {
     return { type: "reset_and_render" };
   }
+  // The agent-context payload feeds only the workbench panel, so skip background
+  // refreshes while it is collapsed (the default on mobile). A forced refresh
+  // (the panel just opened) always loads.
+  if (context.workbenchClosed && !context.force) {
+    return { type: "ignore" };
+  }
   if (context.throttled || context.loadingBlocked) {
     return { type: "ignore" };
   }
@@ -41,6 +47,8 @@ export async function runAgentContextRefresh(options = {}, runtime) {
   const startPlan = agentContextRefreshStartPlan({
     hasSession: Boolean(session),
     trogdorAtlasOpen: runtime.state.trogdorAtlasOpen,
+    workbenchClosed: runtime.state.terminalWorkbenchOpen === false,
+    force: Boolean(options.force),
     throttled: Boolean(options.throttle) &&
       hasCurrentPayload &&
       now - runtime.state.agentContextLastLoadedAt < runtime.throttleMs,

@@ -63,6 +63,15 @@ test("agent context plans preserve request path, start gates, and stale guards",
   });
   assert.deepEqual(agentContextRefreshStartPlan({ hasSession: true, throttled: true }), { type: "ignore" });
   assert.deepEqual(agentContextRefreshStartPlan({ hasSession: true, loadingBlocked: true }), { type: "ignore" });
+  // A collapsed workbench skips background context refreshes, but a forced
+  // refresh (just opened) still loads.
+  assert.deepEqual(agentContextRefreshStartPlan({ hasSession: true, workbenchClosed: true }), {
+    type: "ignore",
+  });
+  assert.deepEqual(
+    agentContextRefreshStartPlan({ hasSession: true, workbenchClosed: true, force: true, sessionId: "sess_0" }),
+    { type: "start_refresh", sessionId: "sess_0", requestSeq: 1, loading: true },
+  );
   assert.deepEqual(agentContextRefreshStartPlan({
     hasSession: true,
     sessionId: "sess_0",

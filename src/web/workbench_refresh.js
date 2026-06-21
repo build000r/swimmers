@@ -9,6 +9,12 @@ export function workbenchRefreshStartPlan(context = {}) {
   if (!context.hasSession || context.trogdorAtlasOpen) {
     return { type: "reset_and_render" };
   }
+  // The panel is collapsed (it defaults closed on mobile): skip background
+  // refreshes so we don't poll six sidecar endpoints into a hidden surface. A
+  // forced refresh (the panel just opened) always loads.
+  if (context.workbenchClosed && !context.force) {
+    return { type: "ignore" };
+  }
   if (context.throttled || context.loadingBlocked) {
     return { type: "ignore" };
   }
@@ -35,6 +41,8 @@ export async function runWorkbenchWidgetRefresh(options = {}, runtime) {
   const startPlan = workbenchRefreshStartPlan({
     hasSession: Boolean(session),
     trogdorAtlasOpen: runtime.state.trogdorAtlasOpen,
+    workbenchClosed: runtime.state.terminalWorkbenchOpen === false,
+    force: Boolean(options.force),
     throttled: session ? shouldThrottleWorkbenchWidgets({
       options,
       widgets: runtime.state.workbenchWidgets,

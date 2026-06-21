@@ -54,6 +54,15 @@ test("workbenchRefreshStartPlan preserves no-session, throttle, loading, and sta
   });
   assert.deepEqual(workbenchRefreshStartPlan({ hasSession: true, throttled: true }), { type: "ignore" });
   assert.deepEqual(workbenchRefreshStartPlan({ hasSession: true, loadingBlocked: true }), { type: "ignore" });
+  // A collapsed panel skips background refreshes, but a forced refresh (just
+  // opened) still loads.
+  assert.deepEqual(workbenchRefreshStartPlan({ hasSession: true, workbenchClosed: true }), {
+    type: "ignore",
+  });
+  assert.deepEqual(
+    workbenchRefreshStartPlan({ hasSession: true, workbenchClosed: true, force: true, sessionId: "sess_0" }),
+    { type: "start_refresh", sessionId: "sess_0", requestSeq: 1, loading: true },
+  );
   assert.deepEqual(workbenchRefreshStartPlan({
     hasSession: true,
     sessionId: "sess_0",
