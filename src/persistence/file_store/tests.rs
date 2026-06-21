@@ -56,6 +56,48 @@ async fn dir_group_memberships_round_trip_through_cache_and_disk() {
 }
 
 #[tokio::test]
+async fn update_dir_group_memberships_merges_cross_instance_disk_writes() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let first = FileStore::new(dir.path()).await.expect("first store");
+    let second = FileStore::new(dir.path()).await.expect("second store");
+
+    // `first` writes group "frontend" to disk; `second` (whose cache predates
+    // that write) then adds "backend". The disk-based read-modify-write must keep
+    // both rather than letting second's stale cache clobber first's write.
+    first
+        .update_dir_group_memberships(|m| {
+            m.groups
+                .entry("frontend".to_string())
+                .or_default()
+                .include_paths
+                .insert("/tmp/frontend".to_string());
+        })
+        .await
+        .expect("first update");
+    second
+        .update_dir_group_memberships(|m| {
+            m.groups
+                .entry("backend".to_string())
+                .or_default()
+                .include_paths
+                .insert("/tmp/backend".to_string());
+        })
+        .await
+        .expect("second update");
+
+    let reopened = FileStore::new(dir.path()).await.expect("reopen store");
+    let groups = reopened.load_dir_group_memberships().await.groups;
+    assert!(
+        groups.contains_key("frontend"),
+        "the first process's write must survive a concurrent update"
+    );
+    assert!(
+        groups.contains_key("backend"),
+        "the second process's write must survive"
+    );
+}
+
+#[tokio::test]
 async fn dir_group_membership_updates_merge_concurrent_cache_writes() {
     let dir = tempfile::tempdir().expect("tempdir");
     let store = FileStore::new(dir.path()).await.expect("store");

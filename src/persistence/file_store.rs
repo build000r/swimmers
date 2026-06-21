@@ -670,7 +670,21 @@ impl FileStore {
         let _global_write_guard = self.write_lock.lock().await;
         let _write_guard = self.dir_group_write_lock.lock().await;
 
-        let mut memberships = self.dir_group_memberships_cache.read().await.clone();
+        // Apply the update to the current on-disk state (falling back to the
+        // in-memory cache on a missing/corrupt file), so a concurrent write from
+        // another process sharing the data dir is merged rather than silently
+        // lost — mirroring save_thought's disk-based read-modify-write.
+        let path = self.dir_group_memberships_path();
+        let cache_snapshot = self.dir_group_memberships_cache.read().await.clone();
+        let mut memberships = match read_file_blocking(path.clone()).await {
+            Ok(Some(data)) => {
+                serde_json::from_str::<DirGroupMemberships>(&data).unwrap_or_else(|err| {
+                    warn!("corrupt directory group memberships file, merging from cache: {err}");
+                    cache_snapshot
+                })
+            }
+            _ => cache_snapshot,
+        };
         update(&mut memberships);
 
         let data = match serde_json::to_string_pretty(&memberships) {
@@ -681,7 +695,6 @@ impl FileStore {
                 return Err(err);
             }
         };
-        let path = self.dir_group_memberships_path();
         if let Err(err) = atomic_write_blocking(path, data).await {
             self.record_write_failure(OP_DIR_GROUPS, &err);
             return Err(err);
