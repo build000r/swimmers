@@ -616,13 +616,55 @@ impl SessionActor {
     fn start_pty_reader(&self) -> Option<mpsc::Receiver<Vec<u8>>> {
         let (pty_tx, pty_rx) = mpsc::channel::<Vec<u8>>(256);
         let session_id_for_reader = self.session_id.clone();
-        let reader = self.clone_pty_reader()?;
 
+        // On Unix, drive the reader from a `poll()`-bounded loop on a private
+        // dup of the master fd so a *quiet* pane can still notice that the
+        // actor dropped the receiver -- e.g. a DetachBridge delete that leaves
+        // the tmux session (and therefore the master endpoint) alive. A plain
+        // blocking `read()` on such an fd never returns, permanently leaking
+        // the spawn_blocking thread and its fd, eroding the shared blocking
+        // pool that also serves tmux discovery and artifact reads
+        // (swimmers-4b0k). The poll loop wakes every PTY_READER_POLL_TIMEOUT_MS
+        // and exits once `tx` is closed.
+        #[cfg(unix)]
+        if let Some(fd) = self.dup_pty_reader_fd() {
+            tokio::task::spawn_blocking(move || {
+                pty_read_loop_pollable(session_id_for_reader, fd, pty_tx);
+            });
+            return Some(pty_rx);
+        }
+
+        // Fallback (non-Unix, or fd dup failure): the original blocking reader.
+        let reader = self.clone_pty_reader()?;
         tokio::task::spawn_blocking(move || {
             pty_read_loop(session_id_for_reader, reader, pty_tx);
         });
-
         Some(pty_rx)
+    }
+
+    /// Duplicate the master PTY fd so the reader thread owns an fd whose
+    /// lifetime is independent of the actor/master being dropped. The dup
+    /// shares the open-file-description with the master, so we deliberately do
+    /// NOT set `O_NONBLOCK` (that flag lives on the shared OFD and would leak
+    /// onto the writer/resize paths); correctness instead comes from polling
+    /// before every read.
+    #[cfg(unix)]
+    fn dup_pty_reader_fd(&self) -> Option<std::os::fd::OwnedFd> {
+        use std::os::fd::{FromRawFd, OwnedFd};
+        let raw = self.master.as_raw_fd()?;
+        // SAFETY: `raw` is the live master fd owned by `self.master`; `dup`
+        // returns a fresh fd or -1.
+        let dup = unsafe { libc::dup(raw) };
+        if dup < 0 {
+            error!(
+                session_id = %self.session_id,
+                "failed to dup PTY master fd: {}",
+                std::io::Error::last_os_error()
+            );
+            return None;
+        }
+        // SAFETY: `dup` returned a fresh, exclusively-owned fd.
+        Some(unsafe { OwnedFd::from_raw_fd(dup) })
     }
 
     fn clone_pty_reader(&self) -> Option<Box<dyn std::io::Read + Send>> {
@@ -1500,6 +1542,71 @@ fn pty_read_loop(
     use std::io::Read;
     let mut buf = [0u8; 8192];
     while pty_read_step(&session_id, reader.read(&mut buf), &buf, &tx).should_continue() {}
+}
+
+/// How long the pollable reader blocks in `poll()` before waking to check
+/// whether the actor dropped the receiver. Short enough that a quiet,
+/// detach-deleted session releases its blocking thread promptly; long enough
+/// that an idle pane costs effectively no CPU.
+#[cfg(unix)]
+const PTY_READER_POLL_TIMEOUT_MS: libc::c_int = 250;
+
+/// Unix reader loop that `poll()`s a private dup of the master fd. Unlike the
+/// blocking [`pty_read_loop`], this exits when the receiver is dropped even if
+/// the underlying tmux pane stays open and silent, so it cannot leak the
+/// spawn_blocking thread on a DetachBridge delete (swimmers-4b0k).
+#[cfg(unix)]
+fn pty_read_loop_pollable(
+    session_id: String,
+    fd: std::os::fd::OwnedFd,
+    tx: mpsc::Sender<Vec<u8>>,
+) {
+    use std::os::fd::AsRawFd;
+    let raw = fd.as_raw_fd();
+    let mut buf = [0u8; 8192];
+    loop {
+        let mut pfd = libc::pollfd {
+            fd: raw,
+            events: libc::POLLIN,
+            revents: 0,
+        };
+        // SAFETY: single valid `pollfd` over the owned fd `raw`.
+        let rc = unsafe { libc::poll(&mut pfd, 1, PTY_READER_POLL_TIMEOUT_MS) };
+        if rc < 0 {
+            let err = std::io::Error::last_os_error();
+            if err.kind() == std::io::ErrorKind::Interrupted {
+                continue;
+            }
+            log_pty_read_error(&session_id, &err);
+            return;
+        }
+        if rc == 0 {
+            // Timed out with nothing readable: the only way a quiet pane's
+            // reader ever exits is the actor dropping the receiver.
+            if tx.is_closed() {
+                debug!(session_id = %session_id, "PTY reader stopping: receiver dropped");
+                return;
+            }
+            continue;
+        }
+        // Readable, hangup, or error. A read on a poll-ready fd returns the
+        // available bytes immediately (or 0 on EOF / -1 on error) and never
+        // blocks, so the loop stays responsive without O_NONBLOCK.
+        // SAFETY: `raw` is the owned fd; `buf` is a valid 8192-byte buffer.
+        let n = unsafe { libc::read(raw, buf.as_mut_ptr() as *mut libc::c_void, buf.len()) };
+        let read_result: std::io::Result<usize> = if n >= 0 {
+            Ok(n as usize)
+        } else {
+            Err(std::io::Error::last_os_error())
+        };
+        // A spurious POLLIN that reads EAGAIN is not a child exit; retry.
+        if matches!(&read_result, Err(err) if err.kind() == std::io::ErrorKind::WouldBlock) {
+            continue;
+        }
+        if !pty_read_step(&session_id, read_result, &buf, &tx).should_continue() {
+            return;
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
