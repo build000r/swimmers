@@ -159,6 +159,11 @@ impl StateDetector {
                     "osc133_command",
                 );
                 self.apply_visible_error_pattern(&visible[visible_offset..], now);
+                // Mirror the fallback path: a busy classification must arm the
+                // output-silence deadline so a later quiet period still
+                // transitions a TUI tool to idle (the function self-guards on
+                // tui_tool_mode + Busy).
+                self.refresh_tui_output_idle_deadline(now);
             }
             Osc133Decision::Prompt {
                 prompt_idx,

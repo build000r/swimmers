@@ -49,6 +49,21 @@ fn osc133_command_sets_busy() {
 }
 
 #[test]
+fn osc133_command_arms_output_silence_deadline_in_tui_mode() {
+    let mut d = StateDetector::new();
+    d.set_tui_tool_mode(true);
+    // A busy classification from an OSC 133 command marker must arm the
+    // output-silence deadline (like the fallback path), so a later quiet period
+    // still transitions the TUI tool to idle.
+    d.process_output(b"\x1b]133;C;cmd=cargo build\x07");
+    assert_eq!(d.get_state().0, SessionState::Busy);
+    assert!(
+        d.output_idle_deadline.is_some(),
+        "OSC133 command in tui mode must arm the output-silence deadline"
+    );
+}
+
+#[test]
 fn same_state_detection_refreshes_state_evidence() {
     let mut d = StateDetector::new();
     d.process_output(b"\x1b]133;A\x07");
