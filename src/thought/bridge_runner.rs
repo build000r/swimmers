@@ -130,6 +130,11 @@ impl BridgeRunner {
             );
 
             let mut delivery_states = provider.thought_delivery_states();
+            // Consecutive-absence counter so a session that drops out of the
+            // eventually-consistent snapshot for a cycle does not immediately
+            // lose its stream watermark (see retain_live_delivery_states).
+            let mut delivery_absences: std::collections::HashMap<String, u8> =
+                std::collections::HashMap::new();
             let metrics = RuntimeThoughtMetricRecorder;
             loop {
                 let runtime_config = self.runtime_config.read().await.clone();
@@ -144,6 +149,7 @@ impl BridgeRunner {
                     },
                     &mut emitter_client,
                     &mut delivery_states,
+                    &mut delivery_absences,
                     &runtime_config,
                     &snapshots,
                 )
@@ -180,6 +186,7 @@ async fn run_bridge_sync_cycle<P, M>(
     cycle: BridgeSyncCycle<'_, P, M>,
     emitter_client: &mut EmitterClient,
     delivery_states: &mut DeliveryStateMap,
+    delivery_absences: &mut std::collections::HashMap<String, u8>,
     runtime_config: &ThoughtConfig,
     snapshots: &[SessionInfo],
 ) -> Duration
@@ -187,7 +194,13 @@ where
     P: SessionProvider,
     M: ThoughtMetricRecorder,
 {
-    prepare_bridge_sync_cycle(delivery_states, cycle.metrics, runtime_config, snapshots);
+    prepare_bridge_sync_cycle(
+        delivery_states,
+        delivery_absences,
+        cycle.metrics,
+        runtime_config,
+        snapshots,
+    );
     let outcome =
         await_bridge_sync_response(emitter_client, runtime_config, snapshots, cycle.timing).await;
     handle_bridge_sync_outcome(cycle, emitter_client, delivery_states, snapshots, outcome).await
@@ -195,6 +208,7 @@ where
 
 fn prepare_bridge_sync_cycle<M: ThoughtMetricRecorder>(
     delivery_states: &mut DeliveryStateMap,
+    delivery_absences: &mut std::collections::HashMap<String, u8>,
     metrics: &M,
     runtime_config: &ThoughtConfig,
     snapshots: &[SessionInfo],
@@ -202,9 +216,8 @@ fn prepare_bridge_sync_cycle<M: ThoughtMetricRecorder>(
     // Bound the delivery-watermark map to live sessions. It is seeded once
     // before the loop and only ever inserted into, so without this prune it
     // grows without bound across session churn (one entry per pane id the
-    // daemon ever reports). Dropping watermarks for sessions tmux no longer
-    // lists is safe: a stream restart re-establishes them via emission_seq==1.
-    retain_live_delivery_states(delivery_states, snapshots);
+    // daemon ever reports).
+    retain_live_delivery_states(delivery_states, delivery_absences, snapshots);
     record_sync_attempt_metrics(metrics, runtime_config, snapshots);
 }
 
@@ -353,16 +366,39 @@ fn record_bridge_failure(
     }
 }
 
-/// Drop delivery watermarks for sessions that are no longer present in the
-/// latest snapshot set, keeping the long-lived map bounded by the live session
-/// count rather than the cumulative count of every session ever observed.
-fn retain_live_delivery_states(delivery_states: &mut DeliveryStateMap, snapshots: &[SessionInfo]) {
+/// Drop delivery watermarks for sessions that have been absent from the snapshot
+/// set for several consecutive cycles, keeping the long-lived map bounded by the
+/// live session count rather than the cumulative count of every session ever
+/// observed.
+///
+/// The prune is deliberately patient: tmux discovery is eventually-consistent,
+/// so a live session can momentarily drop out of one snapshot. Deleting its
+/// watermark immediately would erase the `stream_instance_id` that the
+/// old-stream rejection in `should_apply_delivery_state` relies on, letting a
+/// stale re-sent update from a restarted stream overwrite the current thought.
+fn retain_live_delivery_states(
+    delivery_states: &mut DeliveryStateMap,
+    delivery_absences: &mut std::collections::HashMap<String, u8>,
+    snapshots: &[SessionInfo],
+) {
     if delivery_states.is_empty() {
+        delivery_absences.clear();
         return;
     }
+    const PRUNE_AFTER_ABSENT_TICKS: u8 = 5;
     let live: std::collections::HashSet<&str> =
         snapshots.iter().map(|s| s.session_id.as_str()).collect();
-    delivery_states.retain(|id, _| live.contains(id.as_str()));
+    delivery_states.retain(|id, _| {
+        if live.contains(id.as_str()) {
+            delivery_absences.remove(id);
+            return true;
+        }
+        let ticks = delivery_absences.entry(id.clone()).or_insert(0);
+        *ticks = ticks.saturating_add(1);
+        *ticks < PRUNE_AFTER_ABSENT_TICKS
+    });
+    // Drop counters for sessions that were pruned (or have since returned).
+    delivery_absences.retain(|id, _| delivery_states.contains_key(id));
 }
 
 #[cfg(test)]

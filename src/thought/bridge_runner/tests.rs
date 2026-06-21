@@ -240,27 +240,52 @@ fn metric_session(
 }
 
 #[test]
-fn retain_live_delivery_states_drops_absent_sessions() {
+fn retain_live_delivery_states_ages_out_absent_sessions() {
     let mut states: HashMap<String, ThoughtDeliveryState> = HashMap::new();
     states.insert("sess_live".to_string(), ThoughtDeliveryState::default());
     states.insert("sess_gone".to_string(), ThoughtDeliveryState::default());
+    let mut absences: HashMap<String, u8> = HashMap::new();
 
     let snapshots = vec![metric_session(
         "sess_live",
         SessionState::Busy,
         ThoughtState::Active,
     )];
-    retain_live_delivery_states(&mut states, &snapshots);
 
+    // A single-cycle absence must NOT prune the watermark: tmux discovery is
+    // eventually-consistent, so a one-cycle gap would otherwise erase the stream
+    // identity and let a stale old-stream update overwrite the current thought.
+    retain_live_delivery_states(&mut states, &mut absences, &snapshots);
+    assert!(states.contains_key("sess_live"));
+    assert!(
+        states.contains_key("sess_gone"),
+        "a single absence must not prune the watermark"
+    );
+
+    // After enough consecutive absences it is pruned and its counter cleaned up.
+    for _ in 0..5 {
+        retain_live_delivery_states(&mut states, &mut absences, &snapshots);
+    }
     assert!(states.contains_key("sess_live"));
     assert!(
         !states.contains_key("sess_gone"),
-        "watermark for a session no longer in snapshots must be pruned"
+        "a long-absent watermark is eventually pruned to keep the map bounded"
+    );
+    assert!(
+        !absences.contains_key("sess_gone"),
+        "the pruned session's absence counter is cleaned up"
     );
 
-    // Empty snapshots clear the map entirely rather than panicking or leaking.
-    retain_live_delivery_states(&mut states, &[]);
-    assert!(states.is_empty());
+    // A returning session resets its absence counter so it is not pruned early.
+    states.insert("sess_gone".to_string(), ThoughtDeliveryState::default());
+    *absences.entry("sess_gone".to_string()).or_insert(0) = 4;
+    let both = vec![
+        metric_session("sess_live", SessionState::Busy, ThoughtState::Active),
+        metric_session("sess_gone", SessionState::Busy, ThoughtState::Active),
+    ];
+    retain_live_delivery_states(&mut states, &mut absences, &both);
+    assert!(states.contains_key("sess_gone"));
+    assert!(!absences.contains_key("sess_gone"));
 }
 
 #[tokio::test]
