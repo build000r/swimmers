@@ -36,6 +36,8 @@ export function surfaceActionDispatchPlan(zone, context = {}) {
       return { type: "trogdor_wpm", actionId: zone.actionId };
     case "toggle_trogdor_atlas":
       return { type: "toggle_trogdor_atlas" };
+    case "next_attention":
+      return { type: "next_attention" };
     case "toggle_session_grouping":
       return { type: "toggle_session_grouping" };
     case "trogdor_send":

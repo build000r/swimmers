@@ -210,6 +210,9 @@ test("surfaceActionDispatchPlan preserves Trogdor reader and atlas action routes
   assert.deepEqual(surfaceActionDispatchPlan({ actionId: "toggle_trogdor_atlas" }), {
     type: "toggle_trogdor_atlas",
   });
+  assert.deepEqual(surfaceActionDispatchPlan({ actionId: "next_attention" }), {
+    type: "next_attention",
+  });
 });
 
 test("surfaceActionDispatchPlan preserves Trogdor surface action routes", () => {

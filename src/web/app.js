@@ -1803,6 +1803,7 @@ async function handleSurfaceAction(zone) {
   if (plan.type === "open_trogdor_agent_terminal") return openTrogdorAgentTerminal(plan.sessionId);
   if (plan.type === "trogdor_read_toggle" || plan.type === "trogdor_wpm") return runTrogdorReaderSurfaceAction(plan);
   if (plan.type === "toggle_trogdor_atlas") return toggleTrogdorAtlasSurfaceAction();
+  if (plan.type === "next_attention") return globalShortcutRuntime.selectNextAttentionSession();
   if (plan.type === "focus_terminal") return focusTerminalSurfaceAction();
   if (plan.type === "set_fleet_filter") return setFleetFilter(plan.filter);
   if (plan.type === "set_fleet_preset") return setFleetPreset(plan.presetId);

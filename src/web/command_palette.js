@@ -43,6 +43,7 @@ export function buildCommandPaletteItems({
     { label: "Thought config", meta: "policy", actionId: "open_config" },
     { label: "Auth token", meta: "connection", actionId: "open_auth" },
     { label: "Toggle Trogdor atlas", meta: "overview", actionId: "toggle_trogdor_atlas" },
+    { label: "Jump to next agent needing attention", meta: "Ctrl+Shift+J", actionId: "next_attention" },
   ];
   const sessionItems = (Array.isArray(sessions) ? sessions : []).map((session) => ({
     label: `Switch to ${commandPaletteSessionDisplayName(session)}`,
