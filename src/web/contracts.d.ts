@@ -80,7 +80,22 @@ export interface OperatorPressureSummary {
 export interface OperatorPressureResponse {
   sessions: OperatorPressureSession[];
   repos: OperatorPressureRepo[];
+  inbox: OperatorAttentionInboxItem[];
   summary: OperatorPressureSummary;
+}
+
+export interface OperatorAttentionInboxItem {
+  session_id: string;
+  repo_key: string;
+  repo_label: string;
+  target_key: string;
+  target_label: string;
+  pressure: OperatorPressure;
+  remote: boolean;
+  degraded: boolean;
+  stale: boolean;
+  transport_health: string;
+  last_activity_at: string;
 }
 
 export interface FrankenTermAssetFileInfo {
@@ -610,7 +625,7 @@ export type ThoughtConfigResponse =
   | (ThoughtConfig & {
       daemon_defaults: Nullable<DaemonDefaults>;
       ui: ThoughtConfigUiMetadata;
-      version: number;
+      version: Nullable<number>;
     })
   | {
       config: ThoughtConfig;
