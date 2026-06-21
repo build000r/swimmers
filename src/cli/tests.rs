@@ -1399,3 +1399,45 @@ fn check_clawgs_defaults_uses_unknown_for_blank_backend() {
         "blank backend should fall back to 'unknown': {ok}"
     );
 }
+
+#[test]
+fn ssh_config_arguments_tokenizes_quotes_escapes_and_whitespace() {
+    // Empty and whitespace-only inputs produce no tokens.
+    assert!(ssh_config_arguments("").is_empty());
+    assert!(ssh_config_arguments("   ").is_empty());
+
+    // Plain tokens, collapsing leading/trailing/interior runs of mixed
+    // whitespace (spaces, tabs, newlines).
+    assert_eq!(
+        ssh_config_arguments("  -o BatchMode=yes\t-p\n22 "),
+        vec!["-o", "BatchMode=yes", "-p", "22"]
+    );
+
+    // Double quotes preserve inner whitespace and are stripped from the token.
+    assert_eq!(
+        ssh_config_arguments("-o \"ProxyCommand=ssh jump -W %h:%p\""),
+        vec!["-o", "ProxyCommand=ssh jump -W %h:%p"]
+    );
+    // Single quotes behave the same.
+    assert_eq!(ssh_config_arguments("'a b' c"), vec!["a b", "c"]);
+
+    // A backslash escapes the next character (an escaped space stays in-token).
+    assert_eq!(ssh_config_arguments(r"a\ b"), vec!["a b"]);
+    // Escaped backslash, then an escaped quote that does NOT open a quote group.
+    assert_eq!(ssh_config_arguments(r#"a\\b \"c"#), vec![r"a\b", "\"c"]);
+
+    // Quoted and bare runs concatenate into one token; empty quotes yield "".
+    assert_eq!(
+        ssh_config_arguments("pre\"in mid\"post"),
+        vec!["prein midpost"]
+    );
+    assert_eq!(ssh_config_arguments("\"\""), vec![""]);
+
+    // An unterminated quote still flushes the accumulated token at end-of-input.
+    assert_eq!(
+        ssh_config_arguments("-o \"unterminated"),
+        vec!["-o", "unterminated"]
+    );
+    // A trailing backslash is preserved literally (the end-of-input escape tail).
+    assert_eq!(ssh_config_arguments(r"tok\"), vec![r"tok\"]);
+}
