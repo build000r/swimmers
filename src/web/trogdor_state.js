@@ -32,6 +32,36 @@ export function createTrogdorStateHelpers({
 } = {}) {
   const now = () => (typeof performanceRef?.now === "function" ? performanceRef.now() : 0);
 
+  // Persisting read progress serializes the whole map to localStorage, and the
+  // per-word advance runs on the hot HUD render path. Keep the in-memory update
+  // synchronous but debounce the write; flush immediately for the infrequent,
+  // important transitions (reader start, session responded) and before unload.
+  const READ_PROGRESS_SAVE_DEBOUNCE_MS = 750;
+  let readProgressSaveTimer = null;
+  function cancelPendingReadProgressSave() {
+    if (readProgressSaveTimer !== null) {
+      windowRef.clearTimeout?.(readProgressSaveTimer);
+      readProgressSaveTimer = null;
+    }
+  }
+  function persistTrogdorReadProgress({ immediate = false } = {}) {
+    if (immediate || typeof windowRef.setTimeout !== "function") {
+      cancelPendingReadProgressSave();
+      saveTrogdorReadProgress(state.trogdorReadProgress);
+      return;
+    }
+    if (readProgressSaveTimer !== null) {
+      return;
+    }
+    readProgressSaveTimer = windowRef.setTimeout(() => {
+      readProgressSaveTimer = null;
+      saveTrogdorReadProgress(state.trogdorReadProgress);
+    }, READ_PROGRESS_SAVE_DEBOUNCE_MS);
+  }
+  windowRef.addEventListener?.("beforeunload", () =>
+    persistTrogdorReadProgress({ immediate: true }),
+  );
+
   function rawSessionAwaitingUser(session) {
     return rawTrogdorSessionAwaitingUser(session, operatorPressureSnapshot(session?.session_id));
   }
@@ -46,7 +76,7 @@ export function createTrogdorStateHelpers({
       return false;
     }
     state.trogdorReadProgress = next.progress;
-    saveTrogdorReadProgress(state.trogdorReadProgress);
+    persistTrogdorReadProgress();
     return true;
   }
 
@@ -170,7 +200,7 @@ export function createTrogdorStateHelpers({
     state.trogdorDismissedClawgs = next.dismissedClawgs;
     if (next.progressChanged) {
       state.trogdorReadProgress = next.progress;
-      saveTrogdorReadProgress(state.trogdorReadProgress);
+      persistTrogdorReadProgress({ immediate: true });
     }
     state.trogdorReaderClawgKey = next.readerClawgKey;
     state.trogdorReaderStartIndex = next.readerStartIndex;
@@ -190,7 +220,7 @@ export function createTrogdorStateHelpers({
     state.trogdorDismissedClawgs = next.dismissedClawgs;
     if (next.progressChanged) {
       state.trogdorReadProgress = next.progress;
-      saveTrogdorReadProgress(state.trogdorReadProgress);
+      persistTrogdorReadProgress({ immediate: true });
     }
     if (next.burntIds.length) {
       if (next.resetReader) {
@@ -223,6 +253,7 @@ export function createTrogdorStateHelpers({
   return {
     advanceTrogdorReaderProgressForCurrentHover,
     currentTrogdorSurfaceSession,
+    flushTrogdorReadProgress: () => persistTrogdorReadProgress({ immediate: true }),
     markTrogdorSessionsResponded,
     rawSessionAwaitingUser,
     resetTrogdorReaderAfterWpmChange,

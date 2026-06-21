@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 
+import { createTrogdorStateHelpers } from "./trogdor_state.js";
 import {
   buildTrogdorDomGroups,
   clearTrogdorDismissedClawgInMap,
@@ -996,4 +997,51 @@ test("Trogdor dragon pose focuses burnt sessions and keeps 8-way body frames", (
   assert.equal(pose.direction, "right");
   assert.equal(pose.bodyFrame, "3q-right");
   assert.equal(trogdorDragonFrameForVector(-1, -1), "back-left");
+});
+
+test("Trogdor read progress flush persists immediately and registers a beforeunload flush", () => {
+  const originalLocalStorage = globalThis.localStorage;
+  const writes = [];
+  globalThis.localStorage = {
+    setItem(key, value) {
+      writes.push({ key, value });
+    },
+    getItem() {
+      return null;
+    },
+    removeItem() {},
+  };
+  try {
+    const scheduled = [];
+    const unloadHandlers = [];
+    const windowRef = {
+      setTimeout(fn) {
+        scheduled.push(fn);
+        return scheduled.length;
+      },
+      clearTimeout() {},
+      addEventListener(type, handler) {
+        if (type === "beforeunload") {
+          unloadHandlers.push(handler);
+        }
+      },
+    };
+    const state = { trogdorReadProgress: { "sess-1": { index: 4 } } };
+    const helpers = createTrogdorStateHelpers({ state, windowRef });
+
+    // A beforeunload flush is wired so debounced progress is not lost on close.
+    assert.equal(unloadHandlers.length, 1);
+    assert.equal(writes.length, 0);
+
+    // An explicit flush persists synchronously (no debounce timer).
+    helpers.flushTrogdorReadProgress();
+    assert.equal(writes.length, 1);
+    assert.equal(scheduled.length, 0);
+
+    // The registered beforeunload handler also persists immediately.
+    unloadHandlers[0]();
+    assert.equal(writes.length, 2);
+  } finally {
+    globalThis.localStorage = originalLocalStorage;
+  }
 });
