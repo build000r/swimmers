@@ -267,6 +267,12 @@ export function createDirBrowserController(runtime) {
     const managed = Boolean(managedOnly);
     const groupName = String(group || "").trim();
 
+    // Ordering guard: two overlapping navigations (slow dir A, then fast dir B)
+    // race on apiFetch. Capture a monotonic seq so a late-resolving older request
+    // cannot overwrite a newer request's rendered view or persisted path.
+    const listingSeq = (state.dirBrowser.listingSeq || 0) + 1;
+    state.dirBrowser.listingSeq = listingSeq;
+
     state.dirBrowser.loading = true;
     state.dirBrowser.managedOnly = managed;
     state.dirBrowser.group = groupName;
@@ -288,6 +294,11 @@ export function createDirBrowserController(runtime) {
       }
       const response = await apiFetch(url.pathname + url.search);
       const payload = await responseJson(response, normalizeDirListResponse);
+      // A newer navigation started while this request was in flight: drop this
+      // stale payload before it renders or mutates path/persisted state.
+      if (state.dirBrowser.listingSeq !== listingSeq) {
+        return true;
+      }
       renderDirEntries(payload, {
         preferredLaunchTarget: options.preferredLaunchTarget,
       });

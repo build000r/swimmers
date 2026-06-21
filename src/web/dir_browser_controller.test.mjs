@@ -322,6 +322,56 @@ test("directory browser controller scopes listings to the selected remote target
   );
 });
 
+test("directory browser controller renders only the latest overlapping listing request", async () => {
+  function deferred() {
+    let resolve;
+    const promise = new Promise((done) => {
+      resolve = done;
+    });
+    return { promise, resolve };
+  }
+  const gateSlow = deferred();
+  const gateFast = deferred();
+  const requested = [];
+  const rendered = [];
+  const { runtime, state, storage } = createRuntime({
+    apiFetch: async (url) => {
+      requested.push(url);
+      // First request (dir A) is slow; second (dir B) is fast.
+      await (requested.length === 1 ? gateSlow.promise : gateFast.promise);
+      return { url };
+    },
+    responseJson: async (response, normalize) => {
+      const path = response.url.includes("%2FdirA") ? "/dirA" : "/dirB";
+      return normalize({ path, entries: [{ name: path.slice(1), full_path: path }] });
+    },
+    location: new URL("http://swimmers.test/"),
+    renderDirBrowserView(view) {
+      rendered.push(view.path);
+      return true;
+    },
+  });
+
+  // Click slow dir A, then immediately fast dir B (overlapping in flight) on the
+  // same controller so both share the dirBrowser listing-seq guard.
+  const controller = createDirBrowserController(runtime);
+  const slow = controller.loadDirListing("/dirA");
+  const fast = controller.loadDirListing("/dirB");
+
+  // B resolves first and renders; then A's late response resolves.
+  gateFast.resolve();
+  await fast;
+  gateSlow.resolve();
+  await slow;
+
+  // Only the newer request (B) may render or persist state; A's late payload
+  // is dropped by the ordering guard rather than clobbering B (last-write-wins
+  // would otherwise leave the stale /dirA view and persisted path).
+  assert.deepEqual(rendered, ["/dirB"]);
+  assert.equal(state.dirBrowser.path, "/dirB");
+  assert.equal(storage.get("dirs.path"), "/dirB");
+});
+
 test("directory browser controller keeps local launch override for remote-only listings", () => {
   const previousDocument = globalThis.document;
   globalThis.document = {

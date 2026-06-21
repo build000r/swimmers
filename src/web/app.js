@@ -287,6 +287,7 @@ const state = {
   },
   dirBrowser: {
     loading: false,
+    listingSeq: 0,
     path: "",
     managedOnly: false,
     entries: [],
