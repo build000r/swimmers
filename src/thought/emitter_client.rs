@@ -168,6 +168,12 @@ impl EmitterClientError {
                 | Self::ResponseEof
                 | Self::ResponseTimeout { .. }
                 | Self::StatusCheck { .. }
+                // Daemon stdout desync (id mismatch, malformed, or unexpected
+                // response type) is unrecoverable on the current daemon: restart
+                // it to reset line-correlation instead of wedging one-behind.
+                | Self::ResponseRequestMismatch { .. }
+                | Self::MalformedResponse { .. }
+                | Self::UnexpectedResponseType { .. }
         )
     }
 }
@@ -609,6 +615,31 @@ mod tests {
         let raw = r#"{"type":"hello","protocol":"clawgs.emit.v1","engine_version":"0.1.0"}"#;
         let result = parse_hello_line(raw);
         assert!(result.is_ok(), "expected valid hello, got: {result:?}");
+    }
+
+    #[test]
+    fn daemon_stdout_desync_errors_are_retryable() {
+        // An id mismatch / unexpected type means the daemon stdout is desynced;
+        // restarting it is the only recovery, so these must be retryable.
+        assert!(EmitterClientError::ResponseRequestMismatch {
+            expected: "1".to_string(),
+            actual: "stale".to_string(),
+        }
+        .is_retryable());
+        assert!(EmitterClientError::UnexpectedResponseType {
+            expected: "sync_result",
+            found: "hello".to_string(),
+            line: "{}".to_string(),
+        }
+        .is_retryable());
+        // A daemon-reported error is a request-level failure, not a stdout
+        // desync, so it must NOT trigger a restart-retry loop.
+        assert!(!EmitterClientError::DaemonError {
+            code: "bad_request".to_string(),
+            message: "nope".to_string(),
+            request_id: None,
+        }
+        .is_retryable());
     }
 
     #[test]
