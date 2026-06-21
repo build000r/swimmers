@@ -630,6 +630,15 @@ impl SessionSupervisor {
             }
             wrap_spawn_tool_command_for_tmux(&command.command)
         });
+        // Hold the discovery lock across spawn (which runs the real
+        // `tmux new-session`) and the handle insert below so the periodic tmux
+        // reconcile loop / adopt path cannot observe the freshly-created tmux
+        // session in the window before its handle is registered and adopt it as
+        // a *second* actor on the same pane (swimmers-ohfo). The discovery and
+        // adopt paths both take `discovery_lock` first, and the lock order
+        // `discovery_lock -> sessions.write` matches them, so no deadlock; the
+        // only cost is serializing creates against discovery.
+        let discovery_guard = self.discovery_lock.lock().await;
         let handle = match crate::session::actor::SessionActor::spawn(
             session_id.clone(),
             tmux_name.clone(),
@@ -650,6 +659,9 @@ impl SessionSupervisor {
         let bootstrap_handle = handle.clone();
 
         self.insert_active_handle(session_id.clone(), handle).await;
+        // Release the discovery lock as soon as the handle is registered; the
+        // remaining summary/emit/persist work no longer races discovery.
+        drop(discovery_guard);
         let mut summary = self
             .build_created_summary(
                 &session_id,
