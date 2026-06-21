@@ -410,9 +410,29 @@ The helper copies only tracked working-tree files into an isolated remote temp
 checkout, so untracked scratch files are not sent. Add new source files to git
 before treating remote validation as proof. It runs the command inside a
 disposable Rust contributor validation container with an isolated
-`CARGO_TARGET_DIR`, and removes remote temp directories by default. This is only
-a contributor/operator validation lane; Swimmers itself remains a single-binary
-tmux tool with no Docker runtime dependency.
+`CARGO_TARGET_DIR`, and removes remote temp directories by default. A dedicated
+builder host should expose Bash, `rsync`, and a container engine such as Docker
+or Podman to the SSH user. To keep dependency downloads and incremental Rust
+artifacts across runs, set a persistent absolute cache path:
+
+```bash
+SWIMMERS_REMOTE_RUST_HOST=builder.example \
+SWIMMERS_REMOTE_RUST_CACHE=/var/tmp/swimmers-remote-rust-cache \
+make remote-rust-validate
+```
+
+For a Windows OpenSSH endpoint that should run validation inside WSL, point the
+host at the Windows SSH target and set the distro wrapper:
+
+```bash
+SWIMMERS_REMOTE_RUST_HOST=win-wsl-host \
+SWIMMERS_REMOTE_RUST_WSL_DISTRO=Ubuntu \
+SWIMMERS_REMOTE_RUST_CACHE=/var/tmp/swimmers-remote-rust-cache \
+make remote-rust-validate
+```
+
+This is only a contributor/operator validation lane; Swimmers itself remains a
+single-binary tmux tool with no Docker runtime dependency.
 
 ### Browser asset routes
 
