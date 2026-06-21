@@ -866,7 +866,25 @@ impl<C: TuiApi> App<C> {
     }
 
     pub(crate) fn clear_published_selection(&mut self) {
+        // Drain any in-flight async publication first so it cannot land on the
+        // server *after* this blocking clear and resurrect a stale selection on
+        // the multi-threaded runtime (swimmers-9eqi).
+        self.drain_pending_selection_publication();
         self.publish_selection(None, true);
+    }
+
+    /// Block until any spawned selection publication has completed, folding its
+    /// result into local state. Used before the shutdown clear so the clear is
+    /// guaranteed to be the last write to the published selection.
+    fn drain_pending_selection_publication(&mut self) {
+        let Some(rx) = self.pending_selection_publication.take() else {
+            return;
+        };
+        if let Ok(result) = self.runtime.block_on(rx) {
+            if result.response.is_ok() {
+                self.published_selected_id = result.session_id;
+            }
+        }
     }
 
     fn queue_selection_publication(&mut self, session_id: Option<String>, force: bool) {

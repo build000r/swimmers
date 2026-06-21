@@ -18,6 +18,47 @@ use super::{WsReceiver, WsSender, REPLY_TIMEOUT};
 
 static NEXT_WS_CLIENT_ID: AtomicU64 = AtomicU64::new(1);
 
+/// RAII guard that fires a best-effort `Unsubscribe` for a registered WS
+/// client on *every* return path out of the session WS lifecycle, including
+/// the early-error paths (`fetch_live_summary` failure, a refused/false ready
+/// handshake, or an event-loop error) that previously bypassed the explicit
+/// `Unsubscribe` in `session_ws_authenticated_inner` and left a stale
+/// subscriber until the next frame/subscribe evicted it (swimmers-9eqi).
+/// `Drop` cannot await, so it uses `try_send`; the subscriber set is
+/// self-healing (a dropped `output_rx` closes the channel and is pruned on the
+/// next broadcast), so a dropped command is harmless rather than a leak.
+struct WsSubscriptionGuard {
+    cmd_tx: mpsc::Sender<SessionCommand>,
+    client_id: u64,
+    armed: bool,
+}
+
+impl WsSubscriptionGuard {
+    fn new(cmd_tx: mpsc::Sender<SessionCommand>, client_id: u64) -> Self {
+        Self {
+            cmd_tx,
+            client_id,
+            armed: true,
+        }
+    }
+
+    /// Disarm after an explicit, awaited `Unsubscribe` has already been sent on
+    /// the success path so the guard does not enqueue a duplicate on drop.
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for WsSubscriptionGuard {
+    fn drop(&mut self) {
+        if self.armed {
+            let _ = self.cmd_tx.try_send(SessionCommand::Unsubscribe {
+                client_id: self.client_id,
+            });
+        }
+    }
+}
+
 pub(super) struct SessionWsStart {
     pub(super) client_id: u64,
     output_rx: mpsc::Receiver<OutputFrame>,
@@ -26,6 +67,17 @@ pub(super) struct SessionWsStart {
     lifecycle_events: broadcast::Receiver<LifecycleEvent>,
     subscribe_outcome: SubscribeOutcome,
     ready_payload: serde_json::Value,
+    /// Declared last so it drops after the other fields; releases any
+    /// not-yet-disarmed subscription on every early return.
+    unsubscribe_guard: WsSubscriptionGuard,
+}
+
+impl SessionWsStart {
+    /// Mark the subscription as already cleaned up after the success-path
+    /// awaited `Unsubscribe`, preventing a duplicate best-effort send on drop.
+    pub(super) fn disarm_unsubscribe_guard(&mut self) {
+        self.unsubscribe_guard.disarm();
+    }
 }
 
 pub(super) async fn prepare_session_ws_start(
@@ -42,6 +94,10 @@ pub(super) async fn prepare_session_ws_start(
         resume_from_seq.unwrap_or_else(|| replay_cursor.replay_window_start_seq.saturating_sub(1));
     let (output_rx, subscribe_outcome) =
         subscribe_to_output(state, handle, client_id, Some(requested_resume_from_seq)).await?;
+    // The client is now registered in the actor (confirmed by the subscribe
+    // ack). Arm the cleanup guard before any further `?` so a failure below
+    // (e.g. `fetch_live_summary`) still releases the subscription.
+    let unsubscribe_guard = WsSubscriptionGuard::new(handle.cmd_tx.clone(), client_id);
     let session_events = handle.subscribe_events();
     let thought_events = state.supervisor.subscribe_thought_events();
     let lifecycle_events = state.supervisor.subscribe_events();
@@ -65,6 +121,7 @@ pub(super) async fn prepare_session_ws_start(
         lifecycle_events,
         subscribe_outcome,
         ready_payload,
+        unsubscribe_guard,
     })
 }
 

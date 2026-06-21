@@ -778,6 +778,9 @@ async fn session_ws_authenticated_inner(
             client_id: session.client_id,
         })
         .await;
+    // Reliable awaited unsubscribe done on the success path; disarm the RAII
+    // guard so it does not enqueue a duplicate best-effort send on drop.
+    session.disarm_unsubscribe_guard();
     Ok(())
 }
 
