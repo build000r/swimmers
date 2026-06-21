@@ -48,6 +48,11 @@ test("command palette island preserves sheet host and child DOM contract", () =>
     type: "search",
     placeholder: "Search actions and sessions",
     autoComplete: "off",
+    role: "combobox",
+    "aria-expanded": "true",
+    "aria-controls": COMMAND_PALETTE_ISLAND_IDS.paletteResults,
+    "aria-autocomplete": "list",
+    "aria-activedescendant": "palette-option-0",
     children: [],
   });
   assert.deepEqual(children[2].props, {
@@ -74,6 +79,8 @@ test("command palette island result component preserves item classes and data at
   assert.equal(buttons[0].type, "button");
   assert.equal(buttons[0].props.className, "palette-item");
   assert.equal(buttons[0].props["aria-selected"], "false");
+  assert.equal(buttons[0].props.id, "palette-option-0");
+  assert.equal(buttons[1].props.id, "palette-option-1");
   assert.equal(buttons[0].props["data-palette-index"], "0");
   assert.equal(buttons[0].props.disabled, undefined);
   assert.equal(buttons[0].props.children[0].props.children[0], "Focus terminal");

@@ -58,6 +58,7 @@ export function createCommandPaletteResultsElement(createElement, {
       {
         className: `palette-item${index === activeIndex ? " is-active" : ""}`,
         key: commandPaletteItemKey(item, index),
+        id: `palette-option-${index}`,
         type: "button",
         role: "option",
         "aria-selected": index === activeIndex ? "true" : "false",
@@ -79,6 +80,14 @@ export function createCommandPaletteSheetContents(createElement, options = {}) {
   if (typeof createElement !== "function") {
     throw new TypeError("Command palette island requires a createElement function");
   }
+  // Combobox pattern: focus stays in the search input while arrow keys move the
+  // active option, so screen readers need aria-activedescendant to announce it.
+  const paletteItems = Array.isArray(options.items) ? options.items : [];
+  const paletteActiveIndex = Number.isInteger(options.activeIndex) ? options.activeIndex : 0;
+  const activeDescendant =
+    paletteItems.length && paletteActiveIndex >= 0 && paletteActiveIndex < paletteItems.length
+      ? `palette-option-${paletteActiveIndex}`
+      : undefined;
   return [
     createElement(
       "div",
@@ -95,6 +104,11 @@ export function createCommandPaletteSheetContents(createElement, options = {}) {
         type: "search",
         placeholder: "Search actions and sessions",
         autoComplete: "off",
+        role: "combobox",
+        "aria-expanded": "true",
+        "aria-controls": COMMAND_PALETTE_ISLAND_IDS.paletteResults,
+        "aria-autocomplete": "list",
+        "aria-activedescendant": activeDescendant,
       }),
     ),
     createCommandPaletteResultsElement(createElement, options),
