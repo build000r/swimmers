@@ -45,6 +45,7 @@
     "src/web/terminal_safety.test.mjs",
     "src/web/terminal_search_links.test.mjs",
     "src/web/terminal_status.test.mjs",
+    "src/web/terminal_surface_setup.test.mjs",
     "src/web/terminal_workbench_controller.test.mjs",
     "src/web/terminal_zoom_input.test.mjs",
     "src/web/thought_config_sheet.test.mjs",

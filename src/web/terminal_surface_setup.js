@@ -160,25 +160,35 @@ export function reuseTerminalSurface(plan, runtime) {
 export async function initializeTerminalSurface(mod, sessionId, plan, runtime) {
   runtime.destroyTerminalInstance();
   runtime.setLoadingState(plan.loadingVisible, plan.loadingLabel);
+  // Capture the instance this call owns. On a rapid A->B session switch, two
+  // initializeTerminalSurface calls interleave at the `await init()` point: B's
+  // destroyTerminalInstance() replaces A's instance, so when A's init() resolves
+  // last it must not adopt B's terminal. completeTerminalSurfaceInit bails if the
+  // captured instance is no longer the live one. Mirrors connectionGeneration.
+  let terminal;
   try {
-    runtime.state.terminal = runtime.validateFrankenTermSurface(
+    terminal = runtime.validateFrankenTermSurface(
       new mod.FrankenTermWeb(),
       runtime.requiredTerminalMethods,
       "terminal renderer",
     );
+    runtime.state.terminal = terminal;
     runtime.state.terminalAcceptsBytes = false;
     runtime.state.surfaceInitInProgress += 1;
     try {
-      await runtime.state.terminal.init(runtime.el.terminalCanvas, undefined);
+      await terminal.init(runtime.el.terminalCanvas, undefined);
     } finally {
       runtime.state.surfaceInitInProgress -= 1;
+    }
+    if (runtime.state.terminal !== terminal) {
+      return;
     }
     runtime.state.terminalAcceptsBytes = true;
   } catch (error) {
     await handleTerminalSurfaceInitError(error, runtime);
     return;
   }
-  completeTerminalSurfaceInit(sessionId, runtime);
+  completeTerminalSurfaceInit(sessionId, terminal, runtime);
 }
 
 async function handleTerminalSurfaceInitError(error, runtime) {
@@ -192,7 +202,13 @@ async function handleTerminalSurfaceInitError(error, runtime) {
   runtime.setUtilityStatus(plan.status, plan.statusError, plan.statusTimeoutMs);
 }
 
-function completeTerminalSurfaceInit(sessionId, runtime) {
+function completeTerminalSurfaceInit(sessionId, terminal, runtime) {
+  // Bail if a newer connect destroyed/replaced the instance this completion owns.
+  // The identity check is against the captured terminal, not currentSession():
+  // under A->B->A the session id can be A again while the terminal is mid-swap.
+  if (runtime.state.terminal !== terminal) {
+    return;
+  }
   const plan = terminalSurfacePostInitPlan({
     sessionId,
     linkPolicySupported: runtime.terminalSupports("setLinkOpenPolicy"),
