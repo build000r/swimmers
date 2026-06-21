@@ -339,7 +339,12 @@ fn delete_session_success_response() -> Response {
 
 pub(super) fn delete_session_error_response(error: anyhow::Error) -> Response {
     let msg = error.to_string();
-    if msg.contains("not found") {
+    // "not found" identifies a genuinely untracked session, but a failed tmux
+    // kill on a *live* session can surface "not found" in tmux's stderr too —
+    // that must stay a 500, not a misleading 404 that claims the session is gone
+    // while it is still tracked and running.
+    let session_missing = msg.contains("not found") && !msg.starts_with("tmux kill-session failed");
+    if session_missing {
         error_response(StatusCode::NOT_FOUND, "SESSION_NOT_FOUND", None)
     } else {
         tracing::error!("delete_session failed: {error}");

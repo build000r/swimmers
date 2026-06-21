@@ -207,3 +207,17 @@ async fn delete_session_error_response_maps_internal_errors() {
         .expect("message")
         .contains("tmux kill failed"));
 }
+
+#[tokio::test]
+async fn delete_session_error_response_keeps_failed_kill_a_500_not_a_404() {
+    // tmux's stderr can contain "not found" even when the live session exists, so
+    // a failed kill must stay a 500 rather than masquerade as a gone-session 404.
+    let response = delete_session_error_response(anyhow::anyhow!(
+        "tmux kill-session failed: can't find session: not found"
+    ));
+    assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+
+    // A genuinely untracked session is still reported as a 404.
+    let missing = delete_session_error_response(anyhow::anyhow!("session not found: sess_1"));
+    assert_eq!(missing.status(), StatusCode::NOT_FOUND);
+}
