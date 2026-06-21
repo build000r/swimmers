@@ -150,14 +150,24 @@ command -v python3 >/dev/null
 mkdir -p "${artifact_dir}"
 write_plan
 
-auth_args=()
+# Token-safe auth transport: never place the bearer token in curl process argv,
+# where it would be visible via `ps` or /proc/<pid>/cmdline. When a token env is
+# named, hand the Authorization header to curl through a `--config` document fed
+# on stdin, so the secret stays out of argv and is never written to disk.
+auth_config_on_stdin=0
+auth_config_document=""
 if [[ -n "${token_env}" ]]; then
   token_value="${!token_env-}"
   if [[ -z "${token_value}" ]]; then
     printf 'refusing live proof: %s is named by SWIMMERS_LIVE_AUTH_TOKEN_ENV but is unset\n' "${token_env}" >&2
     exit 2
   fi
-  auth_args=(-H "Authorization: Bearer ${token_value}")
+  # Escape backslash and double-quote for a curl config double-quoted value.
+  esc_token="${token_value//\\/\\\\}"
+  esc_token="${esc_token//\"/\\\"}"
+  printf -v auth_config_document 'header = "Authorization: Bearer %s"\n' "${esc_token}"
+  auth_config_on_stdin=1
+  unset token_value esc_token
 fi
 
 fetch_json() {
@@ -165,7 +175,14 @@ fetch_json() {
   local path="$2"
   local output="$3"
   local url="${base_url%/}${path}"
-  curl -fsS --max-time "${SWIMMERS_LIVE_CURL_TIMEOUT:-10}" ${auth_args[@]+"${auth_args[@]}"} "${url}" -o "${output}"
+  if [[ "${auth_config_on_stdin}" == "1" ]]; then
+    # printf is a bash builtin, so the token never enters a child process argv;
+    # `--config -` reads the header from stdin, keeping it out of curl's argv too.
+    printf '%s' "${auth_config_document}" \
+      | curl -fsS --max-time "${SWIMMERS_LIVE_CURL_TIMEOUT:-10}" --config - "${url}" -o "${output}"
+  else
+    curl -fsS --max-time "${SWIMMERS_LIVE_CURL_TIMEOUT:-10}" "${url}" -o "${output}"
+  fi
 }
 
 printf 'multi-ssh live acceptance\n'
