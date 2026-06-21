@@ -761,3 +761,181 @@ test("top-level action chips have forgiving vertical hitboxes", () => {
   assert.equal(zone.rect.h >= 2, true);
   assert.equal(surfaceActionAt(frame.zones, { x: zone.rect.x, y: zone.rect.y + zone.rect.h - 1 })?.actionId, "toggle_trogdor_atlas");
 });
+
+// Concatenate the glyphs of one frame row into a string, for substring checks.
+function rowText(frame, row) {
+  let line = "";
+  for (let col = 0; col < frame.cols; col += 1) {
+    const index = (row * frame.cols + col) * 4;
+    line += String.fromCodePoint(frame.cells[index + 2] || 32);
+  }
+  return line;
+}
+
+// Concatenate the column-band glyphs (cols >= startCol) of one frame row.
+function rowTextFrom(frame, row, startCol) {
+  let line = "";
+  for (let col = Math.max(0, startCol); col < frame.cols; col += 1) {
+    const index = (row * frame.cols + col) * 4;
+    line += String.fromCodePoint(frame.cells[index + 2] || 32);
+  }
+  return line;
+}
+
+// (tm98 item 1) — clamp divergence on extreme dims. The model dims are clamped
+// once in buildSurfaceFrame (cols → [32,240], rows → [16,120]) and both the
+// layout and every draw call derive from that single clamped source, so a
+// pathological dim cannot overrun the frame buffer.
+test("surface clamps extreme model dims to a single consistent geometry source", () => {
+  const frame = buildSurfaceFrame(baseModel({ cols: 10000, rows: 9999 }));
+
+  // Frame grid is the clamped max, not the raw model dims.
+  assert.equal(frame.cols, 240);
+  assert.equal(frame.rows, 120);
+  assert.equal(frame.cells.length, 240 * 120 * 4);
+
+  // Layout is computed from the clamped dims, so it stays inside the grid.
+  assert.equal(frame.layout.header.x + frame.layout.header.w <= frame.cols, true);
+  assert.equal(frame.layout.footer.y + frame.layout.footer.h <= frame.rows, true);
+  assert.equal(frame.layout.center.x + frame.layout.center.w <= frame.cols, true);
+  assert.equal(frame.layout.center.y + frame.layout.center.h <= frame.rows, true);
+
+  // Every published hit zone resolves inside the clamped grid (no out-of-bounds
+  // frame writes / divergent geometry from a raw 10000-col model).
+  for (const zone of frame.zones) {
+    assert.equal(zone.rect.x >= 0, true);
+    assert.equal(zone.rect.y >= 0, true);
+    assert.equal(zone.rect.x + zone.rect.w <= frame.cols, true);
+    assert.equal(zone.rect.y + zone.rect.h <= frame.rows, true);
+  }
+
+  // Below the floor clamps identically: tiny/negative dims snap to the minimum.
+  const tiny = buildSurfaceFrame(baseModel({ cols: 1, rows: -5 }));
+  assert.equal(tiny.cols, 32);
+  assert.equal(tiny.rows, 16);
+  assert.equal(tiny.cells.length, 32 * 16 * 4);
+});
+
+// (tm98 item 2) — center-overlay overrun. On a clamped-small terminal the
+// trogdor overview overlay must stay inside layout.center instead of bleeding
+// its box/text into the footer or right edge.
+test("surface clamps the trogdor overview overlay to the center rect on tiny terminals", () => {
+  // rows=17 gives center.h=6 with the center bottom (row 12) at the footer top,
+  // so a too-tall overlay (the old Math.max(8, center.h-2)=8) would bleed its
+  // unique banner/title text down into the footer rows. cols=140 keeps the
+  // center wide so this isolates the vertical clamp.
+  const overlaySession = session({
+    sessionId: "agent-1",
+    name: "agent-1",
+    state: "attention",
+    displayState: "attention",
+  });
+  const frame = buildSurfaceFrame(
+    baseModel({
+      cols: 140,
+      rows: 17,
+      currentSession: null,
+      selectedSessionId: null,
+      sessions: [overlaySession],
+      trogdorAtlasOpen: true,
+    }),
+  );
+  const center = frame.layout.center;
+
+  // The clamped layout really is small enough to exercise the overrun guard.
+  assert.equal(center.h, 6);
+
+  // The overlay still renders its unique banner/panel inside the center. (At
+  // this cramped height the atlas/title lines collapse, but the overlay box and
+  // banner remain — the point is they stay put, not that every line survives.)
+  assert.match(frameText(frame), /burninate/i);
+  assert.match(frameText(frame), /overview/i);
+
+  // None of the overlay-unique text bleeds into the rows below the center (where
+  // a too-tall overlay / fixed-offset atlas used to overrun the footer). "cues"
+  // is the atlas header, which previously leaked below the overlay.
+  const centerBottom = center.y + center.h;
+  for (let row = centerBottom; row < frame.rows; row += 1) {
+    const line = rowText(frame, row);
+    assert.doesNotMatch(line, /burninate/i, `overlay banner bled into row ${row}`);
+    assert.doesNotMatch(line, /trogdor pressure/i, `overlay title bled into row ${row}`);
+    assert.doesNotMatch(line, /overview/i, `overlay panel bled into row ${row}`);
+    assert.doesNotMatch(line, /cues \d/i, `atlas header bled into row ${row}`);
+  }
+
+  // Nothing bleeds into the columns to the right of the center either.
+  const centerRight = center.x + center.w;
+  for (let row = 0; row < frame.rows; row += 1) {
+    const band = rowTextFrom(frame, row, centerRight);
+    assert.doesNotMatch(band, /burninate/i, `overlay banner bled right of center on row ${row}`);
+    assert.doesNotMatch(band, /overview/i, `overlay panel bled right of center on row ${row}`);
+    assert.doesNotMatch(band, /cues \d/i, `atlas header bled right of center on row ${row}`);
+  }
+});
+
+// (tm98 item 4) — selectionFocus scroll edge cases. The visible-window start is
+// clamped to [0, max(0, rows.length - visibleCount)] so first/last/overflow
+// selection never produces a negative or out-of-range window.
+function railSessions(count) {
+  return Array.from({ length: count }, (_value, index) =>
+    session({ sessionId: `s-${index}`, name: `s-${index}` }),
+  );
+}
+
+function visibleRailSessionIds(frame) {
+  return frame.zones
+    .filter((zone) => zone.type === "session")
+    .map((zone) => zone.sessionId);
+}
+
+test("session rail selection-focus window stays in range for first/last/overflow", () => {
+  const sessions = railSessions(20);
+
+  const renderRail = (selectedSessionId) =>
+    buildSurfaceFrame(
+      baseModel({
+        cols: 120,
+        rows: 40,
+        sessions,
+        currentSession: sessions.find((item) => item.sessionId === selectedSessionId) || sessions[0],
+        selectedSessionId,
+      }),
+    );
+
+  // First row selected: window starts at the top, includes the first session.
+  const firstFrame = renderRail("s-0");
+  const firstVisible = visibleRailSessionIds(firstFrame);
+  assert.ok(firstVisible.length >= 1);
+  assert.equal(firstVisible[0], "s-0");
+
+  // Last row selected: window is clamped so the final session is visible.
+  const lastFrame = renderRail("s-19");
+  const lastVisible = visibleRailSessionIds(lastFrame);
+  assert.ok(lastVisible.includes("s-19"));
+
+  // Unknown selection (findIndex -> -1) falls back to the top without going
+  // negative.
+  const unknownFrame = renderRail("does-not-exist");
+  const unknownVisible = visibleRailSessionIds(unknownFrame);
+  assert.equal(unknownVisible[0], "s-0");
+
+  // Overflow: visibleCount >= rows.length. A tall rail with few sessions shows
+  // all of them starting at index 0 (no negative start, no out-of-range end).
+  const fewSessions = railSessions(2);
+  const overflowFrame = buildSurfaceFrame(
+    baseModel({
+      cols: 120,
+      rows: 40,
+      sessions: fewSessions,
+      currentSession: fewSessions[1],
+      selectedSessionId: "s-1",
+    }),
+  );
+  const overflowVisible = visibleRailSessionIds(overflowFrame);
+  assert.deepEqual(overflowVisible, ["s-0", "s-1"]);
+});
+
+// (tm98 item 3) — zoom-step rounding is OUT OF SCOPE for this file. The
+// rendered surface carries no zoom/scale geometry; the zoom step lives in
+// terminal_zoom_input.js / global_shortcut_dispatch.js, which are off-limits
+// under this bead's edit constraint. Recorded here so the gap is explicit.

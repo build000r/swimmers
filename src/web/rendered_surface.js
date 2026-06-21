@@ -536,12 +536,14 @@ function drawCenterOverlay(frame, center, model) {
   const summary = sessions.length
     ? summarizeSessions(sessions, model?.publishedSessionId, model?.selectedSessionId)
     : emptyTrogdorSummary();
-  const overlay = rect(
-    center.x + 1,
-    center.y + 1,
-    Math.max(20, center.w - 2),
-    Math.max(8, center.h - 2),
-  );
+  // Inset the overlay by 1 cell on each side, but never let the minimum-size
+  // guard push it past the center rect. On a clamped-small terminal (center.h
+  // can be 6, center.w can be 10) Math.max(20/8, …) alone would overrun the
+  // center and bleed the box/text into the footer or detail rail, so cap the
+  // size to the inset width/height as well.
+  const overlayWidth = Math.min(Math.max(1, center.w - 2), Math.max(20, center.w - 2));
+  const overlayHeight = Math.min(Math.max(1, center.h - 2), Math.max(8, center.h - 2));
+  const overlay = rect(center.x + 1, center.y + 1, overlayWidth, overlayHeight);
   drawPanel(frame, overlay, "overview", {
     bg: COLORS.overlayBg,
     border: COLORS.panelBorderSoft,
@@ -704,11 +706,19 @@ function environmentRowIsDegraded(row) {
 
 function drawTrogdorPressureAtlas(frame, overlay, sessions, model, summary, environmentRowsUsed = 0) {
   const repoGroups = buildTrogdorRepoGroups(sessions);
-  const atlasTop = overlay.y + 5 + Math.max(0, environmentRowsUsed);
   const atlasBottom = overlay.y + overlay.h - 3;
+  // Keep the atlas inside the overlay even when it is short. The header rows and
+  // environment matrix push the top down by a fixed offset, but on a cramped
+  // overlay that offset can exceed the overlay bottom — clamping atlasTop and
+  // deriving the height from the remaining gap stops the atlas (cues line, repo
+  // rows, "more repos" hint) from bleeding past the overlay into the footer.
+  const atlasTop = Math.min(overlay.y + 5 + Math.max(0, environmentRowsUsed), atlasBottom);
   const readerWidth = overlay.w >= 62 ? Math.min(40, Math.max(34, Math.floor(overlay.w * 0.44))) : 0;
   const atlasWidth = overlay.w - 4 - (readerWidth ? readerWidth + 1 : 0);
-  const atlas = rect(overlay.x + 2, atlasTop, Math.max(22, atlasWidth), Math.max(4, atlasBottom - atlasTop));
+  const atlas = rect(overlay.x + 2, atlasTop, Math.max(22, atlasWidth), Math.max(0, atlasBottom - atlasTop));
+  if (atlas.h < 1) {
+    return;
+  }
 
   drawText(frame, atlas.x, atlas.y, truncate(`cues ${summary.actionCues} / agents ${sessions.length} / level ${summary.pressure}`, atlas.w), {
     fg: COLORS.warning,
