@@ -130,6 +130,7 @@ const FLEET_PRESET_STORAGE_KEY = "swimmers.web.fleet.preset";
 const SESSION_GROUP_MODE_STORAGE_KEY = "swimmers.web.sessionGroupMode";
 const TERMINAL_ZOOM_STORAGE_KEY = "swimmers.web.terminalZoom";
 const SEND_HISTORY_KEY = "swimmers.web.send.history";
+const COMMAND_PALETTE_RECENCY_KEY = "swimmers.web.palette.recency";
 const SESSION_REFRESH_MS = 2500;
 const SESSION_REFRESH_STREAMING_MS = 10000;
 const SNAPSHOT_REFRESH_MS = 900;
@@ -1675,6 +1676,21 @@ const commandPaletteController = createCommandPaletteController({
   refreshMermaidArtifact,
   renderCommandPaletteResults({ items, activeIndex }) {
     return commandPaletteIsland?.renderResults?.({ items, activeIndex }) === true;
+  },
+  loadCommandPaletteRecency() {
+    try {
+      const parsed = JSON.parse(localStorage.getItem(COMMAND_PALETTE_RECENCY_KEY) || "{}");
+      return parsed && typeof parsed === "object" ? parsed : {};
+    } catch {
+      return {};
+    }
+  },
+  persistCommandPaletteRecency(recency) {
+    try {
+      localStorage.setItem(COMMAND_PALETTE_RECENCY_KEY, JSON.stringify(recency));
+    } catch {
+      // Best-effort: a full or disabled storage must never break the palette.
+    }
   },
 });
 

@@ -1,6 +1,7 @@
 import {
   commandPaletteExecutionPlan,
   filteredCommandPaletteItemsForState,
+  recordCommandPaletteUse,
   renderCommandPaletteResultsHtml,
 } from "./command_palette.js";
 
@@ -23,6 +24,8 @@ export function createCommandPaletteController({
   refreshNativeStatus,
   refreshMermaidArtifact,
   renderCommandPaletteResults,
+  persistCommandPaletteRecency = () => {},
+  loadCommandPaletteRecency = () => ({}),
 }) {
   function filteredCommandPaletteItems() {
     return filteredCommandPaletteItemsForState({
@@ -31,6 +34,7 @@ export function createCommandPaletteController({
       sessions: state.sessions,
       copyFrameAction: copyTerminalFrameText,
       query: el.paletteSearch?.value,
+      recency: state.commandPaletteRecency || {},
     });
   }
 
@@ -65,10 +69,16 @@ export function createCommandPaletteController({
     } else {
       return false;
     }
+    // Remember this action so the palette surfaces it first next time (frecency).
+    state.commandPaletteRecency = recordCommandPaletteUse(state.commandPaletteRecency || {}, item);
+    persistCommandPaletteRecency(state.commandPaletteRecency);
     return true;
   }
 
   function openCommandPalette() {
+    // Hydrate frecency from persisted use so recently-run actions surface first
+    // across reloads (persist-on-use keeps it current within the session).
+    state.commandPaletteRecency = loadCommandPaletteRecency();
     setActiveSheet("palette");
     if (el.paletteSearch) {
       el.paletteSearch.value = "";

@@ -74,13 +74,30 @@ export function commandPaletteScore(item, query) {
   return score;
 }
 
-function commandPaletteRankCompare(a, b) {
-  return b.score - a.score || a.label.localeCompare(b.label);
+export function commandPaletteRecencyKey(item) {
+  return String(item?.sessionId || item?.actionId || item?.label || "");
 }
 
-function sortedCommandPaletteItems(source, normalizedQuery) {
+function commandPaletteRankCompare(a, b) {
+  // Query relevance dominates; recency is a tie-breaker that also orders the
+  // empty-query list "recently-used first" (frecency) without ever overriding a
+  // stronger query match.
+  return (
+    b.score - a.score || (b.recency || 0) - (a.recency || 0) || a.label.localeCompare(b.label)
+  );
+}
+
+function scoreCommandPaletteItem(item, normalizedQuery, recency) {
+  return {
+    ...item,
+    score: commandPaletteScore(item, normalizedQuery),
+    recency: recency[commandPaletteRecencyKey(item)] || 0,
+  };
+}
+
+function sortedCommandPaletteItems(source, normalizedQuery, recency) {
   return source
-    .map((item) => ({ ...item, score: commandPaletteScore(item, normalizedQuery) }))
+    .map((item) => scoreCommandPaletteItem(item, normalizedQuery, recency))
     .filter((item) => !normalizedQuery || item.score > 0)
     .sort(commandPaletteRankCompare);
 }
@@ -99,24 +116,49 @@ function insertBoundedCommandPaletteItem(ranked, item, limit) {
   }
 }
 
-export function filterCommandPaletteItems(items = [], query = "", limit = 18) {
+export function filterCommandPaletteItems(items = [], query = "", limit = 18, recency = {}) {
   const normalizedQuery = String(query || "").trim().toLowerCase();
   const source = Array.isArray(items) ? items : [];
+  const recencyMap = recency && typeof recency === "object" ? recency : {};
   if (!Number.isInteger(limit)) {
-    return sortedCommandPaletteItems(source, normalizedQuery).slice(0, limit);
+    return sortedCommandPaletteItems(source, normalizedQuery, recencyMap).slice(0, limit);
   }
   if (limit <= 0) {
     return [];
   }
   const ranked = [];
   for (const item of source) {
-    const scoredItem = { ...item, score: commandPaletteScore(item, normalizedQuery) };
+    const scoredItem = scoreCommandPaletteItem(item, normalizedQuery, recencyMap);
     if (normalizedQuery && scoredItem.score <= 0) {
       continue;
     }
     insertBoundedCommandPaletteItem(ranked, scoredItem, limit);
   }
   return ranked;
+}
+
+/// Record that a palette item was executed, returning a new recency map with the
+/// item bumped to the most-recent rank. The map is bounded to `limit` keys so it
+/// cannot grow without bound across a long session.
+export function recordCommandPaletteUse(recency = {}, item, limit = 50) {
+  const key = commandPaletteRecencyKey(item);
+  if (!key) {
+    return recency && typeof recency === "object" ? recency : {};
+  }
+  const base = recency && typeof recency === "object" ? recency : {};
+  const values = Object.values(base);
+  const nextRank = (values.length ? Math.max(...values) : 0) + 1;
+  const next = { ...base, [key]: nextRank };
+  const keys = Object.keys(next);
+  if (keys.length <= limit) {
+    return next;
+  }
+  const kept = keys.sort((a, b) => next[b] - next[a]).slice(0, limit);
+  const capped = {};
+  for (const keptKey of kept) {
+    capped[keptKey] = next[keptKey];
+  }
+  return capped;
 }
 
 export function filteredCommandPaletteItemsForState({
@@ -126,11 +168,13 @@ export function filteredCommandPaletteItemsForState({
   copyFrameAction = null,
   query = "",
   limit = 18,
+  recency = {},
 } = {}) {
   return filterCommandPaletteItems(
     buildCommandPaletteItems({ selectedSession, readOnly, sessions, copyFrameAction }),
     query,
     limit,
+    recency,
   );
 }
 

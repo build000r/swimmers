@@ -10,6 +10,7 @@ import {
   commandPaletteSessionDisplayName,
   filterCommandPaletteItems,
   filteredCommandPaletteItemsForState,
+  recordCommandPaletteUse,
   renderCommandPaletteResultsHtml,
 } from "./command_palette.js";
 
@@ -90,15 +91,48 @@ test("command palette filtering matches full-sort ranking for bounded result set
   const oracle = (query, limit) => {
     const normalizedQuery = String(query || "").trim().toLowerCase();
     return items
-      .map((item) => ({ ...item, score: commandPaletteScore(item, normalizedQuery) }))
+      .map((item) => ({ ...item, score: commandPaletteScore(item, normalizedQuery), recency: 0 }))
       .filter((item) => !normalizedQuery || item.score > 0)
-      .sort((a, b) => b.score - a.score || a.label.localeCompare(b.label))
+      .sort(
+        (a, b) =>
+          b.score - a.score || (b.recency || 0) - (a.recency || 0) || a.label.localeCompare(b.label),
+      )
       .slice(0, limit);
   };
 
   assert.deepEqual(filterCommandPaletteItems(items, "agent", 7), oracle("agent", 7));
   assert.deepEqual(filterCommandPaletteItems(items, "", 5), oracle("", 5));
   assert.deepEqual(filterCommandPaletteItems(items, "workspace 3", 9), oracle("workspace 3", 9));
+});
+
+test("command palette frecency lifts recently-used items as a tie-breaker", () => {
+  const items = [
+    { label: "Focus terminal", actionId: "focus_terminal" },
+    { label: "Open auth", actionId: "open_auth" },
+    { label: "Send to terminal", actionId: "open_send" },
+  ];
+
+  // With no query, all items score equally; recency orders the list so the most
+  // recently used action is first (open the palette -> your last action is right there).
+  let recency = {};
+  recency = recordCommandPaletteUse(recency, items[1]); // open_auth
+  recency = recordCommandPaletteUse(recency, items[2]); // open_send (more recent)
+  const ranked = filterCommandPaletteItems(items, "", 18, recency);
+  assert.equal(ranked[0].actionId, "open_send");
+  assert.equal(ranked[1].actionId, "open_auth");
+  assert.equal(ranked[2].actionId, "focus_terminal");
+
+  // A strong query match still dominates recency (recency never overrides relevance).
+  const queried = filterCommandPaletteItems(items, "focus", 18, recency);
+  assert.equal(queried[0].actionId, "focus_terminal");
+
+  // The recency map is bounded.
+  let capped = {};
+  for (let i = 0; i < 10; i += 1) {
+    capped = recordCommandPaletteUse(capped, { actionId: `a_${i}` }, 3);
+  }
+  assert.equal(Object.keys(capped).length, 3);
+  assert.ok(capped.a_9 && capped.a_8 && capped.a_7, "keeps the 3 most-recent keys");
 });
 
 test("command palette state helper combines built-in commands, sessions, and scores", () => {
