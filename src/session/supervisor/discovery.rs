@@ -46,7 +46,7 @@ impl SessionSupervisor {
             "running tmux list-sessions"
         );
         let output = run_bounded_tmux_command(
-            "tmux",
+            self.config.tmux_bin.as_str(),
             &["list-sessions", "-F", "#{session_name}"],
             TMUX_LIST_SESSIONS_TIMEOUT,
             "list-sessions",

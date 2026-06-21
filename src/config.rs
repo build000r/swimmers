@@ -144,6 +144,14 @@ pub struct Config {
     pub replay_buffer_size: usize,
     pub outbound_queue_bound: usize,
     pub thought_backend: ThoughtBackend,
+    /// Program used to invoke tmux for session *discovery* (default `"tmux"`),
+    /// overridable via `SWIMMERS_TMUX_BIN`. Its primary purpose is hermetic
+    /// tests: pointing discovery at a no-op binary keeps `fetch_sessions` from
+    /// enumerating the host tmux server (swimmers-orkj). NOTE: actor-side tmux
+    /// IO (spawn/send-keys/capture) still uses the default `"tmux"`; threading
+    /// this through the full session layer is a tracked follow-up, so do not yet
+    /// rely on it as a general tmux-binary override for real deployments.
+    pub tmux_bin: String,
 }
 
 impl Default for Config {
@@ -160,6 +168,7 @@ impl Default for Config {
             // NOTE: empirical default — sized well above the 600-frame burst floor verified in tests.
             outbound_queue_bound: 4096,
             thought_backend: ThoughtBackend::Daemon,
+            tmux_bin: "tmux".to_string(),
         }
     }
 }
@@ -245,6 +254,12 @@ fn apply_env_observer_token(load: &mut ConfigLoad) {
 fn apply_env_bind(load: &mut ConfigLoad) {
     if let Some(addr) = parse_env_non_empty_string(load, "SWIMMERS_BIND") {
         load.config.bind = addr;
+    }
+}
+
+fn apply_env_tmux_bin(load: &mut ConfigLoad) {
+    if let Some(bin) = parse_env_non_empty_string(load, "SWIMMERS_TMUX_BIN") {
+        load.config.tmux_bin = bin;
     }
 }
 
@@ -463,6 +478,7 @@ impl Config {
         apply_env_auth_token(&mut load);
         apply_env_observer_token(&mut load);
         apply_env_bind(&mut load);
+        apply_env_tmux_bin(&mut load);
         apply_env_personal_workflows(&mut load, &defaults);
         apply_env_thought_backend(&mut load, &defaults);
         apply_env_thought_tick_ms(&mut load, &defaults);

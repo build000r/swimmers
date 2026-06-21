@@ -977,6 +977,16 @@ pub(crate) async fn fetch_remote_session_summary(
 }
 
 fn remote_polling_enabled_for_environment() -> bool {
+    // Runtime opt-out honored in ALL build profiles. The cfg(test) gate below
+    // only applies to this crate's own tests; when the swimmers-tui bin's tests
+    // depend on this library it is compiled WITHOUT cfg(test), so that gate is
+    // bypassed and fetch_sessions would otherwise poll the host's real remote
+    // environment. This env lets those tests (and any operator) suppress remote
+    // polling deterministically (swimmers-orkj).
+    if std::env::var_os("SWIMMERS_DISABLE_REMOTE_POLLING").is_some() {
+        return false;
+    }
+
     #[cfg(test)]
     {
         std::env::var_os("SWIMMERS_TEST_ENABLE_REMOTE_POLLING").is_some()

@@ -649,7 +649,21 @@ mod tests {
     }
 
     fn test_state_with_store(file_store: Option<Arc<FileStore>>) -> Arc<AppState> {
-        let config = Arc::new(Config::default());
+        // Keep the in-process tests hermetic regardless of the developer's live
+        // environment (swimmers-orkj): (1) suppress remote polling so
+        // fetch_sessions can't reach the host's real remote targets -- the
+        // swimmers lib is compiled WITHOUT cfg(test) as the bin's dependency, so
+        // its own cfg(test) gate doesn't apply here; (2) point tmux discovery at
+        // `true` (a no-op exiting 0 with empty output) so any discovery path
+        // can't enumerate the host tmux server. Set once for the whole test bin.
+        static HERMETIC_ENV: std::sync::Once = std::sync::Once::new();
+        HERMETIC_ENV.call_once(|| {
+            std::env::set_var("SWIMMERS_DISABLE_REMOTE_POLLING", "1");
+        });
+        let config = Arc::new(Config {
+            tmux_bin: "true".to_string(),
+            ..Config::default()
+        });
         let supervisor = SessionSupervisor::new(config.clone());
         Arc::new(AppState {
             supervisor,
