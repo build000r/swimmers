@@ -435,12 +435,20 @@ impl StateChangeDetection {
     }
 
     fn into_payload(self, exit_reason: Option<String>) -> SessionStatePayload {
+        // A terminal exit (the only caller that passes Some) means the PTY
+        // transport is gone, so report it Disconnected to match the supervisor's
+        // missing-tmux exit path in discovery.rs; ongoing transitions stay Healthy.
+        let transport_health = if exit_reason.is_some() {
+            TransportHealth::Disconnected
+        } else {
+            TransportHealth::Healthy
+        };
         SessionStatePayload {
             state: self.current_state,
             previous_state: self.previous_state,
             current_command: self.current_command,
             state_evidence: self.current_evidence,
-            transport_health: TransportHealth::Healthy,
+            transport_health,
             exit_reason,
             at: Utc::now(),
         }
@@ -1073,7 +1081,10 @@ impl SessionActor {
 
     fn should_check_liveness(&self, now: Instant) -> bool {
         self.state_detector.state() != SessionState::Exited
-            && now.duration_since(self.last_liveness_check_at) >= LIVENESS_CHECK_INTERVAL
+            && now
+                .checked_duration_since(self.last_liveness_check_at)
+                .unwrap_or(Duration::ZERO)
+                >= LIVENESS_CHECK_INTERVAL
     }
 
     async fn query_and_reconcile_liveness(&mut self) {

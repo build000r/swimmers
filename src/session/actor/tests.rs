@@ -490,7 +490,8 @@ fn state_change_payload_preserves_exit_reason_and_transport_health() {
     assert_eq!(payload.state, SessionState::Exited);
     assert_eq!(payload.previous_state, SessionState::Busy);
     assert_eq!(payload.state_evidence.cause, "process_exit");
-    assert_eq!(payload.transport_health, TransportHealth::Healthy);
+    // A terminal exit reports the transport as gone, matching discovery.rs.
+    assert_eq!(payload.transport_health, TransportHealth::Disconnected);
     assert_eq!(payload.exit_reason.as_deref(), Some("process_exit"));
 }
 
@@ -516,7 +517,8 @@ fn state_change_event_with_exit_reason_preserves_payload_fields() {
         serde_json::from_value(event.payload).expect("session_state payload");
     assert_eq!(payload.state, SessionState::Exited);
     assert_eq!(payload.previous_state, SessionState::Idle);
-    assert_eq!(payload.transport_health, TransportHealth::Healthy);
+    // A terminal exit reports the transport as gone, matching discovery.rs.
+    assert_eq!(payload.transport_health, TransportHealth::Disconnected);
     assert_eq!(payload.exit_reason.as_deref(), Some("process_exit"));
 }
 
