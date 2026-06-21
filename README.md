@@ -316,6 +316,31 @@ In `AUTH_MODE=token`, browser HTTP requests use an `Authorization: Bearer ...` h
 
 ---
 
+## Browser cockpit
+
+Once the server is reachable (see above), open it in a browser. `/` is the
+**Trogdor atlas** — a live fleet overview of every session, its state, and a
+speed-reader that surfaces each agent's latest thoughts — and `/selected` is the
+**focused terminal** for the current session. Both share the same session state
+as the TUI, so you can drive a fleet from either surface. The cockpit is
+keyboard-first:
+
+- **Command palette — `Ctrl+K`.** The universal launcher: fuzzy-search every
+  action and session, then Enter. Each action shows its keyboard chord inline,
+  so the palette doubles as the keyboard reference. Recently used entries float
+  to the top, so your common actions stay one keystroke away.
+- **Jump to who needs you — `Ctrl+Shift+J`.** Cycles selection to the next
+  session awaiting input/attention and wraps around, so managing a fleet never
+  means hunting for which agent is blocked.
+- **Other chords** (all also listed in the palette): `Ctrl+Shift+F` search,
+  `Ctrl+Shift+S` send, `Ctrl+Shift+C` copy selection, `Ctrl+Shift+V` select
+  mode, `Ctrl+Shift+O` native terminal, `Ctrl+Shift+N` create session,
+  `Ctrl+Shift+G` toggle the atlas, `Ctrl+Shift+R` refresh,
+  `Ctrl+=` / `Ctrl+-` / `Ctrl+0` zoom, and `Esc` to close the active sheet or
+  atlas.
+
+---
+
 ## Environment Variables
 
 | Variable | Default | Purpose |
