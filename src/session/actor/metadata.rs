@@ -254,7 +254,10 @@ pub(super) fn should_refresh_cwd_from_tmux(
 ) -> bool {
     force
         || (state == SessionState::Idle
-            && now.duration_since(last_refresh_at) >= CWD_REFRESH_MIN_INTERVAL)
+            && now
+                .checked_duration_since(last_refresh_at)
+                .unwrap_or(Duration::ZERO)
+                >= CWD_REFRESH_MIN_INTERVAL)
 }
 
 pub(super) fn should_refresh_tool_from_tmux(
@@ -268,7 +271,11 @@ pub(super) fn should_refresh_tool_from_tmux(
         return true;
     }
 
-    if now.duration_since(last_refresh_at) < TOOL_REFRESH_MIN_INTERVAL {
+    if now
+        .checked_duration_since(last_refresh_at)
+        .unwrap_or(Duration::ZERO)
+        < TOOL_REFRESH_MIN_INTERVAL
+    {
         return false;
     }
 
