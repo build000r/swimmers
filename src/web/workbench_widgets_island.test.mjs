@@ -120,6 +120,21 @@ test("workbench widgets island preserves loading, error, and empty states", () =
   assert.equal(errorNodes[0].props.children[0], "timeline: unavailable");
 });
 
+test("workbench widgets island renders the no-session message via a statusText model", () => {
+  // A null model rendered an empty subtree while still claiming the container,
+  // which blanked the "No session selected." message on the React path.
+  assert.deepEqual(createWorkbenchWidgetsElements(createElement, null), []);
+  // The empty state now routes through a statusText model so the message shows
+  // (and is announced via the status live region).
+  const nodes = createWorkbenchWidgetsElements(createElement, {
+    statusText: "No session selected.",
+    items: [],
+  });
+  assert.equal(nodes.length, 1);
+  assert.equal(nodes[0].props.children[0], "No session selected.");
+  assert.equal(nodes[0].props["aria-live"], "polite");
+});
+
 test("workbench widgets island mounts, rerenders, and guards stable host identity", () => {
   const { documentRef, replace } = fakeDocument();
   const calls = [];

@@ -167,9 +167,15 @@ export function createTerminalWorkbenchController({
     const session = currentSession();
     const widgets = selectedWorkbenchWidgets();
     if (!session) {
-      writeWorkbenchWidgetsHtml(
-        `<div class="workbench-action-detail">No session selected.</div>`,
-      );
+      // Render the empty-state through the same model path as the populated
+      // workbench, so the React island actually shows the message instead of an
+      // empty subtree (a null model made createWorkbenchWidgetsElements render
+      // nothing while still claiming the container, blanking the panel).
+      const noSessionModel = { statusText: "No session selected.", items: [] };
+      writeWorkbenchWidgetsView({
+        html: renderWorkbenchWidgetsViewModelHtml(noSessionModel),
+        model: noSessionModel,
+      });
       return;
     }
 
