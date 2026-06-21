@@ -85,8 +85,10 @@ export function createTrogdorEventBindings(runtime = {}) {
     }
     if (plan.type === "surface_action") {
       // The preceding pointerdown already opened this agent; skip the synthetic
-      // click. A keyboard-driven click has no prior pointerdown and proceeds.
+      // click. Consume the window one-shot so a later keyboard Enter (which has
+      // no prior pointerdown) is never swallowed by a still-open suppress window.
       if (shouldIgnoreSyntheticClick(now(), clickSuppressUntil)) {
+        clickSuppressUntil = 0;
         return;
       }
       void handleSurfaceAction(plan.zone);

@@ -152,6 +152,41 @@ test("Trogdor pointer and click handlers preserve default prevention and action 
   assert.deepEqual(actions.at(-1), { type: "trogdor_agent", sessionId: "agent-1" });
 });
 
+test("Trogdor synthetic-click suppression is consumed one-shot, not held for the full window", () => {
+  const surface = new FakeElement();
+  const agent = new FakeElement({ dataset: { sessionId: "agent-1" } });
+  const agentTarget = new FakeElement({ closestMap: { "[data-trogdor-agent]": agent } });
+  const actions = [];
+  const terminals = [];
+  const clock = 1000; // deliberately never advances — that is the regression
+  const bindings = createTrogdorEventBindings({
+    elements: { trogdorSurface: surface },
+    ElementClass: FakeElement,
+    handleSurfaceAction(zone) {
+      actions.push(zone);
+    },
+    openTrogdorAgentTerminal(sessionId) {
+      terminals.push(sessionId);
+    },
+    now: () => clock,
+  });
+  bindings.bindTrogdorEvents();
+
+  // Mouse open: pointerdown opens agent-1 and arms the suppress window.
+  listenerFor(surface, "pointerdown")(fakeEvent(agentTarget));
+  assert.deepEqual(terminals, ["agent-1"]);
+
+  // The synthetic click that follows is suppressed AND consumes the window.
+  listenerFor(surface, "click")(fakeEvent(agentTarget));
+  assert.equal(actions.length, 0);
+
+  // A genuine keyboard Enter (a click with no preceding pointerdown) within the
+  // same 450ms window must still dispatch — the window was consumed one-shot,
+  // not held open to swallow legitimate keyboard activation.
+  listenerFor(surface, "click")(fakeEvent(agentTarget));
+  assert.deepEqual(actions.at(-1), { type: "trogdor_agent", sessionId: "agent-1" });
+});
+
 test("Trogdor handlers preserve disabled button and non-element target behavior", async () => {
   const surface = new FakeElement();
   const disabledButton = new FakeElement({
