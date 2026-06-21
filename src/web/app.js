@@ -1697,6 +1697,7 @@ trogdorAtlasIsland = createTrogdorAtlasIsland({
   documentRef: document,
   windowRef: window,
   surfaceSession,
+  currentSession,
   currentTrogdorSurfaceSession,
   trogdorSessionCanRead,
   trogdorClawgReadComplete,

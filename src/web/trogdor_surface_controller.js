@@ -16,9 +16,8 @@ import {
   trogdorSurfaceSignature,
 } from "./trogdor_render.js";
 import {
-  availableFleetFilter,
   buildFleetLensSummary,
-  sessionMatchesFleetFilter,
+  resolveSurfaceSessions,
 } from "./surface_model.js";
 
 function defaultClampInt(value, fallback, min, max) {
@@ -52,6 +51,7 @@ export function createTrogdorSurfaceController(runtime = {}) {
     documentRef = globalThis.document,
     windowRef = globalThis,
     surfaceSession = (session) => session,
+    currentSession = () => null,
     currentTrogdorSurfaceSession = () => null,
     trogdorSessionCanRead = () => false,
     trogdorClawgReadComplete = () => false,
@@ -74,8 +74,14 @@ export function createTrogdorSurfaceController(runtime = {}) {
     }
 
     const allSessions = state.sessions.map((session) => surfaceSession(session));
-    const filter = availableFleetFilter(buildFleetLensSummary(allSessions), state.fleetFilter);
-    const sessions = allSessions.filter((session) => sessionMatchesFleetFilter(session, filter));
+    // Share the HUD's fleet-preset/fleet-filter resolution so the atlas never
+    // shows a different session set than the rest of the cockpit.
+    const { surfaceSessions: sessions } = resolveSurfaceSessions(
+      state,
+      currentSession(),
+      allSessions,
+      buildFleetLensSummary(allSessions),
+    );
     const groups = buildTrogdorDomGroups(sessions);
     const hovered = trogdorReadableHoveredSurfaceSession(sessions, state.hoveredTrogdorSessionId, {
       sessionCanRead: trogdorSessionCanRead,

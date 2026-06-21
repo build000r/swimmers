@@ -921,6 +921,27 @@ export function surfaceSession(session, {
   return surface;
 }
 
+// Single source of truth for which sessions a surface shows: an active fleet
+// preset (resolved from state.fleetPresetId) filters via its matchers and
+// suppresses the manual fleetFilter; otherwise the manual fleetFilter applies.
+// Both the HUD model and the Trogdor atlas use this so they never diverge.
+export function resolveSurfaceSessions(state, selectedSession, allSurfaceSessions, fleetLens) {
+  const fleetPresets = buildFleetLensPresets(state.fleetPresets);
+  const requestedPresetId = normalizePresetId(state.fleetPresetId);
+  const activePreset = resolveFleetPreset(
+    fleetPresets.find((preset) => preset.id === requestedPresetId),
+    selectedSession,
+    allSurfaceSessions,
+  );
+  const fleetFilter = activePreset
+    ? { kind: "", key: "" }
+    : availableFleetFilter(fleetLens, state.fleetFilter);
+  const surfaceSessions = activePreset
+    ? allSurfaceSessions.filter((session) => sessionMatchesPreset(session, activePreset))
+    : allSurfaceSessions.filter((session) => sessionMatchesFleetFilter(session, fleetFilter));
+  return { activePreset, fleetFilter, surfaceSessions, fleetPresets };
+}
+
 export function buildSurfaceModel({
   state,
   boot,
@@ -942,17 +963,12 @@ export function buildSurfaceModel({
   const allSurfaceSessions = state.sessions.map((session) => surfaceSession(session, surfaceOptions(session)));
   const sessionGroupMode = normalizeSessionGroupMode(state.sessionGroupMode);
   const fleetLens = buildFleetLensSummary(allSurfaceSessions);
-  const fleetPresets = buildFleetLensPresets(state.fleetPresets);
-  const requestedPresetId = normalizePresetId(state.fleetPresetId);
-  const activePreset = resolveFleetPreset(
-    fleetPresets.find((preset) => preset.id === requestedPresetId),
+  const { activePreset, fleetFilter, surfaceSessions, fleetPresets } = resolveSurfaceSessions(
+    state,
     selectedSession,
     allSurfaceSessions,
+    fleetLens,
   );
-  const fleetFilter = activePreset ? { kind: "", key: "" } : availableFleetFilter(fleetLens, state.fleetFilter);
-  const surfaceSessions = activePreset
-    ? allSurfaceSessions.filter((session) => sessionMatchesPreset(session, activePreset))
-    : allSurfaceSessions.filter((session) => sessionMatchesFleetFilter(session, fleetFilter));
   const filteredFleetLens = buildFleetLensSummary(surfaceSessions);
   const environmentSessions = activePreset ? surfaceSessions : allSurfaceSessions;
   const allEnvironmentMatrix = buildEnvironmentMatrix(state.environments, environmentSessions);
