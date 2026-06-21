@@ -124,6 +124,8 @@ pub enum EmitterClientError {
         #[source]
         source: io::Error,
     },
+    #[error("clawgs emit daemon did not accept the sync request within {timeout_ms}ms")]
+    RequestWriteTimeout { timeout_ms: u64 },
     #[error("failed to read sync response from clawgs emit daemon: {source}")]
     ResponseRead {
         #[source]
@@ -168,6 +170,7 @@ impl EmitterClientError {
                 | Self::HandshakeEof
                 | Self::HelloTimeout { .. }
                 | Self::RequestWrite { .. }
+                | Self::RequestWriteTimeout { .. }
                 | Self::ResponseRead { .. }
                 | Self::ResponseEof
                 | Self::ResponseTimeout { .. }
@@ -286,10 +289,19 @@ impl EmitterClient {
             .daemon
             .as_mut()
             .expect("daemon must exist after ensure_running");
-        daemon
-            .write_line(&request_line)
-            .await
-            .map_err(|source| EmitterClientError::RequestWrite { source })?;
+        // Bound the write like the read below: if the daemon stops draining its
+        // stdin (e.g. wedged with a full stdout), an unbounded write could await
+        // forever and hang this bridge task. A timeout maps to a retryable error
+        // so the supervisor restarts the daemon instead (swimmers round-9).
+        match tokio::time::timeout(response_timeout, daemon.write_line(&request_line)).await {
+            Ok(Ok(())) => {}
+            Ok(Err(source)) => return Err(EmitterClientError::RequestWrite { source }),
+            Err(_) => {
+                return Err(EmitterClientError::RequestWriteTimeout {
+                    timeout_ms: response_timeout.as_millis() as u64,
+                });
+            }
+        }
 
         let response_line =
             match tokio::time::timeout(response_timeout, daemon.read_non_empty_line()).await {
