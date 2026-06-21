@@ -113,9 +113,21 @@ fn picker_priority_key_command(
         KeyCode::Char(' ') if picker.batch_exclude_mode => Some(
             PickerPriorityKeyCommand::ToggleBatchExclude(selected_entry_index(picker)),
         ),
+        // '-', '+', '=' double as group-edit commands and as characters common
+        // in repo names (e.g. "frontend-platform"). Once a live search is in
+        // progress, let them extend the search instead of firing a group action,
+        // so a hyphenated name is filterable; with an empty search a bare symbol
+        // is still the group command (swimmers-ahsf).
+        KeyCode::Char(ch) if is_search_extending_symbol(ch) && !picker.search.is_empty() => None,
         KeyCode::Char(ch) => char_command(PRIORITY_CHAR_COMMANDS, ch),
         _ => None,
     }
+}
+
+/// Symbol commands that also occur inside repo names; they defer to live search
+/// once a search is in progress (swimmers-ahsf).
+fn is_search_extending_symbol(ch: char) -> bool {
+    matches!(ch, '-' | '+' | '=')
 }
 
 fn apply_picker_priority_key<C: TuiApi>(

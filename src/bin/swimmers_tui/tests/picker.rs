@@ -1918,6 +1918,90 @@ fn picker_keyboard_exclusion_toggles_selected_entry_out_of_batch() {
 }
 
 #[test]
+fn picker_leaving_exclude_mode_clears_staged_exclusions() {
+    let api = MockApi::new();
+    let layout = test_layout(120, 32);
+    let mut app = make_app(api);
+    app.picker = Some(PickerState::new(
+        10,
+        10,
+        dir_response(TEST_REPOS_ROOT, &[("alpha", true), ("beta", true)]),
+        true,
+        SpawnTool::Codex,
+        None,
+    ));
+
+    // Enter exclude mode and exclude 'beta'.
+    assert!(handle_key_event(&mut app, layout, key(KeyCode::Char('X'))));
+    {
+        let picker = app.picker.as_mut().expect("picker");
+        assert!(picker.batch_exclude_mode);
+        picker.selection = PickerSelection::Entry(1);
+    }
+    assert!(handle_key_event(&mut app, layout, key(KeyCode::Char(' '))));
+    assert_eq!(
+        app.picker
+            .as_ref()
+            .expect("picker")
+            .batch_dirs_for_visible_entries(),
+        vec![TEST_REPO_ALPHA.to_string()]
+    );
+
+    // Leaving exclude mode (X again) clears the staged exclusion so a later
+    // batch launch includes every dir again (swimmers-oswr).
+    assert!(handle_key_event(&mut app, layout, key(KeyCode::Char('X'))));
+    let picker = app.picker.as_ref().expect("picker");
+    assert!(!picker.batch_exclude_mode);
+    assert!(picker.batch_excluded_paths.is_empty());
+    assert_eq!(
+        picker.batch_dirs_for_visible_entries(),
+        vec![TEST_REPO_ALPHA.to_string(), TEST_REPO_BETA.to_string()]
+    );
+}
+
+#[test]
+fn picker_hyphen_extends_active_search_instead_of_group_command() {
+    let api = MockApi::new();
+    let layout = test_layout(120, 32);
+    let mut app = make_app(api);
+    app.picker = Some(PickerState::new(
+        10,
+        10,
+        dir_response(TEST_REPOS_ROOT, &[("frontend-platform", true)]),
+        true,
+        SpawnTool::Codex,
+        None,
+    ));
+
+    // Start a search, then a hyphen must extend it. Regression (swimmers-ahsf):
+    // '-' previously fired RemoveSelectedFromGroupTarget, so a hyphenated repo
+    // name could not be typed into the live search.
+    assert!(handle_key_event(&mut app, layout, key(KeyCode::Char('f'))));
+    assert!(handle_key_event(&mut app, layout, key(KeyCode::Char('-'))));
+    assert_eq!(app.picker.as_ref().expect("picker").search, "f-");
+}
+
+#[test]
+fn picker_bare_symbol_remains_group_command_with_empty_search() {
+    let api = MockApi::new();
+    let layout = test_layout(120, 32);
+    let mut app = make_app(api);
+    app.picker = Some(PickerState::new(
+        10,
+        10,
+        dir_response(TEST_REPOS_ROOT, &[("alpha", true), ("beta", true)]),
+        true,
+        SpawnTool::Codex,
+        None,
+    ));
+
+    // With no active search, a bare '-' stays the group command and does not
+    // enter the search buffer.
+    assert!(handle_key_event(&mut app, layout, key(KeyCode::Char('-'))));
+    assert_eq!(app.picker.as_ref().expect("picker").search, "");
+}
+
+#[test]
 fn render_picker_shows_batch_count_and_out_in_chips() {
     let field = test_field();
     let mut picker = PickerState::new(

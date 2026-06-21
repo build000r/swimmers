@@ -141,6 +141,15 @@ impl<C: TuiApi> App<C> {
     fn toggle_picker_batch_exclude_mode(&mut self) {
         if let Some(picker) = &mut self.picker {
             picker.batch_exclude_mode = !picker.batch_exclude_mode;
+            if !picker.batch_exclude_mode {
+                // Leaving exclude mode clears the staged exclusions: their
+                // badge/UI disappears with the mode, but batch_dirs_for_visible_
+                // entries filters on them unconditionally, so a later batch
+                // launch (B, reachable while the mode is off) would otherwise
+                // silently drop them (swimmers-oswr). Exclusions therefore do
+                // not persist across re-entry into the mode.
+                picker.batch_excluded_paths.clear();
+            }
         }
     }
 
