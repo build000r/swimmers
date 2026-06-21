@@ -101,6 +101,9 @@ test("workbench widgets island preserves loading, error, and empty states", () =
   assert.equal(loadingNodes[0].type, "div");
   assert.equal(loadingNodes[0].props.className, "workbench-action-detail");
   assert.equal(loadingNodes[0].props.children[0], "Loading pinned widgets...");
+  // Loading/error transitions must be announced to assistive tech.
+  assert.equal(loadingNodes[0].props.role, "status");
+  assert.equal(loadingNodes[0].props["aria-live"], "polite");
 
   const empty = buildWorkbenchWidgetsViewModel({ widgets: {}, contextPayload: null });
   const emptyNodes = createWorkbenchWidgetsElements(createElement, empty);

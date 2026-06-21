@@ -29,6 +29,8 @@ export function createWorkbenchWidgetsElements(createElement, model = {}) {
       {
         className: "workbench-action-detail",
         key: "workbench-status",
+        role: "status",
+        "aria-live": "polite",
       },
       String(model.statusText),
     ));

@@ -655,7 +655,7 @@ export function buildWorkbenchWidgetsViewModel({
 export function renderWorkbenchWidgetsViewModelHtml(model = {}) {
   const items = Array.isArray(model?.items) ? model.items : [];
   const status = model?.statusText
-    ? `<div class="workbench-action-detail">${escapeHtml(model.statusText)}</div>`
+    ? `<div class="workbench-action-detail" role="status" aria-live="polite">${escapeHtml(model.statusText)}</div>`
     : "";
   return `
     ${status}
