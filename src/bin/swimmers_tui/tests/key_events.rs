@@ -187,6 +187,31 @@ fn ctrl_c_does_not_quit_without_embedded_shutdown() {
 }
 
 #[test]
+fn text_input_modal_is_detected_for_ctrl_c_suppression() {
+    // The embedded Ctrl-C quit is suppressed while a text-input modal owns
+    // focus so a typed draft is not silently discarded (swimmers-edlb); this
+    // covers the predicate that gates that suppression in handle_key_event.
+    let api = MockApi::new();
+    let mut app = make_app(api);
+    assert!(
+        !app.has_active_text_input_modal(),
+        "no text-input modal initially"
+    );
+
+    app.open_initial_request("/tmp/project".to_string(), None);
+    assert!(
+        app.has_active_text_input_modal(),
+        "composer open must suppress the embedded Ctrl-C quit"
+    );
+
+    app.close_initial_request();
+    assert!(
+        !app.has_active_text_input_modal(),
+        "closing the composer re-enables the Ctrl-C quit"
+    );
+}
+
+#[test]
 fn handle_key_event_routes_plain_picker_chars_to_search_before_hotkeys() {
     let api = MockApi::new();
     let layout = test_layout(120, 32);

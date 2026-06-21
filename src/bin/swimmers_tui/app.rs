@@ -466,6 +466,12 @@ impl<C: TuiApi> App<C> {
         self.embedded_shutdown.is_some()
     }
 
+    /// True while a text-input modal (the initial-request composer or the
+    /// thought-config editor) owns focus and holds an in-progress draft.
+    pub(crate) fn has_active_text_input_modal(&self) -> bool {
+        self.initial_request.is_some() || self.thought_config_editor.is_some()
+    }
+
     pub(crate) fn shutdown_embedded(&mut self) -> anyhow::Result<()> {
         let Some(shutdown) = self.embedded_shutdown.take() else {
             return Ok(());

@@ -486,6 +486,13 @@ pub(crate) fn handle_key_event<C: TuiApi>(
     key: KeyEvent,
 ) -> bool {
     if is_embedded_ctrl_c_quit(app, key) {
+        // While a text-input modal owns focus, Ctrl-C must not quit the embedded
+        // TUI and silently discard the in-progress draft. Consume it as a no-op
+        // so the draft (and modal) are preserved; Esc still cancels the modal
+        // (swimmers-edlb).
+        if app.has_active_text_input_modal() {
+            return true;
+        }
         return false;
     }
     if let Some(handled) = handle_modal_key(app, layout, key) {
