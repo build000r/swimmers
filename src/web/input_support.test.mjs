@@ -6,6 +6,7 @@ import {
   authTokenButtonPlan, controlEventSessionPatchPlan, eventCell,
   eventClientPoint,
   globalShortcutPlan,
+  nextAttentionSessionPlan,
   initialStateBootPlan,
   inputAckActionPlan,
   lifecycleDeletedSessionPatchPlan,
@@ -153,6 +154,9 @@ test("globalShortcutPlan preserves ctrl-shift commands and gated handled no-ops"
   });
   assert.deepEqual(globalShortcutPlan({ ctrlKey: true, shiftKey: true, code: "KeyG" }), {
     type: "toggle_trogdor_atlas",
+  });
+  assert.deepEqual(globalShortcutPlan({ ctrlKey: true, shiftKey: true, code: "KeyJ" }), {
+    type: "next_attention",
   });
   assert.deepEqual(globalShortcutPlan({ ctrlKey: true, shiftKey: true, code: "KeyP" }), {
     type: "toggle_follow",
@@ -1945,4 +1949,24 @@ test("terminalToolsAvailabilityPlan preserves search status copy", () => {
     frankenTermAvailable: true,
     searchQuery: "",
   }).searchStatus, { label: "Search idle", muted: true });
+});
+
+test("nextAttentionSessionPlan cycles through attention sessions and wraps", () => {
+  const sessions = [
+    { session_id: "a", needs: false },
+    { session_id: "b", needs: true },
+    { session_id: "c", needs: false },
+    { session_id: "d", needs: true },
+  ];
+  const needs = (s) => Boolean(s?.needs);
+
+  // No current selection (or a non-attention one): start at the first attention.
+  assert.deepEqual(nextAttentionSessionPlan(sessions, null, needs), { type: "select", sessionId: "b" });
+  assert.deepEqual(nextAttentionSessionPlan(sessions, "a", needs), { type: "select", sessionId: "b" });
+  // From an attention session, advance to the next attention one, then wrap.
+  assert.deepEqual(nextAttentionSessionPlan(sessions, "b", needs), { type: "select", sessionId: "d" });
+  assert.deepEqual(nextAttentionSessionPlan(sessions, "d", needs), { type: "select", sessionId: "b" });
+  // None needing attention -> no-op.
+  assert.deepEqual(nextAttentionSessionPlan(sessions, "a", () => false), { type: "none" });
+  assert.deepEqual(nextAttentionSessionPlan([], null, needs), { type: "none" });
 });

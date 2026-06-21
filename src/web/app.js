@@ -2,6 +2,7 @@ import { buildSurfaceFrame, computeSurfaceDirtySpans } from "./rendered_surface.
 import {
   authTokenButtonPlan, controlEventSessionPatchPlan, eventCell, initialStateBootPlan, lifecycleDeletedSessionPatchPlan,
   sheetActionAvailabilityPlan,
+  nextAttentionSessionPlan,
   surfaceActionDispatchContextPlan, surfaceActionDispatchPlan, surfaceActionExecutionContextPlan, surfaceActionExecutionPlan, surfaceActionFocusTerminalExecutionPlan, surfaceActionTrogdorReaderExecutionPlan,
   terminalDestroyStatePatch,
   terminalPaintProbeSchedulePlan, terminalPaintVerificationPlan, terminalPresentationPlan, terminalToolsAvailabilityPlan,
@@ -842,6 +843,12 @@ const globalShortcutRuntime = {
   copyTerminalSelection,
   copyHoveredLink,
   refreshSessions,
+  selectNextAttentionSession() {
+    const plan = nextAttentionSessionPlan(state.sessions, state.selectedSessionId, sessionNeedsAttention);
+    if (plan.type === "select" && plan.sessionId) {
+      void selectSession(plan.sessionId);
+    }
+  },
 };
 
 const terminalWorkbenchController = createTerminalWorkbenchController({

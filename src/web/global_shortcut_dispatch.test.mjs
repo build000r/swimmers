@@ -27,6 +27,7 @@ function buildRuntime(overrides = {}) {
     copyTerminalSelection: () => calls.push(["copyTerminalSelection"]),
     copyHoveredLink: () => calls.push(["copyHoveredLink"]),
     refreshSessions: () => calls.push(["refreshSessions"]),
+    selectNextAttentionSession: () => calls.push(["selectNextAttentionSession"]),
   };
   return { calls, runtime };
 }
@@ -85,4 +86,10 @@ test("runGlobalShortcutAction toggles the trogdor atlas and syncs the reader", (
   runGlobalShortcutAction({ type: "toggle_trogdor_atlas" }, runtime);
   assert.equal(runtime.state.trogdorAtlasOpen, true);
   assert.deepEqual(calls, [["renderHudSurface"], ["syncTrogdorReaderTimer"]]);
+});
+
+test("runGlobalShortcutAction dispatches next_attention to the session jump", () => {
+  const { calls, runtime } = buildRuntime();
+  runGlobalShortcutAction({ type: "next_attention" }, runtime);
+  assert.deepEqual(calls, [["selectNextAttentionSession"]]);
 });

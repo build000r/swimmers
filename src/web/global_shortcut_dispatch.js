@@ -32,6 +32,9 @@ export function runGlobalShortcutAction(plan, runtime) {
       runtime.renderHudSurface();
       runtime.syncTrogdorReaderTimer();
       break;
+    case "next_attention":
+      runtime.selectNextAttentionSession?.();
+      break;
     case "exit_select_mode":
       runtime.setSelectMode(false);
       break;

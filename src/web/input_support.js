@@ -125,9 +125,26 @@ export function globalShortcutPlan(event, context = {}) {
       return { type: "refresh_sessions" };
     case "KeyG":
       return { type: "toggle_trogdor_atlas" };
+    case "KeyJ":
+      return { type: "next_attention" };
     default:
       return { type: "unhandled" };
   }
+}
+
+/// Cycle to the next session that needs the operator (awaiting user / attention),
+/// wrapping around, so managing a fleet never means hunting for who needs you.
+/// `needsAttention` is injected so this stays a pure, node-testable plan.
+export function nextAttentionSessionPlan(sessions, currentSessionId, needsAttention) {
+  const list = Array.isArray(sessions) ? sessions : [];
+  const predicate = typeof needsAttention === "function" ? needsAttention : () => false;
+  const attention = list.filter((session) => predicate(session));
+  if (attention.length === 0) {
+    return { type: "none" };
+  }
+  const currentIndex = attention.findIndex((session) => session?.session_id === currentSessionId);
+  const nextIndex = currentIndex >= 0 ? (currentIndex + 1) % attention.length : 0;
+  return { type: "select", sessionId: attention[nextIndex]?.session_id };
 }
 
 const MOBILE_KEYBOARD_SPECIAL_KEYS = new Set([
