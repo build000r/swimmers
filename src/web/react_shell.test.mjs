@@ -3,6 +3,11 @@ import assert from "node:assert/strict";
 
 import { fakeDocumentForIds } from "./island_test_helpers.mjs";
 import {
+  assertStableIdentity,
+  reportIdentityDrift,
+  setIdentityDriftReporter,
+} from "./react_island_identity.js";
+import {
   SWIMMERS_REACT_ROOT_ID,
   SWIMMERS_STABLE_CONTAINER_IDS,
   SwimmersRootShell,
@@ -92,45 +97,63 @@ test("React shell renders the speed-reader aria-live region so SSR hydration kee
   assert.equal(announce.props["aria-atomic"], "true");
 });
 
-test("React shell identity guard catches synchronous container replacement", () => {
+test("React shell identity drift reports instead of crashing the live surface", () => {
   const { documentRef, replace } = fakeDocument();
-  const handle = mountSwimmersRootShell({
-    documentRef,
-    root: documentRef.getElementById(SWIMMERS_REACT_ROOT_ID),
-    hydrateRootImpl() {
-      return {
-        render() {
-          replace(SWIMMERS_STABLE_CONTAINER_IDS.terminalCanvas);
-        },
-      };
-    },
-  });
-
-  assert.throws(
-    () => handle.render({ franken_term_available: true }),
-    /replaced stable container terminalCanvas/,
-  );
-});
-
-test("React shell identity guard catches fallback and mirror replacement", () => {
-  for (const key of ["terminalFallback", "terminalA11yMirror"]) {
-    const { documentRef, replace } = fakeDocument();
+  const originalError = console.error;
+  const errors = [];
+  const drifts = [];
+  console.error = (...args) => errors.push(args);
+  setIdentityDriftReporter((detail) => drifts.push(detail));
+  try {
     const handle = mountSwimmersRootShell({
       documentRef,
       root: documentRef.getElementById(SWIMMERS_REACT_ROOT_ID),
       hydrateRootImpl() {
         return {
           render() {
-            replace(SWIMMERS_STABLE_CONTAINER_IDS[key]);
+            replace(SWIMMERS_STABLE_CONTAINER_IDS.terminalCanvas);
           },
         };
       },
     });
 
-    assert.throws(
-      () => handle.render({ franken_term_available: true }),
-      new RegExp(`replaced stable container ${key}`),
-    );
+    // Downgraded contract: drift must NOT throw (that would take the terminal
+    // surface down), but must console.error + telemetry and keep the handle
+    // pointed at the latest live containers.
+    assert.doesNotThrow(() => handle.render({ franken_term_available: true }));
+    assert.ok(errors.some((args) => /replaced stable container terminalCanvas/.test(String(args[0]))));
+    assert.ok(drifts.some((detail) => detail.key === "terminalCanvas"));
+    assert.equal(handle.containers.terminalCanvas.replaced, true);
+  } finally {
+    console.error = originalError;
+    setIdentityDriftReporter(null);
+  }
+});
+
+test("React shell identity drift reports fallback and mirror replacement", () => {
+  for (const key of ["terminalFallback", "terminalA11yMirror"]) {
+    const { documentRef, replace } = fakeDocument();
+    const originalError = console.error;
+    const errors = [];
+    console.error = (...args) => errors.push(args);
+    try {
+      const handle = mountSwimmersRootShell({
+        documentRef,
+        root: documentRef.getElementById(SWIMMERS_REACT_ROOT_ID),
+        hydrateRootImpl() {
+          return {
+            render() {
+              replace(SWIMMERS_STABLE_CONTAINER_IDS[key]);
+            },
+          };
+        },
+      });
+
+      assert.doesNotThrow(() => handle.render({ franken_term_available: true }));
+      assert.ok(errors.some((args) => new RegExp(`replaced stable container ${key}`).test(String(args[0]))));
+    } finally {
+      console.error = originalError;
+    }
   }
 });
 
@@ -156,4 +179,55 @@ test("React shell element declares the stable terminal and Trogdor island host",
   assert.ok(terminalSurfaceIds.includes(SWIMMERS_STABLE_CONTAINER_IDS.terminalFallback));
   assert.ok(terminalSurfaceIds.includes(SWIMMERS_STABLE_CONTAINER_IDS.terminalA11yMirror));
   assert.ok(childIds.includes(SWIMMERS_STABLE_CONTAINER_IDS.trogdorSurface));
+});
+
+test("assertStableIdentity throws by default but downgrades when throwOnDrift is false", () => {
+  const a = { node: { id: "a" } };
+  const drifted = { node: { id: "b" } };
+
+  // Default contract preserved: drift throws.
+  assert.throws(
+    () => assertStableIdentity(a, drifted, { label: "Test" }),
+    /Test replaced stable container node/,
+  );
+
+  // No drift returns the next snapshot untouched, both modes.
+  const same = { node: a.node };
+  assert.equal(assertStableIdentity(a, same, { throwOnDrift: false }).node, a.node);
+
+  // Downgraded mode: report instead of throw, and return the latest containers.
+  const originalError = console.error;
+  const errors = [];
+  const drifts = [];
+  console.error = (...args) => errors.push(args);
+  setIdentityDriftReporter((detail) => drifts.push(detail));
+  try {
+    const result = assertStableIdentity(a, drifted, { label: "Test", throwOnDrift: false });
+    assert.equal(result, drifted);
+    assert.equal(result.node.id, "b");
+    assert.ok(errors.some((args) => /Test replaced stable container node/.test(String(args[0]))));
+    assert.deepEqual(drifts.at(-1), {
+      message: "Test replaced stable container node",
+      label: "Test",
+      noun: "container",
+      key: "node",
+    });
+  } finally {
+    console.error = originalError;
+    setIdentityDriftReporter(null);
+  }
+});
+
+test("reportIdentityDrift swallows reporter errors so telemetry can't crash the surface", () => {
+  const originalError = console.error;
+  console.error = () => {};
+  setIdentityDriftReporter(() => {
+    throw new Error("telemetry sink is down");
+  });
+  try {
+    assert.doesNotThrow(() => reportIdentityDrift("drift", { key: "x" }));
+  } finally {
+    console.error = originalError;
+    setIdentityDriftReporter(null);
+  }
 });

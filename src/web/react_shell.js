@@ -78,9 +78,14 @@ export function resolveStableShellContainers(documentRef = globalThis.document) 
 }
 
 export function assertStableShellContainerIdentity(previous, next) {
+  // The shell wraps the live terminal surface, so a hard throw here would take
+  // the whole terminal down over a (normally recoverable) markup drift. Downgrade
+  // to console.error + telemetry in production; dev still throws so the mismatch
+  // is caught before shipping. See assertStableIdentity in react_island_identity.js.
   return assertStableIdentity(previous, next, {
     keys: Object.keys(SWIMMERS_STABLE_CONTAINER_IDS),
     label: "Swimmers React shell",
+    throwOnDrift: false,
   });
 }
 

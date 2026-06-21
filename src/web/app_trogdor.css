@@ -20,7 +20,10 @@
 
 .trogdor-surface::before {
   content: "";
-  position: fixed;
+  /* Scope the paper grain to the surface (which is position:absolute, so it is
+     the containing block) instead of position:fixed, which pinned the grain to
+     the viewport and left it misaligned as the surface scrolled/resized. */
+  position: absolute;
   inset: 0;
   pointer-events: none;
   background:

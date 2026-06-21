@@ -1,5 +1,6 @@
 import React from "react";
-import { hydrateRoot } from "react-dom/client";
+import { flushSync } from "react-dom";
+import { createRoot } from "react-dom/client";
 
 import { assertStableIdentity, elementFromRef } from "./react_island_identity.js";
 
@@ -147,13 +148,24 @@ export function CommandPaletteSheet(props) {
   return createCommandPaletteSheetContents(h, props);
 }
 
-export function resolveCommandPaletteIslandContainers({
+export function resolveCommandPaletteIslandHost({
   documentRef = globalThis.document,
   paletteSheet,
 } = {}) {
   const sheet = elementFromRef(paletteSheet)
     ?? documentRef?.getElementById?.(COMMAND_PALETTE_ISLAND_IDS.paletteSheet)
     ?? null;
+  if (!sheet) {
+    throw new Error("Command palette island missing stable container paletteSheet");
+  }
+  return sheet;
+}
+
+export function resolveCommandPaletteIslandContainers({
+  documentRef = globalThis.document,
+  paletteSheet,
+} = {}) {
+  const sheet = resolveCommandPaletteIslandHost({ documentRef, paletteSheet });
   const containers = {
     paletteSheet: sheet,
     paletteSearch: documentRef?.getElementById?.(COMMAND_PALETTE_ISLAND_IDS.paletteSearch) ?? null,
@@ -175,30 +187,48 @@ export function assertStableCommandPaletteIslandContainers(previous, next) {
 export function mountCommandPaletteIsland({
   documentRef = globalThis.document,
   paletteSheet,
-  hydrateRootImpl = hydrateRoot,
+  createRootImpl = createRoot,
+  flushSyncImpl = flushSync,
   items = [],
   activeIndex = 0,
 } = {}) {
-  const containers = resolveCommandPaletteIslandContainers({ documentRef, paletteSheet });
+  // The palette is hidden until opened, so the SSR markup is only a no-JS
+  // fallback. Mounting with createRoot (mirroring the dir-browser island)
+  // replaces that markup outright instead of hydrating over it, which avoids
+  // the recoverable hydration mismatches the empty SSR #palette-results and the
+  // attribute-less SSR #palette-search would otherwise trigger.
+  const host = resolveCommandPaletteIslandHost({ documentRef, paletteSheet });
   const handle = {
-    containers,
+    containers: null,
     items,
     activeIndex,
-    reactRoot: null,
+    reactRoot: createRootImpl(host),
     render(next = {}) {
       const previousContainers = handle.containers;
       handle.items = Array.isArray(next.items) ? next.items : handle.items;
       handle.activeIndex = Number.isFinite(next.activeIndex)
         ? Math.trunc(next.activeIndex)
         : handle.activeIndex;
-      handle.reactRoot?.render?.(h(CommandPaletteSheet, {
-        items: handle.items,
-        activeIndex: handle.activeIndex,
-      }));
-      handle.containers = assertStableCommandPaletteIslandContainers(
-        previousContainers,
-        resolveCommandPaletteIslandContainers({ documentRef, paletteSheet: containers.paletteSheet }),
-      );
+      const renderTree = () => {
+        handle.reactRoot?.render?.(h(CommandPaletteSheet, {
+          items: handle.items,
+          activeIndex: handle.activeIndex,
+        }));
+      };
+      // Render synchronously so the child containers (search/results/close) exist
+      // before we resolve and identity-check them.
+      if (typeof flushSyncImpl === "function") {
+        flushSyncImpl(renderTree);
+      } else {
+        renderTree();
+      }
+      const nextContainers = resolveCommandPaletteIslandContainers({
+        documentRef,
+        paletteSheet: host,
+      });
+      handle.containers = previousContainers
+        ? assertStableCommandPaletteIslandContainers(previousContainers, nextContainers)
+        : nextContainers;
       return handle;
     },
     renderResults(next = {}) {
@@ -209,9 +239,6 @@ export function mountCommandPaletteIsland({
       handle.reactRoot?.unmount?.();
     },
   };
-  handle.reactRoot = hydrateRootImpl(
-    containers.paletteSheet,
-    h(CommandPaletteSheet, { items: handle.items, activeIndex: handle.activeIndex }),
-  );
+  handle.render({ items: handle.items, activeIndex: handle.activeIndex });
   return handle;
 }

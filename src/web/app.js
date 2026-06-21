@@ -2359,6 +2359,18 @@ async function init() {
   authSheetIsland = await mountAuthSheetReactIsland();
   thoughtConfigSheetIsland = await mountThoughtConfigSheetReactIsland();
   nativeDesktopSheetIsland = await mountNativeDesktopSheetReactIsland();
+  // INVARIANT (overlapping React roots): the create-sheet island hydrates
+  // #create-sheet, which *contains* #dirs-groups and #dirs-list; the dir-browser
+  // island then createRoot()s into those same two nodes. Two React roots over
+  // overlapping DOM is safe ONLY because the create-sheet root treats
+  // #dirs-groups/#dirs-list as opaque, stable hosts and never re-renders to
+  // replace them (its render() asserts container identity, including those two
+  // ids, via assertStableCreateSheetIslandContainers). The dir-browser island
+  // owns the *contents* of those nodes and likewise asserts their identity on
+  // every render. Do not restructure either root to start re-rendering the other
+  // side's owned nodes — that would have one root clobber the other's subtree.
+  // The create-sheet island must mount first so the dir-browser island finds the
+  // (now React-managed) host nodes already present.
   createSheetIsland = await mountCreateSheetReactIsland();
   dirBrowserViewIsland = await mountDirBrowserViewReactIsland();
   workbenchWidgetsIsland = await mountWorkbenchWidgetsReactIsland();

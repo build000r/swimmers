@@ -48,6 +48,10 @@ export function createCommandPaletteSheetElement(
 ): unknown;
 export function CommandPaletteResults(props: CommandPaletteIslandProps): unknown;
 export function CommandPaletteSheet(props: CommandPaletteIslandProps): unknown;
+export function resolveCommandPaletteIslandHost(options?: {
+  documentRef?: Document;
+  paletteSheet?: HTMLElement | { current?: HTMLElement | null } | null;
+}): HTMLElement;
 export function resolveCommandPaletteIslandContainers(options?: {
   documentRef?: Document;
   paletteSheet?: HTMLElement | { current?: HTMLElement | null } | null;
@@ -59,10 +63,11 @@ export function assertStableCommandPaletteIslandContainers(
 export function mountCommandPaletteIsland(options?: {
   documentRef?: Document;
   paletteSheet?: HTMLElement | { current?: HTMLElement | null } | null;
-  hydrateRootImpl?: (root: HTMLElement, element: unknown) => {
+  createRootImpl?: (root: HTMLElement) => {
     render?: (element: unknown) => void;
     unmount?: () => void;
   };
+  flushSyncImpl?: (fn: () => void) => void;
   items?: CommandPaletteIslandItem[];
   activeIndex?: number;
 }): CommandPaletteIslandHandle;

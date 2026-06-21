@@ -300,6 +300,13 @@ export function mountDirBrowserViewIsland({
   createRootImpl = createRoot,
   flushSyncImpl = flushSync,
 } = {}) {
+  // INVARIANT (overlapping React roots): #dirs-groups and #dirs-list live inside
+  // #create-sheet, which is owned by a separate (create-sheet) React root. This
+  // island createRoot()s into those two nodes and owns only their *contents*.
+  // This is safe solely because the create-sheet root treats them as opaque,
+  // stable hosts and never re-renders to replace them. The identity guard below
+  // (assertStableDirBrowserViewIslandContainers) trips loudly if either node is
+  // ever swapped out from under us. See the matching note in app.js init().
   const containers = resolveDirBrowserViewIslandContainers({ documentRef, dirsGroups, dirsList });
   const handle = {
     containers,

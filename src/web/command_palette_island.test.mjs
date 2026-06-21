@@ -97,13 +97,13 @@ test("command palette island result component preserves item classes and data at
   assert.throws(() => createCommandPaletteResultsElement(null), /createElement function/);
 });
 
-test("command palette island mounts, rerenders results, and guards stable nodes", () => {
+test("command palette island mounts into an empty container without hydration", () => {
   const { documentRef, replace } = fakeDocument();
   const calls = [];
   const handle = mountCommandPaletteIsland({
     documentRef,
-    hydrateRootImpl(root, element) {
-      calls.push(["hydrate", root.id, element.type, element.props]);
+    createRootImpl(root) {
+      calls.push(["createRoot", root.id]);
       return {
         render(nextElement) {
           calls.push(["render", nextElement.type, nextElement.props]);
@@ -113,12 +113,20 @@ test("command palette island mounts, rerenders results, and guards stable nodes"
         },
       };
     },
+    flushSyncImpl(fn) {
+      calls.push(["flushSync"]);
+      fn();
+    },
   });
   const before = { ...handle.containers };
 
-  assert.equal(calls[0][0], "hydrate");
+  // createRoot, not hydrateRoot: an empty-until-JS mount that avoids the
+  // SSR/island markup mismatch entirely.
+  assert.equal(calls[0][0], "createRoot");
   assert.equal(calls[0][1], COMMAND_PALETTE_ISLAND_IDS.paletteSheet);
-  assert.equal(calls[0][2], CommandPaletteSheet);
+  assert.ok(calls.some((call) => call[0] === "flushSync"));
+  const firstRender = calls.find((call) => call[0] === "render");
+  assert.equal(firstRender[1], CommandPaletteSheet);
   assert.deepEqual(resolveCommandPaletteIslandContainers({ documentRef }), before);
 
   assert.equal(handle.renderResults({
@@ -145,17 +153,23 @@ test("command palette island mounts, rerenders results, and guards stable nodes"
 test("command palette island detects search and close replacement during render", () => {
   for (const key of ["paletteSearch", "paletteCloseButton"]) {
     const { documentRef, replace } = fakeDocument();
+    let mounted = false;
     const handle = mountCommandPaletteIsland({
       documentRef,
-      hydrateRootImpl() {
+      createRootImpl() {
         return {
           render() {
-            replace(COMMAND_PALETTE_ISLAND_IDS[key]);
+            // Only perturb identity after the initial mount render so the first
+            // container resolution succeeds.
+            if (mounted) {
+              replace(COMMAND_PALETTE_ISLAND_IDS[key]);
+            }
           },
           unmount() {},
         };
       },
     });
+    mounted = true;
 
     assert.throws(
       () => handle.renderResults({ items: [{ label: "Refresh sessions" }] }),

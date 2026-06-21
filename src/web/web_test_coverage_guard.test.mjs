@@ -143,7 +143,7 @@ test("focused helper suites keep migration-critical behavior coverage topics", a
       "src/web/command_palette_island.test.mjs",
       [
         "command palette island preserves sheet host and child DOM contract",
-        "command palette island mounts, rerenders results, and guards stable nodes",
+        "command palette island mounts into an empty container without hydration",
       ],
     ],
     [
