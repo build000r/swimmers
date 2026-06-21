@@ -219,8 +219,16 @@ pub async fn list_sessions_for_client(
 }
 
 pub async fn thought_config_response(state: &Arc<AppState>) -> ThoughtConfigResponse {
-    let config = state.thought_config.read().await.clone();
-    thought_config_response_for_config(state, config, current_thought_config_version())
+    // Snapshot the config and its version under one read guard. The writer holds
+    // the write lock across set-config + commit-version, so reading the version
+    // while holding the read lock yields a consistent (config, version) pair —
+    // otherwise a concurrent commit between the clone and the version load could
+    // return old-config + new-version and weaken the If-Match guarantee.
+    let guard = state.thought_config.read().await;
+    let version = current_thought_config_version();
+    let config = guard.clone();
+    drop(guard);
+    thought_config_response_for_config(state, config, version)
 }
 
 fn thought_config_response_for_config(
