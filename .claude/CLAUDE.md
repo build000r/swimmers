@@ -23,7 +23,7 @@ All supported routes live under `/v1/`:
 - `GET /v1/selection` / `POST /v1/selection` — read or publish the selected session
 - `GET /v1/native/status` / `POST /v1/native/open` — desktop terminal handoff
 - `GET /v1/dirs` / `POST /v1/dirs/restart` — repo browsing and mapped service restarts
-- `GET /v1/skills/{tool}` — list available skills for a tool
+- `GET /v1/skills?tool={tool}` — list available skills for a tool
 - `GET /v1/thought-config` / `PUT /v1/thought-config` — read or update thought runtime config
 
 ## Runtime model

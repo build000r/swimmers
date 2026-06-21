@@ -258,6 +258,7 @@ export interface FleetLensBucket {
   stale_count: number;
   attention_count: number;
   commit_ready_count: number;
+  advisory_count: number;
 }
 
 export interface FleetLensSummary {
@@ -899,6 +900,9 @@ export interface TrogdorSurfaceSession {
   trogdorBurnt: boolean;
   trogdorDismissed: boolean;
   trogdorSwordsmanVisible: boolean;
+  lastActivityAt: string;
+  advisoryBadges: AdvisoryMetadataSummary[];
+  advisoryLabel: string;
 }
 
 export interface TrogdorRepoGroup {
@@ -1032,6 +1036,9 @@ export interface SurfaceModel {
   publishedSessionId: Nullable<string>;
   publishedAtLabel: string;
   currentSession: Nullable<TrogdorSurfaceSession>;
+  attentionInbox: TrogdorSurfaceSession[];
+  attentionInboxCount: number;
+  filteredFleetLens: FleetLensSummary;
 }
 
 export type SurfaceActionZone =
