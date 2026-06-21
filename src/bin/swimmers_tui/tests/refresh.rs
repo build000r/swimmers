@@ -321,6 +321,7 @@ fn empty_refresh_result() -> RefreshResult {
         daemon_defaults_status: None,
         show_success_message: false,
         force_asset_refresh: false,
+        epoch: 0,
     }
 }
 
@@ -584,6 +585,7 @@ fn apply_refresh_result_sequences_success_side_effects_and_metadata() {
         daemon_defaults_status: Some(DaemonDefaultsStatus::Available),
         show_success_message: true,
         force_asset_refresh: false,
+        epoch: 0,
     };
 
     app.apply_refresh_result(result, layout);
@@ -618,6 +620,7 @@ fn apply_refresh_result_records_session_failure_but_still_applies_available_meta
         daemon_defaults_status: Some(DaemonDefaultsStatus::Unavailable),
         show_success_message: true,
         force_asset_refresh: false,
+        epoch: 0,
     };
 
     app.apply_refresh_result(result, layout);
@@ -633,5 +636,37 @@ fn apply_refresh_result_records_session_failure_but_still_applies_available_meta
     assert_eq!(
         app.daemon_defaults_status,
         DaemonDefaultsStatus::Unavailable
+    );
+}
+
+#[test]
+fn apply_refresh_result_skips_a_stale_snapshot_that_omits_a_session_created_after_dispatch() {
+    let mut app = make_app(MockApi::new());
+    let tmp = tempdir().expect("tempdir");
+    let mut session = session_summary("new-1", "swimmers-new-1", TEST_REPO_SWIMMERS);
+    session.cwd = tmp.path().to_string_lossy().into_owned();
+
+    // First refresh brings in "new-1" (epoch 0 == app epoch 0, so it applies).
+    let mut seed = empty_refresh_result();
+    seed.sessions = Ok(session_snapshot(vec![session]));
+    app.apply_refresh_result(
+        seed,
+        WorkspaceLayout::for_terminal_without_thought_panel(100, 32),
+    );
+    assert_eq!(app.entities.len(), 1);
+
+    // A user-created session bumps the epoch after an older refresh was dispatched.
+    app.refresh_epoch += 1;
+
+    // The stale snapshot (epoch 0 < app epoch 1) omits "new-1"; it must be skipped
+    // rather than dropping the just-created session on a wholesale replace.
+    app.apply_refresh_result(
+        empty_refresh_result(),
+        WorkspaceLayout::for_terminal_without_thought_panel(100, 32),
+    );
+    assert_eq!(
+        app.entities.len(),
+        1,
+        "a stale refresh must not drop the just-created session"
     );
 }

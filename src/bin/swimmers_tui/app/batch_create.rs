@@ -184,6 +184,12 @@ impl<C: TuiApi> App<C> {
             applied.success_count += 1;
         }
 
+        if applied.success_count > 0 {
+            // Mark in-flight refreshes stale so a snapshot from before this batch
+            // can't drop the newly created sessions on its wholesale replace.
+            self.refresh_epoch = self.refresh_epoch.wrapping_add(1);
+        }
+
         BatchCreateCompletion {
             total: partition.total,
             success_count: applied.success_count,

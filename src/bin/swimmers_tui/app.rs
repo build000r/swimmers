@@ -63,6 +63,9 @@ pub(crate) struct RefreshResult {
     pub(crate) daemon_defaults_status: Option<DaemonDefaultsStatus>,
     pub(crate) show_success_message: bool,
     pub(crate) force_asset_refresh: bool,
+    /// App.refresh_epoch captured when this refresh was dispatched; a later
+    /// session upsert bumps the app epoch, marking this result stale.
+    pub(crate) epoch: u64,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -350,6 +353,10 @@ pub(crate) struct App<C: TuiApi> {
     pub(crate) thought_panel_ratio: f32,
     pub(crate) split_drag_active: bool,
     pub(crate) tick: u64,
+    /// Bumped on every user-initiated session upsert (create/adopt/batch) so a
+    /// background refresh dispatched before the upsert can be detected as stale
+    /// and skip its wholesale session-list replace.
+    pub(crate) refresh_epoch: u64,
     pub(crate) pending_refresh: Option<oneshot::Receiver<RefreshResult>>,
     pub(crate) pending_interaction: Option<oneshot::Receiver<PendingInteractionResult>>,
     pub(crate) pending_picker_repo_search:
@@ -438,6 +445,7 @@ impl<C: TuiApi> App<C> {
             thought_panel_ratio: THOUGHT_RAIL_DEFAULT_RATIO,
             split_drag_active: false,
             tick: 0,
+            refresh_epoch: 0,
             pending_refresh: None,
             pending_interaction: None,
             pending_picker_repo_search: None,
@@ -1278,6 +1286,9 @@ impl<C: TuiApi> App<C> {
     ) -> String {
         let session_id = session.session_id.clone();
         let tmux_name = session.tmux_name.clone();
+        // A refresh dispatched before this upsert would otherwise drop the new
+        // session on a wholesale replace; bump the epoch so it's detected stale.
+        self.refresh_epoch = self.refresh_epoch.wrapping_add(1);
         self.remember_repo_theme(&session, repo_theme);
         self.upsert_session(session, field);
         self.selected_id = Some(session_id);

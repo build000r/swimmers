@@ -152,6 +152,7 @@ impl<C: TuiApi> App<C> {
             .collect::<HashMap<_, _>>();
         let (tx, rx) = oneshot::channel();
         self.pending_refresh = Some(rx);
+        let refresh_epoch = self.refresh_epoch;
         self.runtime.spawn(async move {
             let sessions_result = client.fetch_session_snapshot().await;
             let backend_health = client.fetch_backend_health().await;
@@ -243,6 +244,7 @@ impl<C: TuiApi> App<C> {
                 daemon_defaults_status,
                 show_success_message,
                 force_asset_refresh,
+                epoch: refresh_epoch,
             });
         });
     }
@@ -266,18 +268,24 @@ impl<C: TuiApi> App<C> {
     }
 
     pub(crate) fn apply_refresh_result(&mut self, result: RefreshResult, layout: WorkspaceLayout) {
-        match result.sessions {
-            Ok(sessions) => self.apply_successful_refresh(
-                sessions,
-                result.mermaid_artifacts,
-                result.session_skills,
-                result.force_asset_refresh,
-                result.show_success_message,
-                layout,
-            ),
-            Err(err) => {
-                self.set_message(self.refresh_error_message(err));
-                self.api_refresh_health.record_failure();
+        // Skip the wholesale session-list replace when a user upsert
+        // (create/adopt/batch) bumped the epoch after this refresh was dispatched,
+        // so the snapshot can't drop the just-created session or move the
+        // selection off it. Metadata below is epoch-independent and always applies.
+        if result.epoch >= self.refresh_epoch {
+            match result.sessions {
+                Ok(sessions) => self.apply_successful_refresh(
+                    sessions,
+                    result.mermaid_artifacts,
+                    result.session_skills,
+                    result.force_asset_refresh,
+                    result.show_success_message,
+                    layout,
+                ),
+                Err(err) => {
+                    self.set_message(self.refresh_error_message(err));
+                    self.api_refresh_health.record_failure();
+                }
             }
         }
 
