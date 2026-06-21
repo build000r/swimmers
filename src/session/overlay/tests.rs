@@ -215,6 +215,17 @@ fn expand_tilde() {
 }
 
 #[test]
+fn expand_bare_tilde() {
+    // Regression: a bare `~` (no trailing slash) must expand to home too, else
+    // the overlay path is left literal and silently dropped downstream.
+    let expanded = expand_path("~");
+    assert_ne!(expanded, "~");
+    if let Some(home) = dirs::home_dir() {
+        assert_eq!(expanded, home.display().to_string());
+    }
+}
+
+#[test]
 fn expand_path_terminates_when_env_var_resolves_to_self_referential_text() {
     // Regression: the previous implementation re-scanned from offset 0
     // after each substitution, so an env var that expanded to text

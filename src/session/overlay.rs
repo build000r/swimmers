@@ -1369,7 +1369,14 @@ fn wildcard_candidate_dir(entry: std::fs::DirEntry, suffix: &str) -> Option<Path
 fn expand_path(path: &str) -> String {
     let mut result = path.to_string();
 
-    if result.starts_with("~/") {
+    if result == "~" {
+        // A bare `~` (no trailing slash) must also expand to home; otherwise an
+        // overlay path written as `~` is left literal and silently dropped by
+        // the downstream is_dir()/canonicalize() filters with no diagnostic.
+        if let Some(home) = dirs::home_dir() {
+            result = home.display().to_string();
+        }
+    } else if result.starts_with("~/") {
         if let Some(home) = dirs::home_dir() {
             result = format!("{}{}", home.display(), &result[1..]);
         }
