@@ -150,6 +150,15 @@ export function createTerminalSurfaceController(runtime) {
     if (state.terminal) {
       state.terminal.destroy();
     }
+    // Forget this session's replay high-water mark: the rendered scrollback is
+    // gone with the destroyed instance, so a future fresh terminal for the same
+    // session must do a full replay/snapshot rather than resume_from_seq into a
+    // blank surface (which would silently drop earlier output). Same-session
+    // transient reconnects reuse the instance and never reach this path, so
+    // resume-after-blip is preserved. Also bounds the per-session seq map.
+    if (state.terminalSessionId) {
+      state.lastTerminalSeqBySession.delete(state.terminalSessionId);
+    }
     Object.assign(state, destroyPatch);
     if (el.terminalA11yMirror) {
       el.terminalA11yMirror.value = "";
