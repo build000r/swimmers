@@ -319,8 +319,14 @@ pub(crate) fn run() -> Result<(), Box<dyn std::error::Error>> {
     log_tui_startup();
 
     let (mut app, mut renderer) = initialize_tui_app()?;
-    run_tui_frame_loop(&mut app, &mut renderer)?;
-    shutdown_tui_runtime(&mut app, &mut renderer)?;
+    // Run shutdown on every exit path, not just the happy one: if the frame loop
+    // returns an io error, the published selection must still be cleared and the
+    // embedded backend finalized. (The terminal itself is restored by Renderer's
+    // Drop + the panic hook regardless.) Surface the loop error first.
+    let loop_result = run_tui_frame_loop(&mut app, &mut renderer);
+    let shutdown_result = shutdown_tui_runtime(&mut app, &mut renderer);
+    loop_result?;
+    shutdown_result?;
 
     Ok(())
 }
