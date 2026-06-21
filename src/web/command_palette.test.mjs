@@ -13,6 +13,7 @@ import {
   recordCommandPaletteUse,
   renderCommandPaletteResultsHtml,
 } from "./command_palette.js";
+import { globalShortcutPlan } from "./input_support.js";
 
 function session(overrides = {}) {
   return {
@@ -103,6 +104,26 @@ test("command palette filtering matches full-sort ranking for bounded result set
   assert.deepEqual(filterCommandPaletteItems(items, "agent", 7), oracle("agent", 7));
   assert.deepEqual(filterCommandPaletteItems(items, "", 5), oracle("", 5));
   assert.deepEqual(filterCommandPaletteItems(items, "workspace 3", 9), oracle("workspace 3", 9));
+});
+
+test("every command palette accelerator hint maps to a wired global shortcut", () => {
+  const items = buildCommandPaletteItems({ selectedSession: session(), sessions: [] });
+  const chordItems = items.filter((item) => /^Ctrl\+Shift\+[A-Z]$/.test(item.meta || ""));
+  // The palette is the in-app keyboard reference; most actions advertise their chord.
+  assert.ok(chordItems.length >= 10, `expected many advertised chords, got ${chordItems.length}`);
+  for (const item of chordItems) {
+    const key = item.meta.slice("Ctrl+Shift+".length);
+    const plan = globalShortcutPlan(
+      { ctrlKey: true, shiftKey: true, code: `Key${key}` },
+      { hasCurrentSession: true },
+    );
+    // A hint that doesn't actually trigger a shortcut is misleading documentation.
+    assert.notEqual(
+      plan.type,
+      "unhandled",
+      `${item.meta} advertised by "${item.label}" must be a wired Ctrl+Shift shortcut`,
+    );
+  }
 });
 
 test("command palette frecency lifts recently-used items as a tie-breaker", () => {
