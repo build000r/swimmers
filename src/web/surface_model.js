@@ -781,7 +781,13 @@ export function summarizeThought(session) {
   if (!thought) {
     return "No thought snapshot yet.";
   }
-  return thought.length > 110 ? `${thought.slice(0, 107)}...` : thought;
+  // Truncate by code point, not UTF-16 code unit, so the slice boundary never
+  // splits a surrogate pair (emoji / astral chars are common in agent thoughts)
+  // into a lone surrogate that renders as the U+FFFD replacement glyph.
+  const codePoints = [...thought];
+  return codePoints.length > 110
+    ? `${codePoints.slice(0, 107).join("")}...`
+    : thought;
 }
 
 export function sessionStateConfidence(session) {

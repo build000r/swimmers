@@ -6,8 +6,20 @@ import {
   buildEnvironmentMatrix,
   buildSessionRailRows,
   buildSurfaceModel,
+  summarizeThought,
   surfaceSession,
 } from "./surface_model.js";
+
+test("summarizeThought truncates by code point, never splitting a surrogate pair", () => {
+  const thought = "\u{1F680}".repeat(120); // 120 code points, 240 UTF-16 units
+  const summary = summarizeThought({ thought });
+  // Code-point truncation yields exactly 107 intact emoji + ellipsis; a
+  // code-unit slice(0,107) would emit 53 emoji plus a lone high surrogate.
+  assert.equal(summary, `${"\u{1F680}".repeat(107)}...`);
+  assert.ok(summary.isWellFormed(), "no lone surrogate in the truncated summary");
+  assert.equal(summarizeThought({ thought: "hi \u{1F680}" }), "hi \u{1F680}");
+  assert.equal(summarizeThought({ thought: "" }), "No thought snapshot yet.");
+});
 
 function rawSession(overrides = {}) {
   return {
