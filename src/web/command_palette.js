@@ -150,14 +150,46 @@ export function commandPaletteExecutionPlan(item) {
   return { type: "none" };
 }
 
-export function commandPaletteSearchKeyPlan(event, activeIndex = 0, itemCount = 0) {
+function nextEnabledPaletteIndex(from, step, count, isDisabled) {
+  if (count <= 0) {
+    return 0;
+  }
+  let i = from + step;
+  while (i >= 0 && i < count) {
+    if (!isDisabled(i)) {
+      return i;
+    }
+    i += step;
+  }
+  // No enabled item in that direction: hold position rather than landing on a
+  // disabled item or running off the ends.
+  return Math.max(0, Math.min(count - 1, from));
+}
+
+// `items` accepts the palette item array (so arrow nav can skip disabled items)
+// or a bare count for back-compatible callers that have no disabled metadata.
+export function commandPaletteSearchKeyPlan(event, activeIndex = 0, items = 0) {
   const index = Number.isFinite(activeIndex) ? Math.trunc(activeIndex) : 0;
-  const count = Number.isFinite(itemCount) ? Math.trunc(itemCount) : 0;
+  const list = Array.isArray(items) ? items : [];
+  const count = Array.isArray(items)
+    ? items.length
+    : Number.isFinite(items)
+      ? Math.trunc(items)
+      : 0;
+  const isDisabled = (i) => Boolean(list[i]?.disabled);
   if (event?.key === "ArrowDown") {
-    return { type: "set_index", index: Math.min(Math.max(0, count - 1), index + 1), preventDefault: true };
+    return {
+      type: "set_index",
+      index: nextEnabledPaletteIndex(index, 1, count, isDisabled),
+      preventDefault: true,
+    };
   }
   if (event?.key === "ArrowUp") {
-    return { type: "set_index", index: Math.max(0, index - 1), preventDefault: true };
+    return {
+      type: "set_index",
+      index: nextEnabledPaletteIndex(index, -1, count, isDisabled),
+      preventDefault: true,
+    };
   }
   return event?.key === "Enter"
     ? { type: "run_item", preventDefault: true }

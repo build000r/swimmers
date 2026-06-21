@@ -164,7 +164,7 @@ export function createAppEventHandlers(runtime = {}) {
   function handleCommandPaletteEvent(event) {
     const target = event.target instanceof ElementClass ? event.target : null;
     const plan = event.type === "keydown"
-      ? commandPaletteSearchKeyPlan(event, state.paletteIndex, state.paletteItems.length)
+      ? commandPaletteSearchKeyPlan(event, state.paletteIndex, state.paletteItems)
       : commandPaletteResultEventPlan(event.type, target, state.paletteItems.length);
     if (plan.type === "ignore") {
       return false;

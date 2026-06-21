@@ -179,6 +179,15 @@ test("command palette event helpers preserve keyboard and result index decisions
   });
   assert.deepEqual(commandPaletteSearchKeyPlan({ key: "Escape" }, 1, 3), { type: "ignore" });
 
+  // Arrow nav skips disabled items so keyboard users never stall on an
+  // unavailable command.
+  const withDisabled = [{}, { disabled: true }, {}];
+  assert.equal(commandPaletteSearchKeyPlan({ key: "ArrowDown" }, 0, withDisabled).index, 2);
+  assert.equal(commandPaletteSearchKeyPlan({ key: "ArrowUp" }, 2, withDisabled).index, 0);
+  // When every item ahead is disabled, hold position instead of landing on one.
+  const trailingDisabled = [{}, { disabled: true }, { disabled: true }];
+  assert.equal(commandPaletteSearchKeyPlan({ key: "ArrowDown" }, 0, trailingDisabled).index, 0);
+
   const target = (rawIndex) => ({
     closest(selector) {
       return selector === "[data-palette-index]" ? { dataset: { paletteIndex: rawIndex } } : null;
