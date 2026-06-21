@@ -8,6 +8,7 @@ import {
   trogdorSurfacePassthroughBindings,
   trogdorSurfacePointerDownPlan,
 } from "./trogdor_logic.js";
+import { shouldIgnoreSyntheticClick } from "./input_support.js";
 
 const noop = () => {};
 
@@ -27,7 +28,15 @@ export function createTrogdorEventBindings(runtime = {}) {
     openTrogdorAgentTerminal = noop,
     openTrogdorAtlas = noop,
     updateHoveredTrogdorSurface = noop,
+    now = () => Date.now(),
+    surfaceClickSuppressMs = 450,
   } = runtime;
+
+  // After a pointerdown opens an agent, ignore the synthetic mouse/touch click
+  // that follows on the same element so the terminal does not open twice.
+  // Keyboard activation fires click with no preceding pointerdown, so it is
+  // never suppressed.
+  let clickSuppressUntil = 0;
 
   async function handleTrogdorDomAction(button) {
     if (!button || button.disabled) {
@@ -49,6 +58,7 @@ export function createTrogdorEventBindings(runtime = {}) {
     if (plan.preventDefault) event.preventDefault();
     if (plan.stopPropagation) event.stopPropagation();
     void openTrogdorAgentTerminal(plan.sessionId);
+    clickSuppressUntil = now() + surfaceClickSuppressMs;
   }
 
   function handleTrogdorSurfacePassthrough(event) {
@@ -74,6 +84,11 @@ export function createTrogdorEventBindings(runtime = {}) {
       return;
     }
     if (plan.type === "surface_action") {
+      // The preceding pointerdown already opened this agent; skip the synthetic
+      // click. A keyboard-driven click has no prior pointerdown and proceeds.
+      if (shouldIgnoreSyntheticClick(now(), clickSuppressUntil)) {
+        return;
+      }
       void handleSurfaceAction(plan.zone);
     }
   }

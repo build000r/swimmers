@@ -106,6 +106,7 @@ test("Trogdor pointer and click handlers preserve default prevention and action 
   });
   const actions = [];
   const terminals = [];
+  let clock = 1000;
   const bindings = createTrogdorEventBindings({
     elements: { trogdorSurface: surface },
     ElementClass: FakeElement,
@@ -115,6 +116,7 @@ test("Trogdor pointer and click handlers preserve default prevention and action 
     openTrogdorAgentTerminal(sessionId) {
       terminals.push(sessionId);
     },
+    now: () => clock,
   });
   bindings.bindTrogdorEvents();
 
@@ -134,9 +136,19 @@ test("Trogdor pointer and click handlers preserve default prevention and action 
     sessionIds: ["agent-2", "agent-3"],
   }]);
 
-  const agentClick = fakeEvent(agentTarget);
-  listenerFor(surface, "click")(agentClick);
-  assert.deepEqual(agentClick.calls, ["preventDefault", "stopPropagation"]);
+  // The synthetic click that follows the pointerdown open is suppressed, so the
+  // agent terminal is not opened (or dispatched) a second time.
+  const syntheticAgentClick = fakeEvent(agentTarget);
+  listenerFor(surface, "click")(syntheticAgentClick);
+  assert.deepEqual(syntheticAgentClick.calls, ["preventDefault", "stopPropagation"]);
+  assert.equal(actions.length, 1);
+  assert.deepEqual(terminals, ["agent-1"]);
+
+  // A click past the suppression window (e.g. keyboard activation, which has no
+  // preceding pointerdown) still opens the agent.
+  clock += 1000;
+  const keyboardAgentClick = fakeEvent(agentTarget);
+  listenerFor(surface, "click")(keyboardAgentClick);
   assert.deepEqual(actions.at(-1), { type: "trogdor_agent", sessionId: "agent-1" });
 });
 
