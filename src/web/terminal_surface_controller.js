@@ -349,20 +349,41 @@ export function createTerminalSurfaceController(runtime) {
       queueHudRender();
       return;
     }
-    const frame = runtime.buildSurfaceFrame(buildSurfaceModel(), state.hudFrameScratch);
-    // Hold the frame buffers so the next render reuses them instead of
-    // reallocating; buildSurfaceFrame falls back to a fresh allocation whenever
-    // the grid dimensions change.
-    state.hudFrameScratch = { cells: frame.cells, spans: frame.spans };
+    // Build into a reused buffer (no per-render realloc), then upload only the
+    // cells that changed since the last uploaded frame. Two buffers alternate as
+    // "build target" and "diff baseline"; a dimension change makes
+    // buildSurfaceFrame allocate fresh and computeSurfaceDirtySpans fall back to
+    // a full upload.
+    const frame = runtime.buildSurfaceFrame(buildSurfaceModel(), { cells: state.hudBuildCells });
     state.surfaceZones = frame.zones ?? [];
     state.surfaceMasks = frame.masks ?? [];
+    const dirtySpans = runtime.computeSurfaceDirtySpans(
+      frame.cells,
+      state.hudPrevCells,
+      frame.cols,
+      frame.rows,
+    );
+    if (dirtySpans.length === 0) {
+      // Nothing changed; the surface already shows this frame. Keep the build
+      // buffer and leave the baseline in place.
+      state.hudBuildCells = frame.cells;
+      scheduleRender();
+      return;
+    }
     const patched = withSurfaceOperation("applyPatchBatchFlat", () => {
-      state.hud.applyPatchBatchFlat(frame.spans, frame.cells);
+      state.hud.applyPatchBatchFlat(dirtySpans, frame.cells);
     });
     if (patched.deferred) {
+      // The patch did not land; keep the baseline and rebuild into the same
+      // buffer on retry.
+      state.hudBuildCells = frame.cells;
       queueHudRender();
       return;
     }
+    // The uploaded frame becomes the next diff baseline; recycle the old
+    // baseline as the next build buffer (undefined on the first frame -> fresh).
+    state.hudBuildCells = state.hudPrevCells;
+    state.hudPrevCells = frame.cells;
     scheduleRender();
   }
 

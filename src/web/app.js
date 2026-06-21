@@ -1,4 +1,4 @@
-import { buildSurfaceFrame } from "./rendered_surface.js";
+import { buildSurfaceFrame, computeSurfaceDirtySpans } from "./rendered_surface.js";
 import {
   authTokenButtonPlan, controlEventSessionPatchPlan, eventCell, initialStateBootPlan, lifecycleDeletedSessionPatchPlan,
   sheetActionAvailabilityPlan,
@@ -776,6 +776,7 @@ const {
   terminalPaintVerificationPlan,
   terminalPresentationPlan,
   buildSurfaceFrame,
+  computeSurfaceDirtySpans,
   buildSurfaceModelFromState,
   currentSession,
   operatorPressureSnapshot,

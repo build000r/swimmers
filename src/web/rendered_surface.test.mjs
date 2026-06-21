@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { buildSurfaceFrame, surfaceActionAt } from "./rendered_surface.js";
+import { buildSurfaceFrame, computeSurfaceDirtySpans, surfaceActionAt } from "./rendered_surface.js";
 
 function session(overrides = {}) {
   return {
@@ -148,6 +148,32 @@ test("surface frame reuses caller buffers without changing rendered output", () 
   // A larger grid cannot reuse the smaller buffer; it must allocate fresh.
   const resized = buildSurfaceFrame(baseModel({ cols: 200, rows: 80 }), reuse);
   assert.notEqual(resized.cells, reuse.cells);
+});
+
+test("computeSurfaceDirtySpans reports only the changed cell runs", () => {
+  const cols = 4;
+  const rows = 2; // 8 cells, 32 uint32
+  const prev = new Uint32Array(cols * rows * 4);
+  const cur = new Uint32Array(cols * rows * 4);
+
+  // No comparable baseline -> upload the whole grid.
+  assert.deepEqual(Array.from(computeSurfaceDirtySpans(cur, null, cols, rows)), [0, 8]);
+  // Identical frames -> nothing to upload.
+  assert.deepEqual(Array.from(computeSurfaceDirtySpans(cur, prev, cols, rows)), []);
+
+  // Change cell 2 and the run of cells 5-6 -> two disjoint spans.
+  cur[2 * 4 + 1] = 99;
+  cur[5 * 4] = 7;
+  cur[6 * 4 + 3] = 7;
+  assert.deepEqual(Array.from(computeSurfaceDirtySpans(cur, prev, cols, rows)), [2, 3, 5, 7]);
+
+  // Size mismatch (resize) -> full grid.
+  assert.deepEqual(Array.from(computeSurfaceDirtySpans(new Uint32Array(4), prev, cols, rows)), [0, 8]);
+
+  // A change in the final cell extends the run to the cell count.
+  const lastChanged = new Uint32Array(cols * rows * 4);
+  lastChanged[7 * 4] = 1;
+  assert.deepEqual(Array.from(computeSurfaceDirtySpans(lastChanged, prev, cols, rows)), [7, 8]);
 });
 
 test("surface exposes parity actions for the selected session", () => {

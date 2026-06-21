@@ -73,6 +73,45 @@ export function buildSurfaceFrame(model, reuse = null) {
   return frame;
 }
 
+// Compute the flat [startCell, endCell, ...] spans of cells that differ between
+// the freshly built frame and the last uploaded frame, so the surface only
+// re-uploads changed cells instead of the whole grid on every render. Returns
+// the full-grid span when there is no comparable baseline (first frame or a
+// resize), and an empty span set when nothing changed. Each cell is 4 uint32s.
+export function computeSurfaceDirtySpans(currentCells, previousCells, cols, rows) {
+  const cellCount = Math.max(0, Math.trunc(cols) * Math.trunc(rows));
+  if (
+    !(currentCells instanceof Uint32Array) ||
+    !(previousCells instanceof Uint32Array) ||
+    previousCells.length !== currentCells.length ||
+    currentCells.length < cellCount * 4
+  ) {
+    return new Uint32Array([0, cellCount]);
+  }
+  const spans = [];
+  let runStart = -1;
+  for (let cell = 0; cell < cellCount; cell += 1) {
+    const base = cell * 4;
+    const changed =
+      currentCells[base] !== previousCells[base] ||
+      currentCells[base + 1] !== previousCells[base + 1] ||
+      currentCells[base + 2] !== previousCells[base + 2] ||
+      currentCells[base + 3] !== previousCells[base + 3];
+    if (changed) {
+      if (runStart < 0) {
+        runStart = cell;
+      }
+    } else if (runStart >= 0) {
+      spans.push(runStart, cell);
+      runStart = -1;
+    }
+  }
+  if (runStart >= 0) {
+    spans.push(runStart, cellCount);
+  }
+  return new Uint32Array(spans);
+}
+
 export function surfaceActionAt(zones, cell) {
   if (!Array.isArray(zones) || !cell) {
     return null;
