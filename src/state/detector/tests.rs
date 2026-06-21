@@ -775,6 +775,26 @@ fn tui_tool_mode_disabled_no_deadline() {
 }
 
 #[test]
+fn enabling_tui_tool_mode_over_a_busy_state_arms_the_output_silence_deadline() {
+    let mut d = StateDetector::new();
+    // Non-prompt output classifies Busy while TUI mode is still OFF -> no deadline.
+    d.process_output(b"Compiling...\r\n");
+    assert_eq!(d.state(), SessionState::Busy);
+    assert!(d.output_idle_deadline.is_none());
+
+    // Mode flips on AFTER the Busy classification (e.g. a periodic liveness
+    // tool-refresh). Without arming the silence timer the session would be stuck
+    // Busy forever; the timer must now be able to return it to Idle.
+    d.set_tui_tool_mode(true);
+    assert!(
+        d.output_idle_deadline.is_some(),
+        "enabling tui_tool_mode over a Busy state must arm the silence timer"
+    );
+    d.check_timers(Instant::now() + Duration::from_millis(6000));
+    assert_eq!(d.state(), SessionState::Idle);
+}
+
+#[test]
 fn tui_tool_mode_liveness_keeps_idle_when_tool_is_waiting() {
     let mut d = StateDetector::new();
     d.set_tui_tool_mode(true);

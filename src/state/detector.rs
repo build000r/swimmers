@@ -74,6 +74,15 @@ impl StateDetector {
         self.tui_tool_mode = enabled;
         if !enabled {
             self.output_idle_deadline = None;
+        } else if self.state == SessionState::Busy && self.output_idle_deadline.is_none() {
+            // The mode can flip on AFTER a session was already classified Busy
+            // (e.g. a periodic liveness tool-refresh). Without arming the silence
+            // timer here, that session has no path back to Idle — no further
+            // output/input would call refresh_tui_output_idle_deadline, and
+            // liveness can't correct a Busy-with-children session — so it would
+            // stay Busy forever (wrong attention/cadence tiering).
+            self.output_idle_deadline =
+                Some(Instant::now() + Duration::from_millis(OUTPUT_IDLE_MS));
         }
     }
 
