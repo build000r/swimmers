@@ -312,6 +312,35 @@ test("workbench refresh helpers plan delta fetches and merge transcript pages", 
   assert.match(widgets.error, /diffs: diff unavailable/);
 });
 
+test("a rejected transcript fetch preserves the last good page and delta cursor", () => {
+  const widgets = {
+    transcript: { records: [{ id: "old", byte_start: 10, text: "old" }] },
+    transcriptTurnId: "turn-1",
+    transcriptNextCursor: 64,
+  };
+  applyWorkbenchWidgetResults(
+    widgets,
+    {
+      timelineResult: { status: "fulfilled", value: { events: [] } },
+      skillsResult: { status: "fulfilled", value: {} },
+      tailResult: { status: "fulfilled", value: { text: "" } },
+      transcriptResult: { status: "rejected", reason: new Error("503") },
+      artifactResult: { status: "fulfilled", value: {} },
+      diffResult: { status: "fulfilled", value: {} },
+    },
+    { canDeltaTranscript: true, requestedTurnId: "turn-1", selectedTurnId: "turn-1" },
+  );
+
+  // A transient failure must not blank the panel or reset the delta cursor.
+  assert.deepEqual(
+    widgets.transcript.records.map((record) => record.id),
+    ["old"],
+  );
+  assert.equal(widgets.transcriptTurnId, "turn-1");
+  assert.equal(widgets.transcriptNextCursor, 64);
+  assert.match(widgets.error, /transcript: 503/);
+});
+
 test("mergeWorkbenchTranscriptPage orders equal-byte_start records deterministically", () => {
   const result = mergeWorkbenchTranscriptPage({
     previous: { selected_turn_id: "t", records: [{ id: "b", byte_start: 5 }] },

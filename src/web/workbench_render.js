@@ -337,9 +337,9 @@ export function applyWorkbenchWidgetResults(widgets, results = {}, options = {})
     widgets.transcriptNextCursor = merged.transcriptNextCursor;
     selectedTurnId = merged.selectedTurnId;
   } else {
-    widgets.transcript = null;
-    widgets.transcriptTurnId = "";
-    widgets.transcriptNextCursor = 0;
+    // A transient (non-404) transcript failure must not discard the last good
+    // page and the delta cursor — preserve them and only surface the error, so a
+    // single blip doesn't blank the panel and force a full refetch.
     errors.push(`transcript: ${results.transcriptResult?.reason?.message || "unavailable"}`);
   }
 

@@ -344,7 +344,7 @@ async fn render_index(focus_layout: bool) -> impl IntoResponse {
                 <option value="add">add</option>
               </select>
             </label>
-            <pre class="sheet-result" id="native-status-result"></pre>
+            <pre class="sheet-result" id="native-status-result" aria-live="polite"></pre>
             <div class="sheet-actions">
               <button class="ghost-button" id="native-refresh-button" type="button">Refresh</button>
               <button class="ghost-button" id="native-open-button" type="button">Open Selected</button>
