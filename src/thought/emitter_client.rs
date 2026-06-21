@@ -395,6 +395,10 @@ impl Drop for EmitterClient {
     fn drop(&mut self) {
         if let Some(daemon) = self.daemon.as_mut() {
             let _ = daemon.child.start_kill();
+            // Best-effort non-blocking reap so the just-killed clawgs child does
+            // not linger as a zombie (Drop can't .await; this mirrors as much of
+            // stop_current_daemon's bounded wait as a sync context allows).
+            let _ = daemon.child.try_wait();
         }
     }
 }

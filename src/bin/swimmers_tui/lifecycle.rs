@@ -128,6 +128,10 @@ fn apply_readiness_disposition(
         ReadinessDisposition::Error { terminate, message } => {
             if terminate {
                 terminate_child(child);
+            } else {
+                // The child already exited (EOF before readiness); reap it so it
+                // does not linger as a zombie until the TUI process exits.
+                let _ = child.wait();
             }
             Err(message)
         }
