@@ -2882,6 +2882,7 @@ dependencies = [
  "mermaid-rs-renderer",
  "metrics",
  "metrics-exporter-prometheus",
+ "metrics-util",
  "open",
  "os_pipe",
  "portable-pty",

@@ -22,6 +22,7 @@ use std::time::Duration;
 
 use metrics::{counter, describe_counter, describe_gauge, describe_histogram, gauge, histogram};
 use metrics_exporter_prometheus::{PrometheusBuilder, PrometheusHandle};
+use metrics_util::MetricKindMask;
 
 use crate::types::SummaryFallbackReason;
 
@@ -76,7 +77,18 @@ const SUMMARY_FALLBACK_EVENTS: &str = "swimmers_summary_fallback_events_total";
 /// Panics if a global recorder has already been installed (call this exactly
 /// once).
 pub fn init_metrics() -> PrometheusHandle {
+    // Evict idle metric series so a long-lived server does not accumulate
+    // unbounded per-session `session_id` label cardinality. A deleted session
+    // stops updating its queue-depth / lifecycle / overload series, and the
+    // series are pruned on the next /metrics render once they exceed the idle
+    // window. Always-present gauges stay fresh well within this window
+    // (ACTIVE_SESSIONS is re-set every TMUX_REDISCOVERY_INTERVAL = 10s), so they
+    // are never pruned.
     let handle = PrometheusBuilder::new()
+        .idle_timeout(
+            MetricKindMask::GAUGE | MetricKindMask::COUNTER,
+            Some(Duration::from_secs(600)),
+        )
         .install_recorder()
         .expect("failed to install Prometheus metrics recorder");
 
