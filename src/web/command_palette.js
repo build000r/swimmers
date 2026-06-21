@@ -267,6 +267,7 @@ export function renderCommandPaletteResultsHtml(items = [], activeIndex = 0) {
       <button
         class="palette-item${index === activeIndex ? " is-active" : ""}"
         type="button"
+        id="palette-option-${index}"
         role="option"
         aria-selected="${index === activeIndex ? "true" : "false"}"
         data-palette-index="${index}"

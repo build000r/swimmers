@@ -394,7 +394,12 @@ test("Trogdor atlas transition helpers preserve path-specific state patches", ()
     trogdorReaderStartIndex: 0,
     trogdorReaderClawgKey: "",
   });
-  assert.deepEqual(trogdorAtlasTransitionState("toggle", false), { trogdorAtlasOpen: true });
+  // toggle-open mirrors "open": reset the surface signature so the atlas always
+  // repaints fresh on open, never reusing a stale frame.
+  assert.deepEqual(trogdorAtlasTransitionState("toggle", false), {
+    trogdorAtlasOpen: true,
+    trogdorSurfaceSignature: "",
+  });
   assert.deepEqual(trogdorAtlasTransitionState("close"), {
     trogdorAtlasOpen: false,
     hoveredTrogdorSessionId: null,

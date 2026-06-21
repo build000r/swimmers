@@ -185,6 +185,10 @@ test("command palette result markup helper preserves escaping, active state, and
   assert.match(html, /aria-selected="false"/);
   assert.match(html, /aria-selected="true"/);
   assert.match(html, /data-palette-index="1"/);
+  // Each option needs a stable id so aria-activedescendant can reference it on
+  // the non-island fallback path (screen-reader announcement of the active row).
+  assert.match(html, /id="palette-option-0"/);
+  assert.match(html, /id="palette-option-1"/);
   assert.match(html, /disabled/);
   assert.match(html, /Alpha &lt;one&gt;/);
   assert.match(html, /ready &amp; waiting/);

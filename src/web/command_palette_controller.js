@@ -52,6 +52,12 @@ export function createCommandPaletteController({
       return;
     }
     el.paletteResults.innerHTML = renderCommandPaletteResultsHtml(state.paletteItems, state.paletteIndex);
+    // Mirror the island's combobox wiring on the fallback path so arrow-key
+    // navigation still announces the active option to screen readers.
+    el.paletteSearch?.setAttribute(
+      "aria-activedescendant",
+      state.paletteItems.length ? `palette-option-${state.paletteIndex}` : "",
+    );
   }
 
   async function runCommandPaletteItem(item = state.paletteItems[state.paletteIndex]) {

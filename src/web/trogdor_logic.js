@@ -624,7 +624,7 @@ export function trogdorAtlasTransitionState(action, atlasOpen = false) {
     case "toggle":
       return atlasOpen
         ? { trogdorAtlasOpen: false, ...trogdorHoverReaderResetState() }
-        : { trogdorAtlasOpen: true };
+        : { trogdorAtlasOpen: true, trogdorSurfaceSignature: "" };
     case "close":
       return { trogdorAtlasOpen: false, ...trogdorHoverReaderResetState() };
     default:
