@@ -145,9 +145,9 @@ export function renderTrogdorSurfaceFrame({
       <div class="trogdor-bottombar">
         <div class="trogdor-wpm">
           <button type="button" data-action="trogdor_read_toggle">${escapeHtml(readButtonLabel)}</button>
-          <button type="button" data-action="trogdor_wpm_down">-25</button>
-          <span class="trogdor-wpm-value" data-trogdor-wpm-value="true">${clampedWpm} wpm</span>
-          <button type="button" data-action="trogdor_wpm_up">+25</button>
+          <button type="button" data-action="trogdor_wpm_down" aria-label="Decrease reading speed">-25</button>
+          <span class="trogdor-wpm-value" data-trogdor-wpm-value="true" aria-live="polite">${clampedWpm} wpm</span>
+          <button type="button" data-action="trogdor_wpm_up" aria-label="Increase reading speed">+25</button>
         </div>
         <div class="trogdor-actions">
           <button type="button" data-action="focus_terminal">terminal</button>

@@ -457,8 +457,8 @@ test("Trogdor atlas starts the hover speed reader at 200 wpm", () => {
   const html = web.el.trogdorSurface.innerHTML;
   assert.match(html, /data-trogdor-reader="true"/);
   assert.match(html, /200 wpm/);
-  assert.match(html, /data-action="trogdor_wpm_down">-25/);
-  assert.match(html, /data-action="trogdor_wpm_up">\+25/);
+  assert.match(html, /data-action="trogdor_wpm_down"[^>]*>-25/);
+  assert.match(html, /data-action="trogdor_wpm_up"[^>]*>\+25/);
 });
 
 test("live terminal presentation hides the HUD canvas with class and inline state", () => {

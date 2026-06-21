@@ -6,6 +6,7 @@
   .trogdor-dragon.is-firing .trogdor-dragon-open,
   .trogdor-agent,
   .trogdor-agent.is-attacking,
+  .trogdor-agent.is-attacking svg,
   .trogdor-agent.is-burnt,
   .trogdor-agent.is-working,
   .agent-burn-flame,

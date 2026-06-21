@@ -243,9 +243,9 @@ test("Trogdor atlas island delegates visible render output through existing help
   assert.match(html, /data-session-id="agent-1"/);
   assert.match(html, /class="[^"]*trogdor-agent[^"]*is-hovered/);
   assert.match(html, /data-action="trogdor_read_toggle">pause/);
-  assert.match(html, /data-action="trogdor_wpm_down">-25/);
-  assert.match(html, /data-trogdor-wpm-value="true">225 wpm/);
-  assert.match(html, /data-action="trogdor_wpm_up">\+25/);
+  assert.match(html, /data-action="trogdor_wpm_down"[^>]*aria-label="Decrease reading speed"[^>]*>-25/);
+  assert.match(html, /data-trogdor-wpm-value="true"[^>]*aria-live="polite"[^>]*>225 wpm/);
+  assert.match(html, /data-action="trogdor_wpm_up"[^>]*aria-label="Increase reading speed"[^>]*>\+25/);
   assert.match(html, /data-action="focus_terminal"/);
   assert.match(html, /data-action="open_create"/);
   assert.match(html, /data-action="open_config"/);
