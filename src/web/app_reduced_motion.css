@@ -7,9 +7,11 @@
   .trogdor-agent,
   .trogdor-agent.is-attacking,
   .trogdor-agent.is-burnt,
+  .trogdor-agent.is-working,
   .agent-burn-flame,
   .agent-burn-smoke,
-  .trogdor-structure.is-burning .structure-svg {
+  .trogdor-structure.is-burning .structure-svg,
+  .loading-bar-fill {
     animation: none;
   }
 

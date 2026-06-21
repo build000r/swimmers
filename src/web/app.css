@@ -715,7 +715,8 @@ body.mobile-keyboard-active .terminal-control-strip {
 }
 
 .workbench-log-search::placeholder {
-  color: rgba(183, 200, 203, 0.58);
+  /* Raised from 0.58 alpha to clear WCAG AA (4.5:1) contrast. */
+  color: rgba(183, 200, 203, 0.8);
 }
 
 .workbench-log-brief {
