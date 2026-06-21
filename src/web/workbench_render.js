@@ -78,11 +78,13 @@ export function operatorPressureSummary(session, payload) {
   // else fall back to the session's count.
   const tokens = Number(payload?.token_count) > 0 ? Number(payload.token_count) : Number(session.token_count || 0);
   const limit = Number(payload?.context_limit) > 0 ? Number(payload.context_limit) : Number(session.context_limit || 0);
-  if (tokens > 0 && limit > 0) {
-    const pct = Math.min(999, Math.round((tokens / limit) * 100));
-    cues.push(`${pct}% context`);
-  }
-  return cues.length ? cues.slice(0, 5).join(" · ") : "No pressure cues.";
+  // Context fill % predicts an imminent compaction/reset, so it is the most
+  // decision-relevant cue for an agent cockpit — keep it first so the 5-cue cap
+  // can never silently drop it behind action cues and transport noise.
+  const contextCue =
+    tokens > 0 && limit > 0 ? `${Math.min(999, Math.round((tokens / limit) * 100))}% context` : null;
+  const ordered = contextCue ? [contextCue, ...cues] : cues;
+  return ordered.length ? ordered.slice(0, 5).join(" · ") : "No pressure cues.";
 }
 
 export function renderTerminalWorkbenchActions(actions, payloadAvailable = false) {

@@ -39,6 +39,22 @@ test("workbench text and action summaries stay compact", () => {
   assert.match(pressure, /awaiting user/);
   assert.match(pressure, /50% context/);
 
+  // Context % must survive the 5-cue cap even when action cues + transport noise
+  // would otherwise crowd it out — it is the most decision-relevant signal.
+  const crowded = operatorPressureSummary(
+    {
+      action_cues: [{ kind: "awaiting_user" }, { kind: "needs_review" }, { kind: "rate_limited" }],
+      state: "attention",
+      transport_health: "degraded",
+      is_stale: true,
+      attached_clients: 3,
+      token_count: 90,
+      context_limit: 100,
+    },
+    null,
+  );
+  assert.match(crowded, /90% context/);
+
   const html = renderTerminalWorkbenchActions([{ tool: "exec", detail: "node --test" }], true);
   assert.match(html, /workbench-action-tool/);
   assert.match(html, /node --test/);
