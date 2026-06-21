@@ -173,3 +173,30 @@ test("terminal input dock controller preserves fallback projection and send orde
   assert.equal(keyStripButton.disabled, false);
   assert.equal(documentRef.body.classList.contains("terminal-input-dock-visible"), true);
 });
+
+test("terminal input dock guards against double-send while a send is in flight", async () => {
+  let resolveSend;
+  const sendCalls = [];
+  const { controller, el, state } = fixture({
+    runtime: {
+      sendLineToSession: (sessionId, text) => {
+        sendCalls.push([sessionId, text]);
+        return new Promise((resolve) => {
+          resolveSend = resolve;
+        });
+      },
+    },
+  });
+  el.terminalInlineInput.value = "echo once";
+
+  const first = controller.submitTerminalInputDock();
+  // The input is only cleared on success, so a second submit before the first
+  // resolves must be rejected rather than resending the same line.
+  assert.equal(await controller.submitTerminalInputDock(), false);
+  assert.equal(sendCalls.length, 1);
+  assert.equal(state.sending, true);
+
+  resolveSend();
+  assert.equal(await first, true);
+  assert.equal(state.sending, false);
+});

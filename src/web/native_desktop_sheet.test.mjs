@@ -346,6 +346,21 @@ test("openSelectedNativeSession posts the selected session id and reports pane d
   assert.equal(calls.sync, 1);
 });
 
+test("native open and save skip the request when one is already in flight", async () => {
+  const open = fixture({
+    session: { session_id: "sess_7" },
+    responses: [{ session_id: "sess_7" }],
+  });
+  open.state.nativeDesktop.loading = true;
+  await open.controller.openSelectedNativeSession();
+  assert.equal(open.calls.fetches.length, 0, "no duplicate POST /v1/native/open");
+
+  const save = fixture({ responses: [{}] });
+  save.state.nativeDesktop.loading = true;
+  await save.controller.saveNativeSettings();
+  assert.equal(save.calls.fetches.length, 0, "no duplicate PUT /v1/native/app");
+});
+
 test("openSelectedNativeSession shows setup guidance when remote attach command is missing", async () => {
   const { calls, controller, el, state } = fixture({
     environments: [{ id: "skillbox", backend_mode: "remote_swimmers_api" }],

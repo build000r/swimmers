@@ -137,6 +137,12 @@ export function createTerminalZoomInputController(runtime = {}) {
     if (state.readOnly || !currentSession()) {
       return false;
     }
+    // Re-entrancy guard, shared with the send sheet: the input is only cleared
+    // on success, so a second submit while the send is in flight (e.g. a rapid
+    // double-Enter, widest on the HTTP fallback path) would resend the line.
+    if (state.sending) {
+      return false;
+    }
     const text = String(el.terminalInlineInput.value || "");
     if (!text.trim()) {
       syncTerminalInputDock();
@@ -144,6 +150,7 @@ export function createTerminalZoomInputController(runtime = {}) {
     }
     setTerminalInputEcho(`pending: ${text}`);
     projectTerminalInputIntoFallback(text);
+    state.sending = true;
     try {
       await sendLineToSession(state.selectedSessionId, text);
       rememberSendHistory(text);
@@ -156,6 +163,8 @@ export function createTerminalZoomInputController(runtime = {}) {
       setTerminalInputEcho(`failed: ${error?.message || "input delivery failed"}`);
       setConnectionStatus("input failed; stream may be disconnected", true);
       return false;
+    } finally {
+      state.sending = false;
     }
   }
 

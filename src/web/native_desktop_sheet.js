@@ -188,6 +188,10 @@ export function createNativeDesktopSheetController(runtime = {}) {
   }
 
   async function saveNativeSettings() {
+    // In-flight guard: a second submit while a save is pending would PUT twice.
+    if (state.nativeDesktop.loading) {
+      return;
+    }
     const app = String(el.nativeApp.value || "iterm");
     const mode = String(el.nativeMode.value || "swap");
 
@@ -234,7 +238,12 @@ export function createNativeDesktopSheetController(runtime = {}) {
       return;
     }
 
+    // In-flight guard: a second click while the open is pending would POST twice.
+    if (state.nativeDesktop.loading) {
+      return;
+    }
     setNativeResult(`Opening ${session.session_id} in the native app...`);
+    state.nativeDesktop.loading = true;
     try {
       const response = await apiFetch("/v1/native/open", {
         method: "POST",
@@ -246,6 +255,7 @@ export function createNativeDesktopSheetController(runtime = {}) {
     } catch (error) {
       setNativeResult(`Failed to open session natively: ${error.message}`, true);
     } finally {
+      state.nativeDesktop.loading = false;
       syncSheetActionAvailability();
     }
   }
