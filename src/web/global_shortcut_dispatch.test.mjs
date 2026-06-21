@@ -17,6 +17,7 @@ function buildRuntime(overrides = {}) {
     closeSheets: () => calls.push(["closeSheets"]),
     trogdorAtlasTransitionState: (mode) => ({ trogdorAtlasOpen: mode !== "close" }),
     renderHudSurface: () => calls.push(["renderHudSurface"]),
+    syncTrogdorReaderTimer: () => calls.push(["syncTrogdorReaderTimer"]),
     setSelectMode: (enabled) => calls.push(["setSelectMode", enabled]),
     openSheet: (sheetId) => calls.push(["openSheet", sheetId]),
     openThoughtConfigSheet: () => calls.push(["openThoughtConfigSheet"]),
@@ -66,6 +67,7 @@ test("runGlobalShortcutAction dispatches escape and ctrl-shift side effects", ()
   assert.deepEqual(calls, [
     ["closeSheets"],
     ["renderHudSurface"],
+    ["syncTrogdorReaderTimer"],
     ["setSelectMode", false],
     ["openThoughtConfigSheet"],
     ["openNativeSheet"],

@@ -371,9 +371,21 @@ test("Trogdor atlas transition helpers preserve path-specific state patches", ()
     trogdorReaderClawgKey: "",
     trogdorSurfaceSignature: "",
   });
-  assert.deepEqual(trogdorAtlasTransitionState("toggle", true), { trogdorAtlasOpen: false });
+  assert.deepEqual(trogdorAtlasTransitionState("toggle", true), {
+    trogdorAtlasOpen: false,
+    hoveredTrogdorSessionId: null,
+    trogdorReaderStartedAt: 0,
+    trogdorReaderStartIndex: 0,
+    trogdorReaderClawgKey: "",
+  });
   assert.deepEqual(trogdorAtlasTransitionState("toggle", false), { trogdorAtlasOpen: true });
-  assert.deepEqual(trogdorAtlasTransitionState("close"), { trogdorAtlasOpen: false });
+  assert.deepEqual(trogdorAtlasTransitionState("close"), {
+    trogdorAtlasOpen: false,
+    hoveredTrogdorSessionId: null,
+    trogdorReaderStartedAt: 0,
+    trogdorReaderStartIndex: 0,
+    trogdorReaderClawgKey: "",
+  });
   assert.deepEqual(trogdorAtlasTransitionState("unknown", "yes"), { trogdorAtlasOpen: true });
 });
 

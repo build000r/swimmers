@@ -18,6 +18,9 @@ export function runGlobalShortcutAction(plan, runtime) {
     case "close_trogdor_atlas":
       Object.assign(runtime.state, runtime.trogdorAtlasTransitionState("close"));
       runtime.renderHudSurface();
+      // The close transition resets hover/reader state; sync stops the speed
+      // reader's interval so it does not keep rendering a hidden surface.
+      runtime.syncTrogdorReaderTimer();
       break;
     case "exit_select_mode":
       runtime.setSelectMode(false);

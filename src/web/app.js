@@ -829,6 +829,7 @@ const globalShortcutRuntime = {
   closeSheets,
   trogdorAtlasTransitionState,
   renderHudSurface,
+  syncTrogdorReaderTimer,
   setSelectMode,
   openSheet,
   openThoughtConfigSheet,
@@ -1863,6 +1864,9 @@ function runTrogdorReaderSurfaceAction(plan) {
 function toggleTrogdorAtlasSurfaceAction() {
   Object.assign(state, trogdorAtlasTransitionState("toggle", state.trogdorAtlasOpen));
   renderHudSurface();
+  // Closing the atlas resets hover/reader state above; sync stops the speed
+  // reader's 120ms interval instead of leaving it firing over a hidden surface.
+  syncTrogdorReaderTimer();
 }
 
 function surfaceActionExecutionForZone(plan, zone) {
