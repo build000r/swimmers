@@ -349,7 +349,11 @@ export function createTerminalSurfaceController(runtime) {
       queueHudRender();
       return;
     }
-    const frame = runtime.buildSurfaceFrame(buildSurfaceModel());
+    const frame = runtime.buildSurfaceFrame(buildSurfaceModel(), state.hudFrameScratch);
+    // Hold the frame buffers so the next render reuses them instead of
+    // reallocating; buildSurfaceFrame falls back to a fresh allocation whenever
+    // the grid dimensions change.
+    state.hudFrameScratch = { cells: frame.cells, spans: frame.spans };
     state.surfaceZones = frame.zones ?? [];
     state.surfaceMasks = frame.masks ?? [];
     const patched = withSurfaceOperation("applyPatchBatchFlat", () => {

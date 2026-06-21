@@ -133,6 +133,23 @@ test("surface frame patch hash is deterministic and model-sensitive", () => {
   assert.notEqual(framePatchHash(frameA), framePatchHash(changed));
 });
 
+test("surface frame reuses caller buffers without changing rendered output", () => {
+  const seed = buildSurfaceFrame(baseModel());
+  const reuse = { cells: seed.cells, spans: seed.spans };
+  const fresh = buildSurfaceFrame(baseModel());
+  const reused = buildSurfaceFrame(baseModel(), reuse);
+
+  // Same buffer instances are reused (no per-render reallocation)...
+  assert.equal(reused.cells, reuse.cells);
+  assert.equal(reused.spans, reuse.spans);
+  // ...and the rendered frame is byte-identical to a fresh allocation.
+  assert.equal(framePatchHash(reused), framePatchHash(fresh));
+
+  // A larger grid cannot reuse the smaller buffer; it must allocate fresh.
+  const resized = buildSurfaceFrame(baseModel({ cols: 200, rows: 80 }), reuse);
+  assert.notEqual(resized.cells, reuse.cells);
+});
+
 test("surface exposes parity actions for the selected session", () => {
   const frame = buildSurfaceFrame(baseModel());
   const actionIds = frame.zones

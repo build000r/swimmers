@@ -25,14 +25,35 @@ import {
   truncate,
 } from "./rendered_surface_draw.js";
 
-export function buildSurfaceFrame(model) {
+export function buildSurfaceFrame(model, reuse = null) {
   const cols = clampInt(model?.cols, 80, 32, 240);
   const rows = clampInt(model?.rows, 24, 16, 120);
+  const cellCount = cols * rows * 4;
+  // Reuse the caller's buffers when the grid dimensions are unchanged. This
+  // render path runs on 40+ triggers (hover, byte feed, status/mode/search), so
+  // a fresh Uint32Array(cols*rows*4) — up to ~460 KB at the 240x120 max — every
+  // call is steady GC churn. Zeroing and refilling is byte-identical to a fresh
+  // zero-initialized allocation, so the rendered frame is unchanged.
+  let cells;
+  let spans;
+  if (reuse?.cells instanceof Uint32Array && reuse.cells.length === cellCount) {
+    cells = reuse.cells;
+    cells.fill(0);
+    spans =
+      reuse.spans instanceof Uint32Array && reuse.spans.length === 2
+        ? reuse.spans
+        : new Uint32Array(2);
+    spans[0] = 0;
+    spans[1] = cols * rows;
+  } else {
+    cells = new Uint32Array(cellCount);
+    spans = new Uint32Array([0, cols * rows]);
+  }
   const frame = {
     cols,
     rows,
-    cells: new Uint32Array(cols * rows * 4),
-    spans: new Uint32Array([0, cols * rows]),
+    cells,
+    spans,
     zones: [],
     masks: [],
   };
