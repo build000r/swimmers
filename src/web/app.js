@@ -1465,6 +1465,9 @@ function applyLifecycleEvent(message) {
   }
 
   state.sessions[index] = lifecycleDeletedSessionPatchPlan(state.sessions[index], message);
+  // The deleted session's output stream is done; drop its de-dup sequence so the
+  // map can't accumulate one permanent entry per deleted session over a long run.
+  state.lastTerminalSeqBySession.delete(sessionId);
   if (state.selectedSessionId === sessionId) {
     setConnectionStatus("session ended", true);
   } else {
