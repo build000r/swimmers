@@ -21,12 +21,24 @@ use regex::Regex;
 const COALESCE_MS: u64 = 32; // ~2 frames at 60fps
 const CURSOR_POS_THRESHOLD: usize = 10; // min cursor-position seqs to trigger coalescing
 const INPUT_GRACE_MS: u64 = 200; // pass-through window after swimmers input
+// Hard cap on the coalesce buffer. The 32ms window bounds typical bursts, but a
+// sustained redraw storm (e.g. a peer tmux client scrolling continuously) could
+// otherwise grow the buffer without bound; force-flush past this so memory stays
+// bounded while the latest frame is still delivered.
+const MAX_COALESCE_BYTES: usize = 512 * 1024;
+// Max bytes of a trailing, not-yet-terminated CSI escape carried across reads so
+// a cursor-position sequence split on a read boundary is still counted.
+const MAX_ESCAPE_CARRY: usize = 16;
 
 pub struct ScrollGuard {
     cursor_pos_re: Regex,
     last_input_time: Option<Instant>,
     buffer: Option<Vec<u8>>,
     flush_deadline: Option<Instant>,
+    /// Trailing bytes of the previous chunk that form an incomplete CSI escape,
+    /// carried so a cursor-position sequence split on a read boundary is counted
+    /// once it completes in the next chunk.
+    carry: Vec<u8>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -51,6 +63,7 @@ impl ScrollGuard {
             last_input_time: None,
             buffer: None,
             flush_deadline: None,
+            carry: Vec::new(),
         }
     }
 
@@ -81,6 +94,9 @@ impl ScrollGuard {
         let mut output = Vec::new();
 
         if self.is_inside_input_grace(now) {
+            // Passing through on our own activity; a carried partial escape from
+            // before the grace window is no longer a reliable redraw signal.
+            self.carry.clear();
             self.flush_into(&mut output);
             output.push(ScrollOutputChunk::new(data.to_vec(), false));
             return output;
@@ -90,7 +106,12 @@ impl ScrollGuard {
 
         if self.is_redraw(data) {
             self.buffer_redraw(data, now);
-            // Nothing to emit yet.
+            // Bound memory under a sustained redraw burst: once the coalesced
+            // buffer grows past the cap, force-flush now instead of waiting for
+            // the 32ms deadline.
+            if self.buffered_len() >= MAX_COALESCE_BYTES {
+                self.flush_into(&mut output);
+            }
         } else {
             self.flush_into(&mut output);
             output.push(ScrollOutputChunk::new(data.to_vec(), false));
@@ -144,10 +165,27 @@ impl ScrollGuard {
         }
     }
 
-    fn is_redraw(&self, data: &[u8]) -> bool {
-        // Count cursor-positioning sequences as a proxy for "full-screen redraw".
-        let text = String::from_utf8_lossy(data);
-        self.cursor_pos_re.find_iter(&text).count() >= CURSOR_POS_THRESHOLD
+    fn is_redraw(&mut self, data: &[u8]) -> bool {
+        // Count cursor-positioning sequences as a proxy for "full-screen
+        // redraw". Bridge any cursor-position escape split across the previous
+        // read boundary by prepending the carried tail before counting, so a
+        // real redraw is not undercounted and waved through uncoalesced; then
+        // re-derive the carry from this chunk's trailing incomplete escape.
+        let combined: Vec<u8> = if self.carry.is_empty() {
+            data.to_vec()
+        } else {
+            let mut c = std::mem::take(&mut self.carry);
+            c.extend_from_slice(data);
+            c
+        };
+        let text = String::from_utf8_lossy(&combined);
+        let count = self.cursor_pos_re.find_iter(&text).count();
+        self.carry = trailing_incomplete_csi(&combined);
+        count >= CURSOR_POS_THRESHOLD
+    }
+
+    fn buffered_len(&self) -> usize {
+        self.buffer.as_ref().map_or(0, Vec::len)
     }
 
     fn buffer_redraw(&mut self, data: &[u8], now: Instant) {
@@ -174,6 +212,42 @@ impl ScrollGuard {
             .take()
             .map(|data| ScrollOutputChunk::new(data, true))
     }
+}
+
+/// Return the trailing bytes of `data` that form a not-yet-terminated CSI
+/// escape (`ESC`, `ESC[`, or `ESC[` + parameter bytes), capped to
+/// `MAX_ESCAPE_CARRY`, so the next chunk can complete and count a
+/// cursor-position sequence split on a read boundary. Returns empty when the
+/// tail ends on a complete or irrelevant sequence.
+fn trailing_incomplete_csi(data: &[u8]) -> Vec<u8> {
+    let start = data.len().saturating_sub(MAX_ESCAPE_CARRY);
+    let tail = &data[start..];
+    let Some(esc) = tail.iter().rposition(|&b| b == 0x1b) else {
+        return Vec::new();
+    };
+    let seq = &tail[esc..];
+    if is_incomplete_csi(seq) {
+        seq.to_vec()
+    } else {
+        Vec::new()
+    }
+}
+
+/// True if `seq` (which must start with ESC) is an incomplete CSI sequence: a
+/// lone ESC, `ESC[`, or `ESC[` followed only by parameter bytes (ASCII digits
+/// or `;`) with no final byte yet. A present final byte means the sequence is
+/// already complete (and was counted), so there is nothing to carry.
+fn is_incomplete_csi(seq: &[u8]) -> bool {
+    let mut iter = seq.iter();
+    if iter.next() != Some(&0x1b) {
+        return false;
+    }
+    match iter.next() {
+        None => return true, // lone ESC
+        Some(b'[') => {}
+        Some(_) => return false, // not a CSI introducer we track
+    }
+    iter.all(|&b| b.is_ascii_digit() || b == b';')
 }
 
 impl Default for ScrollGuard {
@@ -370,6 +444,75 @@ mod tests {
         assert_eq!(result.len(), 1, "future last_input should treat as grace");
         assert_eq!(result[0].data, data);
         assert!(!result[0].coalesced_redraw);
+    }
+
+    #[test]
+    fn cursor_sequence_split_across_read_boundary_is_still_detected_as_redraw() {
+        let mut guard = ScrollGuard::new();
+        // 9 complete cursor seqs + the start of a 10th, split before its final
+        // 'H'. Below threshold on its own, so it passes through...
+        let mut first = make_cursor_data(CURSOR_POS_THRESHOLD - 1);
+        first.extend_from_slice(b"\x1b[10;1");
+        let passed = guard.process(&first);
+        assert_eq!(passed.len(), 1, "sub-threshold chunk passes through");
+        assert!(!passed[0].coalesced_redraw);
+
+        // ...the next chunk completes the split sequence; together with its own
+        // 9 cursor seqs that reaches the threshold, so it must be detected as a
+        // redraw and buffered. Regression: without cross-chunk carry the lone
+        // 'H' + 9 seqs counts only 9 and the redraw leaks through uncoalesced.
+        let mut second = Vec::from(&b"H"[..]);
+        second.extend_from_slice(&make_cursor_data(CURSOR_POS_THRESHOLD - 1));
+        let result = guard.process(&second);
+        assert!(
+            result.is_empty(),
+            "completed split sequence should tip the chunk into a buffered redraw"
+        );
+        assert!(guard.check_flush_deadline().is_some());
+    }
+
+    #[test]
+    fn complete_trailing_sequence_is_not_double_counted_across_chunks() {
+        let mut guard = ScrollGuard::new();
+        // A chunk ending on a *complete* cursor sequence must not leave a carry
+        // that double-counts into the next chunk.
+        let first = make_cursor_data(CURSOR_POS_THRESHOLD - 1); // ends with \r\n
+        assert_eq!(guard.process(&first).len(), 1, "below threshold passes");
+        // A following sub-threshold chunk must still pass through (no phantom
+        // carry pushing it over the line).
+        let second = make_cursor_data(CURSOR_POS_THRESHOLD - 1);
+        assert_eq!(
+            guard.process(&second).len(),
+            1,
+            "no phantom carry should tip a sub-threshold chunk into a redraw"
+        );
+    }
+
+    #[test]
+    fn coalesce_buffer_is_capped_under_a_sustained_redraw_burst() {
+        let mut guard = ScrollGuard::new();
+        let chunk = make_cursor_data(15); // each chunk is itself a redraw
+        let chunk_len = chunk.len();
+        assert!(chunk_len > 0);
+        let needed = MAX_COALESCE_BYTES / chunk_len + 2;
+        let mut forced_flush = false;
+        for _ in 0..needed {
+            for out in guard.process(&chunk) {
+                // A mid-burst emitted chunk is the capped force-flush.
+                if out.coalesced_redraw {
+                    forced_flush = true;
+                }
+            }
+            if forced_flush {
+                break;
+            }
+        }
+        assert!(
+            forced_flush,
+            "buffer should force-flush once it exceeds MAX_COALESCE_BYTES"
+        );
+        // And the live buffer must never exceed the cap by more than one chunk.
+        assert!(guard.buffered_len() < MAX_COALESCE_BYTES + chunk_len);
     }
 
     #[test]
