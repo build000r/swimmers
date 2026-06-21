@@ -28,6 +28,10 @@ const EMIT_RESPONSE_TIMEOUT: Duration = Duration::from_secs(30);
 /// any legitimate payload while still bounding worst-case memory.
 const MAX_DAEMON_LINE_BYTES: u64 = 8 * 1024 * 1024;
 const DEFAULTS_COMMAND_TIMEOUT: Duration = Duration::from_secs(5);
+/// Bound on reaping a killed daemon. A child stuck in uninterruptible (D-state)
+/// sleep must not stall the single bridge task during restart; `kill_on_drop`
+/// cleans the handle up after this timeout.
+const STOP_DAEMON_WAIT_TIMEOUT: Duration = Duration::from_secs(2);
 
 struct DaemonProcess {
     child: Child,
@@ -367,7 +371,10 @@ impl EmitterClient {
     async fn stop_current_daemon(&mut self) {
         if let Some(mut daemon) = self.daemon.take() {
             let _ = daemon.child.start_kill();
-            let _ = daemon.child.wait().await;
+            // Bound the reap so a child stuck in uninterruptible sleep cannot
+            // stall the bridge loop; the daemon is dropped here either way and
+            // kill_on_drop finishes the cleanup if the wait times out.
+            let _ = tokio::time::timeout(STOP_DAEMON_WAIT_TIMEOUT, daemon.child.wait()).await;
         }
     }
 }
