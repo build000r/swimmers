@@ -527,7 +527,9 @@ pub(super) fn session_input_delivery_response(
             session_id,
             delivered: true,
             delivery_method: Some(delivery.method.to_string()),
-            message: None,
+            // Carries the partial-delivery warning ("...may not have been fully
+            // submitted") so a 200 isn't silently mistaken for a complete submit.
+            message: delivery.message,
         }),
     )
         .into_response()

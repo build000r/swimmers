@@ -271,6 +271,14 @@ impl InputDeliveryResult {
         }
     }
 
+    fn delivered_with_message(method: &'static str, message: impl Into<String>) -> Self {
+        Self {
+            delivered: true,
+            method,
+            message: Some(message.into()),
+        }
+    }
+
     fn failed(method: &'static str, message: impl Into<String>) -> Self {
         Self {
             delivered: false,
@@ -505,7 +513,12 @@ fn tmux_write_input_error_result(
         delivered_chunks = err.delivered_chunks,
         "tmux send-keys input failed: {err}"
     );
-    (err.delivered_chunks > 0).then(|| InputDeliveryResult::delivered("tmux_send_keys_partial"))
+    (err.delivered_chunks > 0).then(|| {
+        InputDeliveryResult::delivered_with_message(
+            "tmux_send_keys_partial",
+            "input only partially delivered to tmux; the command may not have been fully submitted",
+        )
+    })
 }
 
 impl SessionActor {

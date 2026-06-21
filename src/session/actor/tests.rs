@@ -1511,7 +1511,15 @@ esac
         .unwrap_or_else(|poison| poison.into_inner());
     assert!(result.delivered);
     assert_eq!(result.method, "tmux_send_keys_partial");
-    assert_eq!(result.message, None);
+    // Partial delivery surfaces a warning so a 200/ok isn't mistaken for a
+    // complete submit even though `delivered` stays true.
+    assert!(
+        result
+            .message
+            .as_deref()
+            .is_some_and(|message| message.contains("partially delivered")),
+        "partial delivery must surface a warning message"
+    );
     assert!(writer_state.writes.is_empty());
     assert_eq!(writer_state.flushes, 0);
 
