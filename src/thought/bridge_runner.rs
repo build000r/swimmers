@@ -258,7 +258,9 @@ where
         BridgeSyncOutcome::Success { response, duration } => {
             record_successful_bridge_sync(&cycle, delivery_states, snapshots, response, duration)
         }
-        BridgeSyncOutcome::Error(err) => record_bridge_sync_error(cycle.health, cycle.metrics, err),
+        BridgeSyncOutcome::Error(err) => {
+            record_bridge_sync_error(cycle.health, cycle.metrics, emitter_client, err).await
+        }
         BridgeSyncOutcome::Timeout => {
             record_bridge_sync_timeout(cycle.health, cycle.metrics, cycle.timing, emitter_client)
                 .await
@@ -297,14 +299,23 @@ where
     cycle.timing.tick
 }
 
-fn record_bridge_sync_error<M: ThoughtMetricRecorder>(
+async fn record_bridge_sync_error<M: ThoughtMetricRecorder>(
     health: &BridgeHealthState,
     metrics: &M,
+    emitter_client: &mut EmitterClient,
     err: EmitterClientError,
 ) -> Duration {
     record_bridge_model_error(metrics, "error");
     let retry_delay = health.next_retry_delay_for_failure();
-    let error_text = err.to_string();
+    let mut error_text = err.to_string();
+    // Symmetric with the timeout path: a stdout-desync leaves a live-but-one-
+    // behind daemon, so restart it now rather than waiting a cycle for the next
+    // retry to notice and reset line-correlation.
+    if err.is_stdout_desync() {
+        if let Err(restart_err) = emitter_client.restart_daemon().await {
+            error_text = format!("{error_text}; restart failed: {restart_err}");
+        }
+    }
     record_bridge_failure(health, error_text, retry_delay, BridgeFailureLog::SyncError);
     retry_delay
 }

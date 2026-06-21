@@ -180,6 +180,18 @@ impl EmitterClientError {
                 | Self::UnexpectedResponseType { .. }
         )
     }
+
+    /// A stdout-desync leaves the daemon alive but one response behind on its
+    /// stdio stream, so it must be restarted to reset line-correlation rather
+    /// than left to self-heal a cycle later.
+    pub(crate) fn is_stdout_desync(&self) -> bool {
+        matches!(
+            self,
+            Self::ResponseRequestMismatch { .. }
+                | Self::MalformedResponse { .. }
+                | Self::UnexpectedResponseType { .. }
+        )
+    }
 }
 
 /// Line-delimited JSON client for `clawgs emit --stdio`.
@@ -647,6 +659,22 @@ mod tests {
             request_id: None,
         }
         .is_retryable());
+
+        // is_stdout_desync is the subset the error path eagerly restarts on: the
+        // desync variants, but not EOF (the daemon is already dead and respawns
+        // on the next cycle) nor a request-level daemon error.
+        assert!(EmitterClientError::ResponseRequestMismatch {
+            expected: "1".to_string(),
+            actual: "stale".to_string(),
+        }
+        .is_stdout_desync());
+        assert!(!EmitterClientError::ResponseEof.is_stdout_desync());
+        assert!(!EmitterClientError::DaemonError {
+            code: "bad_request".to_string(),
+            message: "nope".to_string(),
+            request_id: None,
+        }
+        .is_stdout_desync());
     }
 
     #[test]
