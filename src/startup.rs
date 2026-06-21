@@ -660,6 +660,12 @@ fn spawn_deferred_init_task(
         tracing::info!(phase = "deferred_init", "startup phase begin");
         let deferred_started = Instant::now();
 
+        // Warm the installed-skills registry off the runtime so the first input
+        // line containing a skill marker doesn't trigger a blocking fs::read_dir
+        // on a session actor's async task (swimmers-m8g1). Fire-and-forget: if it
+        // is slow or fails the lazy path still initializes on demand.
+        tokio::task::spawn_blocking(crate::session::skill_detection::prewarm_installed_skills);
+
         let (persistence_store, (), daemon_defaults) =
             run_deferred_init_phases(state.supervisor.clone(), state.thought_config.clone()).await;
 

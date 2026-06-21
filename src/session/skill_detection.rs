@@ -135,6 +135,14 @@ fn installed_skill_decision(normalized: &str) -> InstalledSkillDecision {
     }
 }
 
+/// Eagerly initialize the installed-skills registry so the first input line
+/// containing a skill marker does not trigger a blocking `fs::read_dir` on a
+/// session actor's async task. Call once at startup from `spawn_blocking`
+/// (swimmers-m8g1); the OnceLock makes it idempotent.
+pub(crate) fn prewarm_installed_skills() {
+    let _ = installed_skill_decision("");
+}
+
 fn load_installed_skill_names() -> Option<HashSet<String>> {
     let home = std::env::var("HOME").ok()?;
     non_empty_skill_names(load_installed_skill_names_from_home(Path::new(&home)))
