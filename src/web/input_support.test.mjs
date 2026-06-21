@@ -789,6 +789,7 @@ test("appEventListenerBindingPlan preserves binding order and special listener c
     "dirsUpButton:click:handleDirsUpButtonClick",
     "dirsList:change:handleDirCheckboxChange",
     "dirsList:click:handleDirsListClick",
+    "dirsGroups:click:handleDirsListClick:optional-target",
     "mermaidRefreshButton:click:handleMermaidRefreshButtonClick",
     "mermaidOpenButton:click:handleMermaidOpenButtonClick",
     "mermaidPlanTabs:click:handleMermaidPlanTabsClick",

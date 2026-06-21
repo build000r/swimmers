@@ -402,6 +402,10 @@ export function appEventListenerBindingPlan() {
       { target: "dirsUpButton", eventType: "click", handler: "handleDirsUpButtonClick" },
       { target: "dirsList", eventType: "change", handler: "handleDirCheckboxChange" },
       { target: "dirsList", eventType: "click", handler: "handleDirsListClick" },
+      // Group-filter chips render into #dirs-groups (a sibling of #dirs-list),
+      // so clicks there never bubble to the dirsList handler. Bind the same
+      // handler (it delegates to the group-chip path first) to dirsGroups.
+      { target: "dirsGroups", eventType: "click", handler: "handleDirsListClick", optionalTarget: true },
       { target: "mermaidRefreshButton", eventType: "click", handler: "handleMermaidRefreshButtonClick" },
       { target: "mermaidOpenButton", eventType: "click", handler: "handleMermaidOpenButtonClick" },
       { target: "mermaidPlanTabs", eventType: "click", handler: "handleMermaidPlanTabsClick" },
