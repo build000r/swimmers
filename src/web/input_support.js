@@ -50,9 +50,14 @@ export function shouldIgnoreSyntheticClick(nowMs, suppressUntilMs) {
 export function authTokenButtonPlan(action, tokenValue = "") {
   switch (action) {
     case "save":
-      return { type: "persist", token: String(tokenValue ?? ""), resetReadOnly: false };
+      // Don't pre-judge write access on save: the authoritative read-only flag is
+      // derived from the next refresh / socket `ready` handshake for the new token.
+      return { type: "persist", token: String(tokenValue ?? ""), assumeReadOnly: false };
     case "clear":
-      return { type: "persist", token: "", resetReadOnly: true };
+      // Clearing the token drops the operator privilege, so optimistically fall
+      // back to observer (read-only) rather than granting write. The subsequent
+      // refresh / socket `ready` handshake confirms the server-derived value.
+      return { type: "persist", token: "", assumeReadOnly: true };
     default:
       return { type: "ignore" };
   }

@@ -123,6 +123,14 @@ export function createSessionSocketController(runtime) {
     ) {
       return;
     }
+    // If the selected session is already gone, a reconnect would be a no-op
+    // (runSelectedSessionSocketReconnect gates on hasCurrentSession), so do not
+    // arm a timer or show a misleading "retrying in Ns" status. A refresh still
+    // reconciles the now-removed session (swimmers-r6lo).
+    if (!runtime.currentSession()) {
+      runtime.scheduleSessionRefresh();
+      return;
+    }
     const closePlan = sessionSocketCloseExecutionPlan(runtime.reconnectDelayMs());
     if (closePlan.incrementReconnectAttempt) state.reconnectAttempt += 1;
     runtime.setConnectionStatus(closePlan.status, true);

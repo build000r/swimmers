@@ -275,6 +275,8 @@ const state = {
   },
   nativeDesktop: {
     loading: false,
+    opening: false,
+    saving: false,
     status: null,
     result: "",
     error: "",
@@ -1451,7 +1453,7 @@ function applyLifecycleEvent(message) {
   }
 
   if (message.event === "session_created" && message.summary) {
-    mergeSummary(message.summary);
+    mergeSummary(message.summary, { allowAdd: true });
     return;
   }
 
@@ -1487,11 +1489,14 @@ function refreshSelectedSessionSidecarsFromEvent(sessionId, event) {
   void refreshWorkbenchWidgetsForSelectedSession({ throttle: true, silent: true });
 }
 
-function mergeSummary(summary) {
+function mergeSummary(summary, { allowAdd = false } = {}) {
   const index = state.sessions.findIndex((session) => session.session_id === summary.session_id);
   if (index >= 0) {
     state.sessions[index] = summary;
-  } else if (summary?.session_id) {
+  } else if (allowAdd && summary?.session_id) {
+    // Only genuinely-new sessions (session_created) may add an absent entry.
+    // A transient 'ready' summary for a just-deleted/absent session must never
+    // resurrect it — refreshSessions is the authoritative source of the list.
     state.sessions.push(summary);
   }
   syncTerminalStatusStrip();
@@ -1591,8 +1596,11 @@ async function handleAuthTokenButtonAction(action) {
   const plan = authTokenButtonPlan(action, el.tokenInput.value);
   if (plan.type === "ignore") return false;
   persistToken(plan.token);
-  if (plan.resetReadOnly) {
-    state.readOnly = false;
+  if (plan.assumeReadOnly) {
+    // Clearing the token revokes write access: reflect observer mode immediately
+    // instead of optimistically granting write. The refresh below (and the socket
+    // `ready` handshake) reconcile this with the server-derived read-only flag.
+    state.readOnly = true;
     syncWriteAccess();
   }
   // The terminal socket only sends the auth token in its open handshake, so a

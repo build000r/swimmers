@@ -33,10 +33,15 @@ export function createTrogdorEventBindings(runtime = {}) {
   } = runtime;
 
   // After a pointerdown opens an agent, ignore the synthetic mouse/touch click
-  // that follows on the same element so the terminal does not open twice.
-  // Keyboard activation fires click with no preceding pointerdown, so it is
-  // never suppressed.
+  // that follows on the SAME agent so the terminal does not open twice. We track
+  // the armed agent's sessionId (not just a time window) so a residual window —
+  // left behind when the synthetic click never resolves to that agent's
+  // surface_action (pointerup off the element, or it resolves to
+  // dom_action/ignore) — can only ever suppress a click on that same agent.
+  // Keyboard Enter on a different agent (or after the one-shot is consumed) fires
+  // a surface_action whose sessionId differs, so it is never swallowed.
   let clickSuppressUntil = 0;
+  let clickSuppressSessionId = "";
 
   async function handleTrogdorDomAction(button) {
     if (!button || button.disabled) {
@@ -59,6 +64,7 @@ export function createTrogdorEventBindings(runtime = {}) {
     if (plan.stopPropagation) event.stopPropagation();
     void openTrogdorAgentTerminal(plan.sessionId);
     clickSuppressUntil = now() + surfaceClickSuppressMs;
+    clickSuppressSessionId = plan.sessionId;
   }
 
   function handleTrogdorSurfacePassthrough(event) {
@@ -84,11 +90,16 @@ export function createTrogdorEventBindings(runtime = {}) {
       return;
     }
     if (plan.type === "surface_action") {
-      // The preceding pointerdown already opened this agent; skip the synthetic
-      // click. Consume the window one-shot so a later keyboard Enter (which has
-      // no prior pointerdown) is never swallowed by a still-open suppress window.
-      if (shouldIgnoreSyntheticClick(now(), clickSuppressUntil)) {
+      // Suppress only the synthetic click on the SAME agent the pointerdown just
+      // opened. Matching on sessionId means a stale window left over from a
+      // pointerdown whose click never resolved here cannot swallow a genuine
+      // keyboard Enter on a different agent. Consume the one-shot on a real match.
+      if (
+        plan.zone.sessionId === clickSuppressSessionId
+        && shouldIgnoreSyntheticClick(now(), clickSuppressUntil)
+      ) {
         clickSuppressUntil = 0;
+        clickSuppressSessionId = "";
         return;
       }
       void handleSurfaceAction(plan.zone);

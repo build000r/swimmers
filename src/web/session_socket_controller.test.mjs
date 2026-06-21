@@ -144,6 +144,31 @@ test("connectSelectedSession connects a socket for the selected session", async 
   ]);
 });
 
+test("close handler suppresses retrying status and timer when the session is gone", async () => {
+  const { calls, controller, state, setSession } = runtimeFixture();
+  await controller.connectSelectedSession();
+  const closeHandler = state.ws.onclose;
+
+  // The selected session is deleted before the socket close fires.
+  setSession(null);
+  calls.length = 0;
+  closeHandler();
+
+  assert.ok(
+    calls.some(([name]) => name === "scheduleSessionRefresh"),
+    "should still schedule a refresh to reconcile the removed session",
+  );
+  assert.ok(
+    !calls.some(([name]) => name === "setConnectionStatus"),
+    "should not show a misleading retrying status for a gone session",
+  );
+  assert.ok(
+    !calls.some(([name]) => name === "setTimeout"),
+    "should not arm a no-op reconnect timer for a gone session",
+  );
+  assert.equal(state.reconnectTimer, null);
+});
+
 test("connectSelectedSession keeps remote sessions in snapshot fallback", async () => {
   const { calls, controller, sockets, state } = runtimeFixture({
     session: {

@@ -1371,6 +1371,39 @@ test("websocket lifecycle events create and stale sessions", () => {
   assert.ok(web.el.terminalStatusStrip.textContent.includes("session ended"));
 });
 
+test("a late 'ready' summary never re-adds an absent/deleted session", () => {
+  resetWebState();
+  // Simulate a refresh having already dropped the just-deleted session: the list
+  // is empty and a stale 'ready' frame for that session arrives over the socket.
+  web.state.sessions = [];
+  web.state.selectedSessionId = "sess_gone";
+
+  web.handleSocketText(JSON.stringify({
+    type: "ready",
+    readOnly: false,
+    summary: rawSession({ session_id: "sess_gone", tmux_name: "ghost" }),
+  }));
+
+  // The transient 'ready' must not resurrect the absent session.
+  assert.equal(web.state.sessions.length, 0);
+
+  // A genuine session_created event for a new session still adds it (the legit
+  // add path is preserved, gated by allowAdd).
+  web.handleSocketText(JSON.stringify({
+    type: "lifecycle_event",
+    event: "session_created",
+    sessionId: "sess_new",
+    summary: rawSession({ session_id: "sess_new", tmux_name: "fresh" }),
+  }));
+  assert.equal(web.state.sessions.length, 1);
+  assert.equal(web.state.sessions[0].session_id, "sess_new");
+
+  if (web.state.refreshTimer) {
+    clearTimeout(web.state.refreshTimer);
+    web.state.refreshTimer = null;
+  }
+});
+
 test("terminal workbench fetches and renders selected agent context", async () => {
   resetWebState();
   web.state.sessions = [rawSession({ tool: "Codex", cwd: "/tmp/project" })];

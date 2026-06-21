@@ -132,6 +132,27 @@ test("remote handoff copy uses non-secret session environment metadata", () => {
   );
 });
 
+test("remote handoff detection ignores '::' in a local session id", () => {
+  // A local tmux session name can legitimately contain "::"; the handoff must
+  // not treat that as a remote session and refuse to open a native terminal.
+  assert.equal(
+    remoteNativeHandoffAvailable({ session_id: "a::b", environment: { scope: "local" } }),
+    false,
+  );
+  // No environment at all (defaults to local scope) is likewise not remote.
+  assert.equal(remoteNativeHandoffAvailable({ session_id: "a::b" }), false);
+  // A default local target_id is not a remote signal either.
+  assert.equal(
+    remoteNativeHandoffAvailable({ session_id: "a::b", environment: { target_id: "local" } }),
+    false,
+  );
+  // A real remote target_id (without scope) still flags as remote.
+  assert.equal(
+    remoteNativeHandoffAvailable({ session_id: "a::b", environment: { target_id: "skillbox" } }),
+    true,
+  );
+});
+
 test("remote handoff availability trims scope metadata", async () => {
   const { calls, controller, state } = fixture({
     environments: [{ id: "skillbox", backend_mode: "remote_swimmers_api" }],
@@ -159,11 +180,14 @@ test("remote handoff availability trims scope metadata", async () => {
   assert.match(state.nativeDesktop.error, /remote cwd: \/srv\/skillbox\/repos\/swimmers/);
 });
 
-test("remote handoff falls back to namespaced session id and avoids false remote cwd labels", () => {
+test("remote handoff parses a namespaced session id for already-remote sessions and avoids false remote cwd labels", () => {
   const session = {
     session_id: "skillbox::sess_7",
     cwd: "/Users/b/repos/opensource/swimmers",
     environment: {
+      // Detection is via scope; the "::" split only parses the remote session id
+      // (sess_7) and target (skillbox) for the handoff copy below.
+      scope: "remote",
       local_cwd: "/Users/b/repos/opensource/swimmers",
       canonical_cwd: "/Users/b/repos/opensource/swimmers",
     },
@@ -346,19 +370,39 @@ test("openSelectedNativeSession posts the selected session id and reports pane d
   assert.equal(calls.sync, 1);
 });
 
-test("native open and save skip the request when one is already in flight", async () => {
+test("native open and save skip the request when the same operation is already in flight", async () => {
   const open = fixture({
     session: { session_id: "sess_7" },
     responses: [{ session_id: "sess_7" }],
   });
-  open.state.nativeDesktop.loading = true;
+  open.state.nativeDesktop.opening = true;
   await open.controller.openSelectedNativeSession();
   assert.equal(open.calls.fetches.length, 0, "no duplicate POST /v1/native/open");
 
   const save = fixture({ responses: [{}] });
-  save.state.nativeDesktop.loading = true;
+  save.state.nativeDesktop.saving = true;
   await save.controller.saveNativeSettings();
   assert.equal(save.calls.fetches.length, 0, "no duplicate PUT /v1/native/app");
+});
+
+test("native open and save proceed while a status refresh holds the shared loading flag", async () => {
+  // refreshNativeStatus sets state.nativeDesktop.loading on sheet-open; a click
+  // on Open (or a save submit) during that fetch must NOT be silently dropped.
+  const open = fixture({
+    session: { session_id: "sess_7" },
+    responses: [{ session_id: "sess_7", pane_id: "%9" }],
+  });
+  open.state.nativeDesktop.loading = true;
+  await open.controller.openSelectedNativeSession();
+  assert.equal(open.calls.fetches[0][0], "/v1/native/open", "open proceeds despite shared loading");
+  assert.equal(open.state.nativeDesktop.result, "Opened sess_7 in native app (%9).");
+
+  const save = fixture({ responses: [{ supported: true, app: "iterm" }] });
+  save.el.nativeApp.value = "iterm";
+  save.state.nativeDesktop.loading = true;
+  await save.controller.saveNativeSettings();
+  assert.equal(save.calls.fetches[0][0], "/v1/native/app", "save proceeds despite shared loading");
+  assert.equal(save.state.nativeDesktop.result, "Native settings saved: iterm");
 });
 
 test("openSelectedNativeSession shows setup guidance when remote attach command is missing", async () => {

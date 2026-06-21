@@ -77,8 +77,17 @@ function handoffCwdLine(session, environment) {
 }
 
 export function remoteNativeHandoffAvailable(session) {
-  const scope = String(sessionEnvironment(session).scope || "local").trim().toLowerCase();
-  return scope === "remote" || Boolean(splitRemoteSessionId(session));
+  // Detection MUST come from the environment scope/target_id (remote sessions
+  // always carry scope==="remote" and a non-local target_id). The "::" split is
+  // only a parser for an already-known-remote session id, never the detection
+  // signal — a local tmux session name can legitimately contain "::".
+  const environment = sessionEnvironment(session);
+  const scope = String(environment.scope || "local").trim().toLowerCase();
+  if (scope === "remote") {
+    return true;
+  }
+  const targetId = nonEmptyString(environment.target_id);
+  return Boolean(targetId) && targetId.toLowerCase() !== "local";
 }
 
 export function remoteNativeHandoffMessage(session, environments = []) {
@@ -188,14 +197,17 @@ export function createNativeDesktopSheetController(runtime = {}) {
   }
 
   async function saveNativeSettings() {
-    // In-flight guard: a second submit while a save is pending would PUT twice.
-    if (state.nativeDesktop.loading) {
+    // Per-operation in-flight guard: a second submit while a save is pending would
+    // PUT twice. Guarding on the shared `loading` (also set by refreshNativeStatus
+    // on sheet-open) would silently drop a save while the status fetch is in
+    // flight, so save tracks its own flag.
+    if (state.nativeDesktop.saving) {
       return;
     }
     const app = String(el.nativeApp.value || "iterm");
     const mode = String(el.nativeMode.value || "swap");
 
-    state.nativeDesktop.loading = true;
+    state.nativeDesktop.saving = true;
     setNativeResult("Saving native settings...");
     try {
       const appResponse = await apiFetch("/v1/native/app", {
@@ -221,7 +233,7 @@ export function createNativeDesktopSheetController(runtime = {}) {
     } catch (error) {
       setNativeResult(`Failed to save native settings: ${error.message}`, true);
     } finally {
-      state.nativeDesktop.loading = false;
+      state.nativeDesktop.saving = false;
       syncSheetActionAvailability();
     }
   }
@@ -238,12 +250,15 @@ export function createNativeDesktopSheetController(runtime = {}) {
       return;
     }
 
-    // In-flight guard: a second click while the open is pending would POST twice.
-    if (state.nativeDesktop.loading) {
+    // Per-operation in-flight guard: a second click while the open is pending
+    // would POST twice. Guarding on the shared `loading` (also set by
+    // refreshNativeStatus on sheet-open) would silently drop the open while the
+    // status fetch is in flight, so open tracks its own flag.
+    if (state.nativeDesktop.opening) {
       return;
     }
     setNativeResult(`Opening ${session.session_id} in the native app...`);
-    state.nativeDesktop.loading = true;
+    state.nativeDesktop.opening = true;
     try {
       const response = await apiFetch("/v1/native/open", {
         method: "POST",
@@ -255,7 +270,7 @@ export function createNativeDesktopSheetController(runtime = {}) {
     } catch (error) {
       setNativeResult(`Failed to open session natively: ${error.message}`, true);
     } finally {
-      state.nativeDesktop.loading = false;
+      state.nativeDesktop.opening = false;
       syncSheetActionAvailability();
     }
   }

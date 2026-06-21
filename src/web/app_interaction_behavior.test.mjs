@@ -789,14 +789,17 @@ test("auth token button action preserves save, clear, and refresh side effects",
 
   requests.length = 0;
   web.state.activeSheet = "auth";
-  web.state.readOnly = true;
-  web.el.sendInput.disabled = true;
+  // Currently a writer (operator token granted write). Clearing the token revokes
+  // that privilege, so it must NOT optimistically keep/grant write — it drops to
+  // observer (read-only) pending the server-derived flag from the next refresh.
+  web.state.readOnly = false;
+  web.el.sendInput.disabled = false;
   web.el.tokenInput.value = "ignored";
   assert.equal(await web.handleAuthTokenButtonAction("clear"), true);
   assert.equal(web.state.token, "");
   assert.equal(storage.has("swimmers.web.token"), false);
-  assert.equal(web.state.readOnly, false);
-  assert.equal(web.el.sendInput.disabled, false);
+  assert.equal(web.state.readOnly, true);
+  assert.equal(web.el.sendInput.disabled, true);
   assert.equal(web.state.activeSheet, null);
   assert.equal(requests.find((request) => request.path === "/v1/sessions")?.authorization, null);
 });

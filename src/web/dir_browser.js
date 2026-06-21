@@ -719,7 +719,13 @@ export function renderDirEntries(
   storage.setItem(pathStorageKey, path);
   storage.setItem(managedOnlyStorageKey, String(Boolean(el.dirsManagedOnly.checked)));
   el.dirsPath.value = path;
-  if (!el.createCwd.value.trim() || !selected.size) {
+  // Only seed createCwd from the listing path when it is still blank. The old
+  // `|| !selected.size` clause re-filled createCwd on EVERY re-render whenever no
+  // batch was selected (the common case) — including each search keystroke
+  // (handleDirsSearchInput -> renderDirEntries) — silently clobbering a
+  // user-typed custom cwd. Navigation that should reset createCwd already sets
+  // it explicitly (openCreateSheetForCwd / the base-reload fallback).
+  if (!el.createCwd.value.trim()) {
     el.createCwd.value = path;
   }
   renderLaunchTargetOptions(response, { el, dirBrowser, preferredLaunchTarget });

@@ -214,6 +214,33 @@ test("directory browser controller keeps batch selections that the search filter
   );
 });
 
+test("search keystroke re-render does not overwrite a user-typed custom createCwd", () => {
+  const { runtime, state, el } = createRuntime({
+    renderDirBrowserView() {
+      return true;
+    },
+  });
+  state.dirBrowser.path = "/srv/repos";
+  state.dirBrowser.entries = [
+    { name: "swimmers", full_path: "/srv/repos/swimmers" },
+    { name: "clean", full_path: "/srv/repos/clean" },
+  ];
+  state.dirBrowser.batchSelected = new Set();
+  el.createCwd.value = "/custom";
+  el.dirsSearch = { value: "" };
+
+  const controller = createDirBrowserController(runtime);
+
+  // A search keystroke re-renders the SAME listing path (no navigation). With an
+  // empty batch this previously hit the `|| !selected.size` clause and clobbered
+  // the user-typed cwd; it must now be left untouched.
+  el.dirsSearch.value = "swim";
+  controller.handleDirsSearchInput();
+
+  assert.equal(el.createCwd.value, "/custom");
+  assert.equal(state.dirBrowser.path, "/srv/repos");
+});
+
 test("createSessionFromSheet blocks a re-entrant submit while a create is in flight", async () => {
   const { runtime, state, el } = createRuntime();
   state.readOnly = false;

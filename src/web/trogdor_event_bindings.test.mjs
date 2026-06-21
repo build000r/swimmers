@@ -187,6 +187,55 @@ test("Trogdor synthetic-click suppression is consumed one-shot, not held for the
   assert.deepEqual(actions.at(-1), { type: "trogdor_agent", sessionId: "agent-1" });
 });
 
+test("Trogdor residual suppress window only targets the armed agent, never a different one", () => {
+  const surface = new FakeElement();
+  const agent1 = new FakeElement({ dataset: { sessionId: "agent-1" } });
+  const agent2 = new FakeElement({ dataset: { sessionId: "agent-2" } });
+  const agent1Target = new FakeElement({ closestMap: { "[data-trogdor-agent]": agent1 } });
+  const agent2Target = new FakeElement({ closestMap: { "[data-trogdor-agent]": agent2 } });
+  // A DOM button whose pointerup lands elsewhere — its click resolves to
+  // dom_action, never to agent-1's surface_action, so the armed window lingers.
+  const offButton = new FakeElement({ dataset: { action: "trogdor_refresh" } });
+  const offTarget = new FakeElement({ closestMap: { "button[data-action]": offButton } });
+  const actions = [];
+  const terminals = [];
+  const clock = 1000; // never advances: the window stays open the whole test
+  const bindings = createTrogdorEventBindings({
+    elements: { trogdorSurface: surface },
+    ElementClass: FakeElement,
+    handleSurfaceAction(zone) {
+      actions.push(zone);
+    },
+    openTrogdorAgentTerminal(sessionId) {
+      terminals.push(sessionId);
+    },
+    now: () => clock,
+  });
+  bindings.bindTrogdorEvents();
+
+  // Mouse open on agent-1 arms the suppress window for agent-1.
+  listenerFor(surface, "pointerdown")(fakeEvent(agent1Target));
+  assert.deepEqual(terminals, ["agent-1"]);
+
+  // The follow-up click lands off the agent (resolves to dom_action), so the
+  // agent-1 window is never consumed — it lingers, still open.
+  listenerFor(surface, "click")(fakeEvent(offTarget));
+
+  // (b) A genuine keyboard Enter on a DIFFERENT agent within the residual window
+  // must NOT be swallowed — its sessionId differs from the armed one.
+  listenerFor(surface, "click")(fakeEvent(agent2Target));
+  assert.deepEqual(actions.at(-1), { type: "trogdor_agent", sessionId: "agent-2" });
+
+  // (a) The synthetic click on the ARMED agent is still suppressed exactly once
+  // (no double-open), even though it arrives after the unrelated activity.
+  const before = actions.length;
+  listenerFor(surface, "click")(fakeEvent(agent1Target));
+  assert.equal(actions.length, before);
+  // ...and the next click on agent-1 (one-shot consumed) dispatches normally.
+  listenerFor(surface, "click")(fakeEvent(agent1Target));
+  assert.deepEqual(actions.at(-1), { type: "trogdor_agent", sessionId: "agent-1" });
+});
+
 test("Trogdor handlers preserve disabled button and non-element target behavior", async () => {
   const surface = new FakeElement();
   const disabledButton = new FakeElement({

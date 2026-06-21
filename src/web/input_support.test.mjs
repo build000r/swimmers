@@ -87,12 +87,14 @@ test("authTokenButtonPlan preserves save, clear, and ignored actions", () => {
   assert.deepEqual(authTokenButtonPlan("save", " token\n"), {
     type: "persist",
     token: " token\n",
-    resetReadOnly: false,
+    assumeReadOnly: false,
   });
+  // Clearing the token must fall back to observer (read-only), never optimistically
+  // grant write — the server-derived flag is reconciled on the next refresh.
   assert.deepEqual(authTokenButtonPlan("clear", "ignored"), {
     type: "persist",
     token: "",
-    resetReadOnly: true,
+    assumeReadOnly: true,
   });
   assert.deepEqual(authTokenButtonPlan("unknown", "secret"), { type: "ignore" });
 });
