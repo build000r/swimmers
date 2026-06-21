@@ -349,7 +349,13 @@ export function applyWorkbenchWidgetResults(widgets, results = {}, options = {})
 }
 
 function renderDiffHtml(diffText) {
-  const text = widgetTextExcerpt(diffText, 6400);
+  const normalized = String(diffText || "").replace(/\r/g, "");
+  // Keep the HEAD when truncating so the rendered hunks line up with the file
+  // summaries shown above them, which the backend parses from the head of the
+  // diff. (widgetTextExcerpt keeps the tail, which is right for logs but
+  // desyncs a diff from its summary.)
+  const text =
+    normalized.length <= 6400 ? normalized : `${normalized.slice(0, 6400)}\n... truncated ...`;
   if (!text.trim()) {
     return "";
   }

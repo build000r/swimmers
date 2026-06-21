@@ -148,6 +148,31 @@ test("workbench Diffs panel reports untracked-only trees as dirty, not clean", (
   assert.match(html, /new_file\.rs/);
 });
 
+test("workbench diff truncation keeps the head so hunks line up with file summaries", () => {
+  const diff = "diff --git a/HEADMARKER b/HEADMARKER\n" + "+x\n".repeat(3000) + "TAILMARKERLINE\n";
+  const html = buildWorkbenchWidgetsHtml({
+    widgets: {
+      timeline: { events: [] },
+      transcript: { available: false, turns: [], records: [] },
+      artifact: { available: false },
+      gitDiff: {
+        available: true,
+        status_short: " M x",
+        unstaged_diff: diff,
+        files: [],
+        truncated: true,
+      },
+      skills: { available: false },
+    },
+    contextPayload: { turns: [] },
+    selectedTurnId: "",
+    logState: { mode: "lens", filter: "all", query: "" },
+  });
+  assert.match(html, /HEADMARKER/);
+  assert.doesNotMatch(html, /TAILMARKERLINE/);
+  assert.match(html, /\.\.\. truncated \.\.\./);
+});
+
 test("workbench widget event planners classify click, input, and change targets", () => {
   const clickTarget = (matches) => ({
     closest(selector) {
