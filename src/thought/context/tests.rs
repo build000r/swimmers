@@ -42,12 +42,55 @@ fn parse_jsonl_entries_keeps_incomplete_tail_unconsumed() {
 
 #[test]
 fn parse_jsonl_entries_consumes_complete_malformed_lines() {
-    let buf = b"not json\n{\"type\":\"event_msg\",\"payload\":{\"type\":\"user_message\",\"message\":\"second\"}}";
+    let buf = b"not json\n{\"type\":\"event_msg\",\"payload\":{\"type\":\"user_message\",\"message\":\"second\"}}\n";
     let (entries, consumed_offset) = parse_jsonl_entries_and_offset(buf, 3);
 
     assert_eq!(entries.len(), 1);
     assert_eq!(entries[0].byte_start, 3 + b"not json\n".len() as u64);
     assert_eq!(consumed_offset, 3 + buf.len() as u64);
+}
+
+#[test]
+fn parse_jsonl_entries_holds_valid_but_unterminated_tail() {
+    // A valid-JSON final segment with no trailing newline may be a torn write,
+    // so it must NOT be consumed; the next read re-reads it once the newline
+    // lands (swimmers-nb7g).
+    let complete = b"{\"type\":\"event_msg\"}\n";
+    let tail = b"{\"type\":\"user\"}"; // valid JSON, but not newline-terminated yet
+    let mut buf = Vec::new();
+    buf.extend_from_slice(complete);
+    buf.extend_from_slice(tail);
+
+    let (entries, consumed_offset) = parse_jsonl_entries_and_offset(&buf, 0);
+
+    assert_eq!(
+        entries.len(),
+        1,
+        "only the newline-terminated line is consumed"
+    );
+    assert_eq!(entries[0].raw, "{\"type\":\"event_msg\"}");
+    assert_eq!(consumed_offset, complete.len() as u64);
+}
+
+#[test]
+fn log_read_start_caps_incremental_window_to_bootstrap_max() {
+    // A normal incremental read resumes at previous_size.
+    assert_eq!(log_read_start(LogReadPhase::Incremental, 100, 200), 100);
+
+    // If the file grew by more than BOOTSTRAP_MAX since the last read, only the
+    // trailing window is read so the allocation stays bounded (swimmers-nb7g).
+    let previous = 10;
+    let current = BOOTSTRAP_MAX * 3 + previous;
+    assert_eq!(
+        log_read_start(LogReadPhase::Incremental, previous, current),
+        current - BOOTSTRAP_MAX
+    );
+
+    // Bootstrap behavior is unchanged.
+    assert_eq!(
+        log_read_start(LogReadPhase::Bootstrap, previous, current),
+        current - BOOTSTRAP_MAX
+    );
 }
 
 #[test]

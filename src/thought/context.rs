@@ -173,12 +173,18 @@ fn parse_jsonl_segment(
 
     let raw = String::from_utf8_lossy(line).to_string();
     match serde_json::from_str::<Value>(&raw) {
-        Ok(value) => JsonlSegmentParse::Entry(JsonlEntry {
+        // Only consume a newline-terminated line. A valid-looking segment with
+        // no trailing newline may be a torn write whose flushed prefix is
+        // coincidentally complete JSON; holding it (Stop) lets the next read
+        // pick up the whole record once the newline lands, instead of advancing
+        // past it and losing the rest (swimmers-nb7g).
+        Ok(value) if complete_line => JsonlSegmentParse::Entry(JsonlEntry {
             value,
             raw,
             byte_start: base_offset + segment_start as u64,
             byte_end: line_end_offset,
         }),
+        Ok(_) => JsonlSegmentParse::Stop,
         Err(_) if complete_line => JsonlSegmentParse::Skip {
             consumed_offset: Some(line_end_offset),
         },
@@ -1263,7 +1269,11 @@ fn log_read_phase(reset_reader: bool, bootstrapped: bool) -> LogReadPhase {
 fn log_read_start(phase: LogReadPhase, previous_size: u64, current_size: u64) -> u64 {
     match phase {
         LogReadPhase::Bootstrap => current_size.saturating_sub(BOOTSTRAP_MAX),
-        LogReadPhase::Incremental => previous_size,
+        // Clamp the incremental window too: if the file grew by more than
+        // BOOTSTRAP_MAX since the last read, read only the trailing window
+        // rather than allocating the whole multi-GB delta in one shot. Older
+        // delta is dropped, matching the bootstrap cap (swimmers-nb7g).
+        LogReadPhase::Incremental => previous_size.max(current_size.saturating_sub(BOOTSTRAP_MAX)),
     }
 }
 
