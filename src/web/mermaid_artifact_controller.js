@@ -110,22 +110,38 @@ export function createMermaidArtifactController({
       return;
     }
 
+    const sessionId = session.session_id;
     const artifact = artifactState();
     artifact.loading = true;
-    artifact.sessionId = session.session_id;
+    artifact.sessionId = sessionId;
     artifact.artifact = null;
     clearSvgUrl();
     artifact.source = "";
     el.mermaidPreview.innerHTML = "";
     el.mermaidSource.textContent = "";
+    // A newer refresh (session switch) overwrites artifact.sessionId; bail before
+    // mutating state/DOM so a slow earlier response can't paint a stale artifact
+    // over the newer session's.
+    const superseded = () => artifact.sessionId !== sessionId;
     try {
-      const artifactResponse = await apiMaybeFetch(`/v1/sessions/${encodeURIComponent(session.session_id)}/mermaid-artifact`);
+      const artifactResponse = await apiMaybeFetch(`/v1/sessions/${encodeURIComponent(sessionId)}/mermaid-artifact`);
       const payload = await responseJsonOrNull(artifactResponse, normalizeMermaidArtifactResponse);
+      if (superseded()) {
+        return;
+      }
       artifact.artifact = payload;
       if (payload?.available) {
-        const svgResponse = await apiMaybeFetch(`/v1/sessions/${encodeURIComponent(session.session_id)}/mermaid-artifact/svg`);
+        const svgResponse = await apiMaybeFetch(`/v1/sessions/${encodeURIComponent(sessionId)}/mermaid-artifact/svg`);
+        if (superseded()) {
+          return;
+        }
         if (svgResponse) {
-          setSvgUrl(URLImpl.createObjectURL(await svgResponse.blob()));
+          const objectUrl = URLImpl.createObjectURL(await svgResponse.blob());
+          if (superseded()) {
+            URLImpl.revokeObjectURL(objectUrl);
+            return;
+          }
+          setSvgUrl(objectUrl);
         } else {
           clearSvgUrl();
         }
@@ -134,10 +150,15 @@ export function createMermaidArtifactController({
       }
       renderArtifact(payload);
     } catch (error) {
-      setStatus(`Failed to load Mermaid artifact: ${error.message}`, true);
+      if (!superseded()) {
+        setStatus(`Failed to load Mermaid artifact: ${error.message}`, true);
+      }
     } finally {
-      artifact.loading = false;
-      syncSheetActionAvailability();
+      // Only the still-active refresh owns the loading flag.
+      if (!superseded()) {
+        artifact.loading = false;
+        syncSheetActionAvailability();
+      }
     }
   }
 
