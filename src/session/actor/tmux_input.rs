@@ -134,7 +134,13 @@ pub(super) async fn send_tmux_input_chunks(
     let mut delivered_chunks = 0;
     for chunk in chunks {
         let result = match chunk {
-            TmuxInputChunk::Literal(text) => send_tmux_keys(&target, &["-l", text]).await,
+            // `--` ends send-keys option parsing so a literal beginning with
+            // `-` (e.g. a user typing `-rf`, `--flag`, or `-N5`) is typed
+            // verbatim instead of being swallowed as a send-keys flag -- tmux's
+            // getopt does not stop after `-l`. Without it, `-N5` exits 0 having
+            // typed nothing (a silent partial delivery falsely counted as ok),
+            // and `-X` errors. Mirrors the set-buffer path's `--`.
+            TmuxInputChunk::Literal(text) => send_tmux_keys(&target, &["-l", "--", text]).await,
             TmuxInputChunk::Enter => send_tmux_keys(&target, &["Enter"]).await,
         };
         match result {

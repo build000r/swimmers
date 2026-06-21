@@ -1448,8 +1448,42 @@ exit 0
 
     let log = std::fs::read_to_string(tmux_log.path()).expect("tmux log");
     assert!(log.contains("send-keys -t =demo: -X cancel"));
-    assert!(log.contains("send-keys -t =demo: -l hello"));
+    assert!(log.contains("send-keys -t =demo: -l -- hello"));
     assert!(log.contains("send-keys -t =demo: Enter"));
+
+    std::env::remove_var("TMUX_SEND_LOG");
+    restore_path(previous_path);
+}
+
+#[tokio::test]
+async fn handle_write_input_sends_leading_dash_literal_after_end_of_options() {
+    // Regression: a literal beginning with `-` (e.g. a user typing `-N5`,
+    // `-rf`, `--flag`) must be typed verbatim, not parsed as a send-keys flag.
+    // tmux getopt does not stop after `-l`, so the `--` separator is required;
+    // without it `-N5` exits 0 having typed nothing.
+    let _guard = crate::test_support::ENV_LOCK
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
+    let tmux_log = tempfile::NamedTempFile::new().expect("tmux log");
+    std::env::set_var("TMUX_SEND_LOG", tmux_log.path());
+    let (_dir, previous_path) = install_fake_tmux(
+        r#"#!/bin/sh
+printf '%s\n' "$*" >> "$TMUX_SEND_LOG"
+exit 0
+"#,
+    );
+    let mut actor = test_actor();
+    let _writer_state = set_tracking_writer(&mut actor);
+
+    let result = actor.handle_write_input(b"-N5\r".to_vec(), false).await;
+
+    assert!(result.delivered);
+    assert_eq!(result.method, "tmux_send_keys");
+    let log = std::fs::read_to_string(tmux_log.path()).expect("tmux log");
+    assert!(
+        log.contains("send-keys -t =demo: -l -- -N5"),
+        "leading-dash literal must be sent after `--`; log was:\n{log}"
+    );
 
     std::env::remove_var("TMUX_SEND_LOG");
     restore_path(previous_path);
@@ -1524,7 +1558,7 @@ esac
     assert_eq!(writer_state.flushes, 0);
 
     let log = std::fs::read_to_string(tmux_log.path()).expect("tmux log");
-    assert!(log.contains("send-keys -t =demo: -l hello"));
+    assert!(log.contains("send-keys -t =demo: -l -- hello"));
     assert!(log.contains("send-keys -t =demo: Enter"));
 
     std::env::remove_var("TMUX_SEND_LOG");
