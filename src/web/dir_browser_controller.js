@@ -457,6 +457,22 @@ export function createDirBrowserController(runtime) {
   }
 
   async function createSessionFromSheet() {
+    // Re-entrancy guard: a second submit (double-click, or Enter then click)
+    // while a create/batch request is in flight must not fire a duplicate POST.
+    // This covers the batch path too, since it is only reached by delegation
+    // from here.
+    if (state.dirBrowser.creating) {
+      return;
+    }
+    state.dirBrowser.creating = true;
+    try {
+      await createSessionFromSheetUnguarded();
+    } finally {
+      state.dirBrowser.creating = false;
+    }
+  }
+
+  async function createSessionFromSheetUnguarded() {
     if (state.readOnly) {
       return;
     }

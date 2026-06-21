@@ -214,6 +214,35 @@ test("directory browser controller keeps batch selections that the search filter
   );
 });
 
+test("createSessionFromSheet blocks a re-entrant submit while a create is in flight", async () => {
+  const { runtime, state, el } = createRuntime();
+  state.readOnly = false;
+  el.createCwd.value = "/workspace/app";
+
+  let posts = 0;
+  let release;
+  const pending = new Promise((resolve) => {
+    release = resolve;
+  });
+  runtime.apiFetch = async (path) => {
+    if (path === "/v1/sessions") {
+      posts += 1;
+      await pending;
+    }
+    return { json: async () => ({}) };
+  };
+
+  const controller = createDirBrowserController(runtime);
+  const first = controller.createSessionFromSheet();
+  // The first submit is now in flight (hung on apiFetch); a second submit must
+  // be ignored rather than firing a duplicate POST.
+  await controller.createSessionFromSheet();
+  assert.equal(posts, 1);
+
+  release({});
+  await first;
+});
+
 test("directory browser controller scopes listings to the selected remote target", async () => {
   const calls = [];
   const { runtime, state } = createRuntime({
