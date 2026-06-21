@@ -1384,11 +1384,13 @@ printf '{"effective":[],"recommendations":[]}\n'
             SessionGroupInputResult {
                 session_id: "ok".to_string(),
                 ok: true,
+                partial: false,
                 error: None,
             },
             SessionGroupInputResult {
                 session_id: "skipped".to_string(),
                 ok: false,
+                partial: false,
                 error: Some(ErrorResponse {
                     code: "SESSION_NOT_READY".to_string(),
                     message: Some("session is not waiting for input".to_string()),

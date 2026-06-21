@@ -332,3 +332,25 @@ async fn send_input_delivery_response_maps_failed_delivery() {
     assert_eq!(json["code"], "INPUT_DELIVERY_FAILED");
     assert_eq!(json["message"], "pty write failed");
 }
+
+#[tokio::test]
+async fn send_input_delivery_response_flags_partial_delivery() {
+    let response = session_input_delivery_response(
+        "sess-1".to_string(),
+        InputDeliveryResult {
+            delivered: true,
+            method: crate::session::actor::TMUX_PARTIAL_DELIVERY_METHOD,
+            message: Some("input only partially delivered to tmux".to_string()),
+        },
+    );
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let json = response_json(response).await;
+    // ok/delivered stay true (the some-vs-none contract), but partial is flagged
+    // so a caller needing an all-or-nothing submit can retry without ok flipping
+    // (swimmers-bjsu).
+    assert_eq!(json["ok"], true);
+    assert_eq!(json["delivered"], true);
+    assert_eq!(json["partial"], true);
+    assert_eq!(json["message"], "input only partially delivered to tmux");
+}

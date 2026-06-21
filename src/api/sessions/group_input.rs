@@ -30,6 +30,7 @@ fn group_input_error_result(
     SessionGroupInputResult {
         session_id,
         ok: false,
+        partial: false,
         error: Some(error_body(code, message)),
     }
 }
@@ -261,7 +262,7 @@ async fn send_group_input_to_ready_session(
     state: &Arc<AppState>,
     session_id: &str,
     input: &[u8],
-) -> Result<(), GroupInputSessionError> {
+) -> Result<bool, GroupInputSessionError> {
     let handle = state
         .supervisor
         .get_session(session_id)
@@ -274,7 +275,7 @@ async fn deliver_group_input_to_actor(
     session_id: &str,
     handle: &ActorHandle,
     input: &[u8],
-) -> Result<(), GroupInputSessionError> {
+) -> Result<bool, GroupInputSessionError> {
     let (ack_tx, ack_rx) = oneshot::channel();
     if let Err(err) = handle
         .send(SessionCommand::WriteInputAck {
@@ -296,7 +297,7 @@ async fn deliver_group_input_to_actor(
 async fn wait_for_group_input_delivery_ack(
     ack_rx: oneshot::Receiver<InputDeliveryResult>,
     timeout: Duration,
-) -> Result<(), GroupInputSessionError> {
+) -> Result<bool, GroupInputSessionError> {
     match tokio::time::timeout(timeout, ack_rx).await {
         Ok(Ok(delivery)) => classify_group_input_delivery_ack(delivery),
         Ok(Err(_)) => Err(GroupInputSessionError::new(
@@ -310,11 +311,14 @@ async fn wait_for_group_input_delivery_ack(
     }
 }
 
+/// Returns Ok(partial) where `partial` mirrors the single-input path: the
+/// submit landed (some-vs-none contract keeps it Ok) but may be incomplete
+/// (swimmers-bjsu).
 fn classify_group_input_delivery_ack(
     delivery: InputDeliveryResult,
-) -> Result<(), GroupInputSessionError> {
+) -> Result<bool, GroupInputSessionError> {
     if delivery.delivered {
-        Ok(())
+        Ok(delivery.is_partial())
     } else {
         Err(GroupInputSessionError::new(
             "INPUT_DELIVERY_FAILED",
@@ -333,13 +337,15 @@ async fn send_group_input_to_session(
         return error.into_result(session_id);
     }
 
-    if let Err(error) = send_group_input_to_ready_session(state, &session_id, input).await {
-        return error.into_result(session_id);
-    }
+    let partial = match send_group_input_to_ready_session(state, &session_id, input).await {
+        Ok(partial) => partial,
+        Err(error) => return error.into_result(session_id),
+    };
 
     SessionGroupInputResult {
         session_id,
         ok: true,
+        partial,
         error: None,
     }
 }

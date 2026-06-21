@@ -206,6 +206,46 @@ async fn send_group_input_preserves_surrounding_whitespace() {
 }
 
 #[tokio::test]
+async fn send_group_input_flags_partial_delivery_per_session() {
+    let state = test_state();
+    let first = with_test_batch(summary("p-first", SessionState::Idle), "batch-group");
+    let second = with_test_batch(summary("p-second", SessionState::Idle), "batch-group");
+    let partial_ack = || {
+        Some(InputDeliveryResult {
+            delivered: true,
+            method: crate::session::actor::TMUX_PARTIAL_DELIVERY_METHOD,
+            message: Some("input only partially delivered to tmux".to_string()),
+        })
+    };
+    let mut first_rx = insert_group_input_delivery_test_handle(&state, first, partial_ack()).await;
+    let mut second_rx =
+        insert_group_input_delivery_test_handle(&state, second, partial_ack()).await;
+
+    let response = send_group_input(
+        Extension(AuthInfo::new(OPERATOR_SCOPES.to_vec())),
+        State(state),
+        Json(SessionGroupInputRequest {
+            session_ids: vec!["p-first".to_string(), "p-second".to_string()],
+            text: "run".to_string(),
+        }),
+    )
+    .await
+    .into_response();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let _ = first_rx.recv().await.expect("first write");
+    let _ = second_rx.recv().await.expect("second write");
+    let json = response_json(response).await;
+    let results = json["results"].as_array().expect("results");
+    // Mirrors the single-input contract: ok stays true (some-vs-none) and
+    // partial flags the incomplete submit per session (swimmers-bjsu).
+    assert_eq!(results[0]["ok"], true);
+    assert_eq!(results[0]["partial"], true);
+    assert_eq!(results[1]["ok"], true);
+    assert_eq!(results[1]["partial"], true);
+}
+
+#[tokio::test]
 async fn send_group_input_sends_only_ready_sessions() {
     let state = test_state();
 

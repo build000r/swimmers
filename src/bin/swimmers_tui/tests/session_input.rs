@@ -170,11 +170,13 @@ fn submitting_group_input_sends_existing_sessions_without_spawning() {
         SessionGroupInputResult {
             session_id: "sess-swimmers".to_string(),
             ok: true,
+            partial: false,
             error: None,
         },
         SessionGroupInputResult {
             session_id: "sess-skills".to_string(),
             ok: true,
+            partial: false,
             error: None,
         },
     ])));
@@ -220,6 +222,7 @@ fn submitting_group_input_keeps_composer_when_all_sessions_skip() {
         SessionGroupInputResult {
             session_id: "sess-swimmers".to_string(),
             ok: false,
+            partial: false,
             error: Some(ErrorResponse {
                 code: "SESSION_NOT_READY".to_string(),
                 message: Some("session is not waiting for input".to_string()),
@@ -228,6 +231,7 @@ fn submitting_group_input_keeps_composer_when_all_sessions_skip() {
         SessionGroupInputResult {
             session_id: "sess-skills".to_string(),
             ok: false,
+            partial: false,
             error: Some(ErrorResponse {
                 code: "SESSION_NOT_READY".to_string(),
                 message: Some("session is not waiting for input".to_string()),
@@ -276,11 +280,13 @@ fn pressing_enter_submits_group_input_and_reports_partial_skips() {
         SessionGroupInputResult {
             session_id: "sess-swimmers".to_string(),
             ok: true,
+            partial: false,
             error: None,
         },
         SessionGroupInputResult {
             session_id: "sess-skills".to_string(),
             ok: false,
+            partial: false,
             error: Some(ErrorResponse {
                 code: "SESSION_NOT_READY".to_string(),
                 message: Some("session is not waiting for input".to_string()),
@@ -365,11 +371,13 @@ fn successful_group_input_does_not_refresh_attention_group_until_click() {
         SessionGroupInputResult {
             session_id: "sess-visible".to_string(),
             ok: true,
+            partial: false,
             error: None,
         },
         SessionGroupInputResult {
             session_id: "sess-cleared".to_string(),
             ok: true,
+            partial: false,
             error: None,
         },
     ])));

@@ -255,6 +255,11 @@ pub struct ReplayCursor {
 }
 
 /// Result of a browser/API input delivery attempt after actor-side injection.
+/// Delivery-method tag for a partial tmux submit: some send-keys chunks reached
+/// the pane (e.g. the literal text) but not all (e.g. the trailing Enter). Used
+/// to derive the response `partial` flag without flipping `delivered`/`ok`.
+pub const TMUX_PARTIAL_DELIVERY_METHOD: &str = "tmux_send_keys_partial";
+
 #[derive(Debug, Clone)]
 pub struct InputDeliveryResult {
     pub delivered: bool,
@@ -285,6 +290,14 @@ impl InputDeliveryResult {
             method,
             message: Some(message.into()),
         }
+    }
+
+    /// True when input was only partially delivered (some chunks reached the
+    /// pane, the rest did not). `delivered` stays true so the some-vs-none
+    /// contract is preserved; callers branch on this to retry without the
+    /// response's `ok` flipping (swimmers-bjsu).
+    pub fn is_partial(&self) -> bool {
+        self.delivered && self.method == TMUX_PARTIAL_DELIVERY_METHOD
     }
 }
 
@@ -515,7 +528,7 @@ fn tmux_write_input_error_result(
     );
     (err.delivered_chunks > 0).then(|| {
         InputDeliveryResult::delivered_with_message(
-            "tmux_send_keys_partial",
+            TMUX_PARTIAL_DELIVERY_METHOD,
             "input only partially delivered to tmux; the command may not have been fully submitted",
         )
     })

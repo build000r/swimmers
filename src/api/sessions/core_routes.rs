@@ -526,6 +526,10 @@ pub(super) fn session_input_delivery_response(
             ok: true,
             session_id,
             delivered: true,
+            // ok/delivered stay true (some-vs-none contract), but a partial
+            // submit is flagged so a caller needing an all-or-nothing delivery
+            // can retry without the response's ok flipping (swimmers-bjsu).
+            partial: delivery.is_partial(),
             delivery_method: Some(delivery.method.to_string()),
             // Carries the partial-delivery warning ("...may not have been fully
             // submitted") so a 200 isn't silently mistaken for a complete submit.

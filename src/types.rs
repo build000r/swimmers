@@ -1824,6 +1824,12 @@ pub struct SessionInputResponse {
     pub session_id: String,
     #[serde(default)]
     pub delivered: bool,
+    /// True when the input was only partially delivered (e.g. text without the
+    /// trailing Enter). `ok`/`delivered` stay true to preserve the some-vs-none
+    /// contract; a caller that needs an all-or-nothing submit branches on this
+    /// to retry (swimmers-bjsu).
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub partial: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub delivery_method: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1840,6 +1846,10 @@ pub struct SessionGroupInputRequest {
 pub struct SessionGroupInputResult {
     pub session_id: String,
     pub ok: bool,
+    /// Per-session partial-delivery flag, mirroring SessionInputResponse.partial
+    /// for the group path (swimmers-bjsu).
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub partial: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<ErrorResponse>,
 }

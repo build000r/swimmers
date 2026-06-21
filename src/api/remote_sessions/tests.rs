@@ -422,6 +422,7 @@ async fn remote_smoke_send_input(
         ok: true,
         session_id,
         delivered: true,
+        partial: false,
         delivery_method: Some("remote-test".to_string()),
         message: None,
     })
@@ -493,6 +494,7 @@ async fn remote_smoke_group_input(
         .map(|session_id| SessionGroupInputResult {
             session_id,
             ok: true,
+            partial: false,
             error: None,
         })
         .collect();
