@@ -933,9 +933,7 @@ mod tests {
             return run();
         }
 
-        let _guard = super::super::TEST_ENV_LOCK
-            .lock()
-            .expect("env test lock poisoned");
+        let _guard = super::super::lock_test_env();
         let _depth = EnvLockDepth::enter();
         run()
     }

@@ -88,6 +88,18 @@ const ENTITY_HEIGHT: u16 = SPRITE_HEIGHT + LABEL_HEIGHT;
 pub(crate) static TEST_ENV_LOCK: std::sync::LazyLock<std::sync::Mutex<()>> =
     std::sync::LazyLock::new(|| std::sync::Mutex::new(()));
 
+/// Acquire the shared test env lock, recovering from poisoning. The lock only
+/// provides mutual exclusion for process-global env mutation; if a prior test
+/// panicked while holding it (e.g. an environment-sensitive perf gate), the env
+/// itself is still usable, so a PoisonError must not cascade into every other
+/// env-touching test (swimmers-orkj).
+#[cfg(test)]
+pub(crate) fn lock_test_env() -> std::sync::MutexGuard<'static, ()> {
+    TEST_ENV_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
 // Sprite theme toggle position (on the header row, right of "swimmers tui").
 const SPRITE_THEME_TOGGLE_X: u16 = 16;
 const SWIM_BOB_RATE: f32 = 0.08;

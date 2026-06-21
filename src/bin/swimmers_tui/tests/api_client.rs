@@ -268,7 +268,7 @@ async fn api_client_preserves_api_error_codes_in_messages() {
 
 #[tokio::test]
 async fn api_client_test_thought_config_falls_back_when_local_backend_is_unreachable() {
-    let _lock = TEST_ENV_LOCK.lock().expect("env lock");
+    let _lock = lock_test_env();
     let original = env::var("CLAWGS_BIN").ok();
     let temp = tempdir().expect("tempdir");
     let args_log = temp.path().join("args.log");
@@ -297,7 +297,7 @@ async fn api_client_test_thought_config_falls_back_when_local_backend_is_unreach
 async fn api_client_test_thought_config_falls_back_when_backend_route_is_missing() {
     use axum::Router;
 
-    let _lock = TEST_ENV_LOCK.lock().expect("env lock");
+    let _lock = lock_test_env();
     let original = env::var("CLAWGS_BIN").ok();
     let temp = tempdir().expect("tempdir");
     let args_log = temp.path().join("args.log");

@@ -70,7 +70,7 @@ fn read_plan_file_from_disk_rejects_path_traversal_names() {
 fn resolve_tui_log_path_honors_explicit_dir_override() {
     // SWIMMERS_TUI_LOG_DIR takes precedence over TMPDIR. The filename always
     // embeds the calling pid so concurrent TUIs don't clobber each other.
-    let _lock = TEST_ENV_LOCK.lock().expect("env lock");
+    let _lock = lock_test_env();
     let tmp = tempdir().expect("tempdir");
     let prior_dir = env::var_os("SWIMMERS_TUI_LOG_DIR");
     let prior_tmp = env::var_os("TMPDIR");

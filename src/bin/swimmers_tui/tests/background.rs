@@ -626,7 +626,7 @@ fn initial_sync_refresh_populates_state() {
 /// visible frame must render without waiting for slow startup discovery.
 #[test]
 fn embedded_mode_first_frame_perf_gate() {
-    let _lock = TEST_ENV_LOCK.lock().expect("env lock");
+    let _lock = lock_test_env();
     let original_clawgs = env::var_os("CLAWGS_BIN");
     let original_data_dir = env::var_os("SWIMMERS_DATA_DIR");
     let original_tui_url = env::var_os("SWIMMERS_TUI_URL");
@@ -704,7 +704,7 @@ esac
 
 #[test]
 fn embedded_mode_ctrl_c_requests_bounded_shutdown() {
-    let _lock = TEST_ENV_LOCK.lock().expect("env lock");
+    let _lock = lock_test_env();
     let original_clawgs = env::var_os("CLAWGS_BIN");
     let original_data_dir = env::var_os("SWIMMERS_DATA_DIR");
     let original_tui_url = env::var_os("SWIMMERS_TUI_URL");

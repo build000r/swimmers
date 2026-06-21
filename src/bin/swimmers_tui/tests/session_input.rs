@@ -503,7 +503,7 @@ fn ctrl_v_in_initial_request_reports_voice_feature_when_not_built() {
 #[cfg(feature = "voice")]
 #[test]
 fn opening_initial_request_reports_voice_setup_gap_when_model_is_unset() {
-    let _lock = TEST_ENV_LOCK.lock().expect("env lock");
+    let _lock = lock_test_env();
     let original_model = env::var("SWIMMERS_VOICE_MODEL").ok();
     env::remove_var("SWIMMERS_VOICE_MODEL");
 
@@ -523,7 +523,7 @@ fn opening_initial_request_reports_voice_setup_gap_when_model_is_unset() {
 #[cfg(feature = "voice")]
 #[test]
 fn ctrl_v_in_initial_request_reports_missing_voice_model_when_feature_is_built() {
-    let _lock = TEST_ENV_LOCK.lock().expect("env lock");
+    let _lock = lock_test_env();
     let original_model = env::var("SWIMMERS_VOICE_MODEL").ok();
     env::remove_var("SWIMMERS_VOICE_MODEL");
 

@@ -120,7 +120,7 @@ fn publish_selection_records_error_message_on_api_failure() {
 
 #[test]
 fn resolve_tui_log_path_falls_back_to_tmpdir_when_override_unset() {
-    let _lock = TEST_ENV_LOCK.lock().expect("env lock");
+    let _lock = lock_test_env();
     let tmp = tempdir().expect("tempdir");
     let prior_dir = env::var_os("SWIMMERS_TUI_LOG_DIR");
     let prior_tmp = env::var_os("TMPDIR");

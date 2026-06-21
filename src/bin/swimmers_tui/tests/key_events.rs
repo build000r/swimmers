@@ -1172,7 +1172,7 @@ fn clicking_ghostty_mode_label_toggles_preview_mode_live() {
 
 #[test]
 fn clicking_attention_group_label_opens_managed_group() {
-    let _lock = TEST_ENV_LOCK.lock().expect("env lock");
+    let _lock = lock_test_env();
     let _size = EnvVarGuard::remove("SWIMMERS_ATTENTION_GROUP_SIZE");
     let _layout_env = EnvVarGuard::remove("SWIMMERS_ATTENTION_GROUP_LAYOUT");
     let _unnumbered = EnvVarGuard::remove("SWIMMERS_ATTENTION_GROUP_INCLUDE_UNNUMBERED");
@@ -1245,7 +1245,7 @@ fn clicking_attention_group_label_opens_managed_group() {
 
 #[test]
 fn attention_group_click_uses_env_size_layout_and_unnumbered_policy() {
-    let _lock = TEST_ENV_LOCK.lock().expect("env lock");
+    let _lock = lock_test_env();
     let _size = EnvVarGuard::set("SWIMMERS_ATTENTION_GROUP_SIZE", "4");
     let _layout = EnvVarGuard::set("SWIMMERS_ATTENTION_GROUP_LAYOUT", "main-left");
     let _unnumbered = EnvVarGuard::set("SWIMMERS_ATTENTION_GROUP_INCLUDE_UNNUMBERED", "1");
@@ -1286,7 +1286,7 @@ fn attention_group_click_uses_env_size_layout_and_unnumbered_policy() {
 
 #[test]
 fn attention_group_click_passes_current_visible_group_for_rotation() {
-    let _lock = TEST_ENV_LOCK.lock().expect("env lock");
+    let _lock = lock_test_env();
     let _size = EnvVarGuard::remove("SWIMMERS_ATTENTION_GROUP_SIZE");
     let _layout = EnvVarGuard::remove("SWIMMERS_ATTENTION_GROUP_LAYOUT");
     let _unnumbered = EnvVarGuard::remove("SWIMMERS_ATTENTION_GROUP_INCLUDE_UNNUMBERED");
