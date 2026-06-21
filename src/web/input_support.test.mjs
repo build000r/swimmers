@@ -1268,6 +1268,9 @@ test("normalizeTerminalZoomValue preserves parse, step, and clamp behavior", () 
   assert.equal(normalizeTerminalZoomValue("1.24", config), 1.2000000000000002);
   assert.equal(normalizeTerminalZoomValue("3", config), 2);
   assert.equal(normalizeTerminalZoomValue("0.1", config), 0.5);
+  // A missing/zero step must not produce NaN; the value is clamped unstepped.
+  assert.equal(normalizeTerminalZoomValue("1.4", { minZoom: 0.5, maxZoom: 2 }), 1.4);
+  assert.equal(normalizeTerminalZoomValue("9", { minZoom: 0.5, maxZoom: 2, step: 0 }), 2);
 });
 
 test("terminalZoomLoadValue preserves URL precedence over stored zoom", () => {

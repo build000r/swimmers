@@ -871,7 +871,10 @@ export function normalizeTerminalZoomValue(value, config = {}) {
   if (!Number.isFinite(numeric)) {
     return 1;
   }
-  const stepped = Math.round(numeric / config.step) * config.step;
+  // Guard the step divisor: a 0/undefined step would make numeric/step NaN and
+  // propagate NaN into setZoom()/the resize path.
+  const step = Number.isFinite(config.step) && config.step > 0 ? config.step : 0;
+  const stepped = step > 0 ? Math.round(numeric / step) * step : numeric;
   return Math.max(config.minZoom, Math.min(config.maxZoom, stepped));
 }
 
