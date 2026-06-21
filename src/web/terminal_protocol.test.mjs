@@ -319,6 +319,11 @@ test("fallbackTextForKeyEvent encodes printable, control, and navigation keys", 
   assert.equal(fallbackTextForKeyEvent({ kind: "key", phase: "down", key: "c", mods: 4 }), "\x03");
   assert.equal(fallbackTextForKeyEvent({ kind: "key", phase: "down", key: "Tab", mods: 1 }), "\x1b[Z");
   assert.equal(fallbackTextForKeyEvent({ kind: "mouse", phase: "down", key: "a", mods: 0 }), "");
+  // Control combos outside 0x40-0x5f that still have canonical control codes.
+  assert.equal(fallbackTextForKeyEvent({ kind: "key", phase: "down", key: " ", mods: 4 }), "\x00");
+  assert.equal(fallbackTextForKeyEvent({ kind: "key", phase: "down", key: "/", mods: 4 }), "\x1f");
+  // Alt+Ctrl keeps the ESC prefix.
+  assert.equal(fallbackTextForKeyEvent({ kind: "key", phase: "down", key: " ", mods: 6 }), "\x1b\x00");
 });
 
 test("terminalControlKeyEvent and keyModifiers keep DOM controls stable", () => {

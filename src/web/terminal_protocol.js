@@ -185,6 +185,16 @@ export function fallbackTextForKeyEvent(event) {
     if (code >= 64 && code <= 95) {
       return prefix + String.fromCharCode(code - 64);
     }
+    // Control combos whose key char sits outside the 0x40-0x5f range but have
+    // canonical xterm control encodings. Without these they were dropped to ""
+    // in snapshot-fallback mode, which is the permanent input path for remote
+    // sessions.
+    if (key === " ") {
+      return prefix + "\x00"; // Ctrl+Space -> NUL
+    }
+    if (key === "/") {
+      return prefix + "\x1f"; // Ctrl+/ -> US
+    }
   }
 
   if (!ctrl && key.length === 1) {
