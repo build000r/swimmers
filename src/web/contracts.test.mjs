@@ -256,6 +256,7 @@ test("normalizeSessionListResponse preserves SessionSummary-derived web fields w
       display_host: "local",
       remote_session_id: null,
       launch_source: null,
+      remote_attach_command: null,
       local_cwd: null,
       remote_cwd: null,
       canonical_cwd: null,
