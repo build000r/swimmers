@@ -467,6 +467,12 @@ export function createDirBrowserController(runtime) {
     state.dirBrowser.creating = true;
     try {
       await createSessionFromSheetUnguarded();
+    } catch (error) {
+      // apiFetch throws on a hard (non-207) failure; surface it instead of
+      // leaving an unhandled rejection with no user feedback. Covers the
+      // form-submit and Enter paths, which (unlike spawn-here) had no catch.
+      setDirStatus(`Failed to create session: ${error?.message || "create failed"}`, true);
+      syncSheetActionAvailability();
     } finally {
       state.dirBrowser.creating = false;
     }

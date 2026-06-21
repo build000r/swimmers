@@ -243,6 +243,28 @@ test("createSessionFromSheet blocks a re-entrant submit while a create is in fli
   await first;
 });
 
+test("createSessionFromSheet surfaces a hard create failure instead of an unhandled rejection", async () => {
+  const { runtime, state, el } = createRuntime();
+  state.readOnly = false;
+  el.createCwd.value = "/workspace/app";
+
+  const statuses = [];
+  runtime.setDirStatus = (message, isError = false) => statuses.push([message, isError]);
+  runtime.apiFetch = async (path) => {
+    if (path === "/v1/sessions") {
+      throw Object.assign(new Error("boom"), { status: 500 });
+    }
+    return { json: async () => ({}) };
+  };
+
+  const controller = createDirBrowserController(runtime);
+  // Must resolve (no unhandled rejection) and surface the failure to the user.
+  await controller.createSessionFromSheet();
+  const failure = statuses.find(([, isError]) => isError);
+  assert.ok(failure, "a hard create failure should set an error status");
+  assert.match(failure[0], /Failed to create session/);
+});
+
 test("directory browser controller scopes listings to the selected remote target", async () => {
   const calls = [];
   const { runtime, state } = createRuntime({
