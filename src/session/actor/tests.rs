@@ -170,6 +170,18 @@ fn pty_read_step_eof_stops_without_sending() {
 }
 
 #[test]
+fn pty_read_step_retries_on_interrupted_error() {
+    let (tx, mut rx) = mpsc::channel(1);
+
+    let interrupted = std::io::Error::from(std::io::ErrorKind::Interrupted);
+    let step = pty_read_step("sess-test", Err(interrupted), b"abcdef", &tx);
+
+    // EINTR is retryable, so the read loop must continue rather than stop.
+    assert_eq!(step, PtyReadLoopStep::Continue);
+    assert!(rx.try_recv().is_err());
+}
+
+#[test]
 fn pty_read_step_stops_when_receiver_dropped() {
     let (tx, rx) = mpsc::channel(1);
     drop(rx);
@@ -193,7 +205,8 @@ fn pty_read_step_stops_for_likely_child_exit_error() {
 #[test]
 fn pty_read_step_stops_for_non_other_read_error() {
     let (tx, mut rx) = mpsc::channel(1);
-    let err = io::Error::new(io::ErrorKind::Interrupted, "interrupted");
+    // A genuinely fatal non-Other error (not the retryable Interrupted) stops.
+    let err = io::Error::new(io::ErrorKind::BrokenPipe, "broken pipe");
 
     let step = pty_read_step("sess-test", Err(err), b"abcdef", &tx);
 

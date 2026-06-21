@@ -1029,7 +1029,7 @@ impl SessionActor {
     fn total_subscriber_queue_depth(&self) -> usize {
         self.subscribers
             .values()
-            .map(|tx| tx.max_capacity() - tx.capacity())
+            .map(|tx| tx.max_capacity().saturating_sub(tx.capacity()))
             .sum()
     }
 
@@ -1498,6 +1498,10 @@ fn pty_read_step(
 ) -> PtyReadLoopStep {
     match read_result {
         Ok(n) => pty_read_bytes_step(session_id, n, buf, tx),
+        // EINTR means a signal interrupted the blocking read, not a child exit;
+        // it is retryable, so keep the loop alive instead of permanently ending
+        // output capture for this session.
+        Err(err) if err.kind() == std::io::ErrorKind::Interrupted => PtyReadLoopStep::Continue,
         Err(err) => stop_after_pty_read_error(session_id, &err),
     }
 }
