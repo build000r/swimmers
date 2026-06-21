@@ -21,6 +21,7 @@ use regex::Regex;
 const COALESCE_MS: u64 = 32; // ~2 frames at 60fps
 const CURSOR_POS_THRESHOLD: usize = 10; // min cursor-position seqs to trigger coalescing
 const INPUT_GRACE_MS: u64 = 200; // pass-through window after swimmers input
+
 // Hard cap on the coalesce buffer. The 32ms window bounds typical bursts, but a
 // sustained redraw storm (e.g. a peer tmux client scrolling continuously) could
 // otherwise grow the buffer without bound; force-flush past this so memory stays

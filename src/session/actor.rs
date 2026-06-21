@@ -1569,11 +1569,7 @@ const PTY_READER_POLL_TIMEOUT_MS: libc::c_int = 250;
 /// the underlying tmux pane stays open and silent, so it cannot leak the
 /// spawn_blocking thread on a DetachBridge delete (swimmers-4b0k).
 #[cfg(unix)]
-fn pty_read_loop_pollable(
-    session_id: String,
-    fd: std::os::fd::OwnedFd,
-    tx: mpsc::Sender<Vec<u8>>,
-) {
+fn pty_read_loop_pollable(session_id: String, fd: std::os::fd::OwnedFd, tx: mpsc::Sender<Vec<u8>>) {
     use std::os::fd::AsRawFd;
     let raw = fd.as_raw_fd();
     let mut buf = [0u8; 8192];
