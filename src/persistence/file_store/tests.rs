@@ -398,6 +398,45 @@ async fn save_thought_failure_updates_health() {
 }
 
 #[tokio::test]
+async fn save_thought_self_heals_a_corrupt_thoughts_file() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    // A corrupt-but-readable thoughts.json used to wedge every subsequent write.
+    tokio::fs::write(dir.path().join("thoughts.json"), "{not json")
+        .await
+        .expect("write corrupt thoughts");
+
+    let store = FileStore::new(dir.path()).await.expect("store");
+    store
+        .save_thought(
+            "session-a",
+            Some("recovered thought"),
+            10,
+            100,
+            ThoughtState::Holding,
+            ThoughtSource::CarryForward,
+            RestState::Active,
+            false,
+            Vec::new(),
+            Utc::now(),
+            ThoughtDeliveryState::default(),
+            None,
+            None,
+        )
+        .await;
+
+    // The write falls back to the in-memory snapshot, rewrites a valid payload,
+    // and a reopened store round-trips it instead of staying wedged.
+    let reopened = FileStore::new(dir.path()).await.expect("reopen store");
+    let thoughts = reopened.load_thoughts().await;
+    assert_eq!(
+        thoughts
+            .get("session-a")
+            .and_then(|entry| entry.thought.as_deref()),
+        Some("recovered thought")
+    );
+}
+
+#[tokio::test]
 async fn save_thought_merges_disk_state_from_other_store_instances() {
     let dir = tempfile::tempdir().expect("tempdir");
     let first = FileStore::new(dir.path()).await.expect("first store");

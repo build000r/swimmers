@@ -923,7 +923,18 @@ fn read_thoughts_or_fallback(
     fallback: HashMap<String, ThoughtSnapshot>,
 ) -> anyhow::Result<HashMap<String, ThoughtSnapshot>> {
     match std::fs::read_to_string(path) {
-        Ok(data) => decode_thoughts_payload(path, data),
+        Ok(data) => match decode_thoughts_payload(path, data) {
+            Ok(thoughts) => Ok(thoughts),
+            Err(err) => {
+                // A corrupt or checksum-mismatched file is survivable at startup
+                // (the loader starts fresh); make it survivable at runtime too by
+                // falling back to the in-memory snapshot so the next write
+                // overwrites the bad payload instead of permanently wedging
+                // thought persistence on a single byte flip.
+                warn!("corrupt thoughts file, rewriting from cache: {err}");
+                Ok(fallback)
+            }
+        },
         Err(err) => read_thoughts_error_or_fallback(err, fallback),
     }
 }
