@@ -224,7 +224,8 @@ body.terminal-focus-mode .hud-canvas {
 }
 
 .terminal-a11y-mirror,
-.terminal-announcer {
+.terminal-announcer,
+.trogdor-reader-announce {
   position: fixed;
   width: 1px;
   height: 1px;

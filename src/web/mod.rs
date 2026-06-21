@@ -164,6 +164,7 @@ async fn render_index(focus_layout: bool) -> impl IntoResponse {
             <div class="loading-bar"><div class="loading-bar-fill"></div></div>
           </div>
           <section class="trogdor-surface hidden" id="trogdor-surface" aria-label="Trogdor repository atlas"></section>
+          <div class="trogdor-reader-announce" id="trogdor-reader-announce" aria-live="polite" aria-atomic="true"></div>
         </main>
       </div>
       <textarea

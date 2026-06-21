@@ -9,6 +9,7 @@ import {
   createTrogdorAtlasIsland,
   createTrogdorAtlasIslandElement,
 } from "./trogdor_island.js";
+import { createTrogdorSurfaceController } from "./trogdor_surface_controller.js";
 
 class FakeClassList {
   constructor() {
@@ -364,4 +365,29 @@ test("Trogdor atlas island keeps pointer, focus, and action dispatch separate fr
 
   await island.handleTrogdorDomAction(new FakeElement({ dataset: { action: "trogdor_read_toggle" } }));
   assert.deepEqual(calls.at(-1), ["action", { type: "action", actionId: "trogdor_read_toggle" }]);
+});
+
+test("hovering a Trogdor agent announces its full thought to assistive tech", () => {
+  const announce = { textContent: "stale" };
+  const state = {
+    sessions: [{ session_id: "sess-1", clawgText: "hello there world" }],
+    hoveredTrogdorSessionId: "",
+    trogdorWpm: 200,
+    trogdorReadProgress: {},
+  };
+  const controller = createTrogdorSurfaceController({
+    state,
+    el: { trogdorReaderAnnounce: announce, trogdorSurface: null },
+    surfaceSession: (session) => session,
+    windowRef: { setInterval: () => 0, clearInterval: () => {} },
+  });
+
+  // Hover-start populates the polite live region with the whole thought (the
+  // per-word banner is too fast to be a live region without flooding).
+  controller.updateHoveredTrogdorSurface({ type: "trogdor_agent", sessionId: "sess-1" });
+  assert.equal(announce.textContent, "hello there world");
+
+  // Leaving all agents clears the announcement.
+  controller.updateHoveredTrogdorSurface({ type: "other" });
+  assert.equal(announce.textContent, "");
 });

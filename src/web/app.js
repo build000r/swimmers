@@ -452,6 +452,7 @@ const el = {
   terminalKeyStrip: document.getElementById("terminal-key-strip"),
   trogdorSurface: document.getElementById("trogdor-surface"),
   trogdorLauncher: document.getElementById("trogdor-launcher"),
+  trogdorReaderAnnounce: document.getElementById("trogdor-reader-announce"),
   modalRoot: document.getElementById("modal-root"),
   modalBackdrop: document.getElementById("modal-backdrop"),
   paletteSheet: document.getElementById("palette-sheet"),

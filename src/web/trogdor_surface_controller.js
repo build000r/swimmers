@@ -1,6 +1,7 @@
 import {
   buildTrogdorDomGroups,
   summarizeTrogdorDom,
+  trogdorClawgWords,
   trogdorDragonPose,
   trogdorHoverReaderResetState,
   trogdorHoverSessionIdForZone,
@@ -161,7 +162,14 @@ export function createTrogdorSurfaceController(runtime = {}) {
     if (nextSessionId) {
       const session = trogdorRawSessionForHover(state.sessions, nextSessionId, { normalize: false });
       if (session) {
-        startTrogdorReaderForSession(surfaceSession(session));
+        const surfaced = surfaceSession(session);
+        startTrogdorReaderForSession(surfaced);
+        // Announce the agent's full thought once to assistive tech. The per-word
+        // banner updates far too fast to be a live region without flooding, so a
+        // separate polite region carries the whole text on hover/focus start.
+        if (el.trogdorReaderAnnounce) {
+          el.trogdorReaderAnnounce.textContent = trogdorClawgWords(surfaced).join(" ");
+        }
       }
       setUtilityStatus(
         session
@@ -170,6 +178,8 @@ export function createTrogdorSurfaceController(runtime = {}) {
         false,
         1200,
       );
+    } else if (el.trogdorReaderAnnounce) {
+      el.trogdorReaderAnnounce.textContent = "";
     }
     renderHudSurface();
     syncTrogdorReaderTimer();
