@@ -252,7 +252,10 @@ async fn send_control_event_if_relevant(
         control_event_delivery_payload(session_id, stream, &event),
     )
     .await?;
-    Ok(true)
+    // A closed broadcast channel never recovers, so stop the loop rather than
+    // busy-spinning on repeated Closed; a Lagged receiver is recoverable and
+    // keeps going.
+    Ok(!matches!(event, Err(broadcast::error::RecvError::Closed)))
 }
 
 async fn send_lifecycle_event_if_relevant(
@@ -261,7 +264,8 @@ async fn send_lifecycle_event_if_relevant(
     event: Result<LifecycleEvent, broadcast::error::RecvError>,
 ) -> anyhow::Result<bool> {
     send_ws_json_if_some(sender, lifecycle_event_delivery_payload(session_id, &event)).await?;
-    Ok(true)
+    // Stop on a closed channel instead of busy-spinning; Lagged keeps going.
+    Ok(!matches!(event, Err(broadcast::error::RecvError::Closed)))
 }
 
 pub(super) fn control_event_delivery_payload(
