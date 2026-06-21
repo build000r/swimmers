@@ -581,6 +581,13 @@
   transform: translate(-50%, -50%) scale(1.16);
 }
 
+/* Keyboard focus needs an indicator distinct from the mouse-hover zoom
+   (WCAG 2.4.7); the combined rule above suppresses it for all states. */
+.trogdor-agent:focus-visible {
+  outline: 2px solid #ffe08a;
+  outline-offset: 3px;
+}
+
 .trogdor-agent:hover svg,
 .trogdor-agent:focus-visible svg,
 .trogdor-agent.is-hovered svg {
