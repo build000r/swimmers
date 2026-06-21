@@ -73,8 +73,11 @@ export function operatorPressureSummary(session, payload) {
   if (attached || staleAttached) {
     cues.push(`${attached} attached${staleAttached ? `, ${staleAttached} stale` : ""}`);
   }
-  const tokens = Number(payload?.token_count ?? session.token_count ?? 0);
-  const limit = Number(payload?.context_limit ?? session.context_limit ?? 0);
+  // The agent-context normalizer coerces absent numerics to 0, and `??` does
+  // not fall through 0 — so prefer the payload value only when it is positive,
+  // else fall back to the session's count.
+  const tokens = Number(payload?.token_count) > 0 ? Number(payload.token_count) : Number(session.token_count || 0);
+  const limit = Number(payload?.context_limit) > 0 ? Number(payload.context_limit) : Number(session.context_limit || 0);
   if (tokens > 0 && limit > 0) {
     const pct = Math.min(999, Math.round((tokens / limit) * 100));
     cues.push(`${pct}% context`);
@@ -513,12 +516,17 @@ export function buildWorkbenchWidgetsViewModel({
   const unstagedDiff = gitDiff?.unstaged_diff || "";
   const stagedDiff = gitDiff?.staged_diff || "";
   const diffText = [stagedDiff, unstagedDiff].filter((part) => String(part || "").trim()).join("\n");
+  // Untracked files never appear in `git diff`/`git diff --cached`, so an empty
+  // diffText with a non-empty `git status --short` is dirty, not clean.
+  const statusShort = String(gitDiff?.status_short || "").trim();
   const diffMeta = diffAvailable
     ? diffText.trim()
       ? gitDiff?.truncated
         ? "truncated"
         : "dirty"
-      : "clean"
+      : statusShort
+        ? "untracked"
+        : "clean"
     : diffEvent?.summary || "unavailable";
   const outputBody = useTranscriptLogs
     ? renderWorkbenchLogLens("", {
@@ -564,7 +572,12 @@ export function buildWorkbenchWidgetsViewModel({
         ${renderDiffFileSummaries(gitDiff.files)}
         <pre class="workbench-diff">${renderDiffHtml(diffText)}</pre>
       `
-      : `<div>${escapeHtml(gitDiff.repo_root || gitDiff.cwd || "Repository")} is clean.</div>`
+      : statusShort
+        ? `
+        <div>${escapeHtml(gitDiff.repo_root || gitDiff.cwd || "Repository")} has uncommitted changes (untracked or unstaged):</div>
+        <pre class="workbench-diff">${escapeHtml(statusShort)}</pre>
+      `
+        : `<div>${escapeHtml(gitDiff.repo_root || gitDiff.cwd || "Repository")} is clean.</div>`
     : `<div>${escapeHtml(gitDiff?.message || diffEvent?.summary || "No git diff available.")}</div>`;
   const skills = widgets.skills;
   const skillsMeta = skills?.available

@@ -114,6 +114,39 @@ test("workbench widget renderer composes turns, JSONL, diff, artifacts, and skil
   assert.match(html, /describe/);
 });
 
+test("operatorPressureSummary falls back to session counts when the payload count is zero", () => {
+  const pressure = operatorPressureSummary(
+    { action_cues: [], state: "idle", token_count: 0, context_limit: 0 },
+    { token_count: 5000, context_limit: 100000 },
+  );
+  assert.match(pressure, /5% context/);
+});
+
+test("workbench Diffs panel reports untracked-only trees as dirty, not clean", () => {
+  const html = buildWorkbenchWidgetsHtml({
+    widgets: {
+      timeline: { events: [] },
+      transcript: { available: false, turns: [], records: [] },
+      artifact: { available: false },
+      gitDiff: {
+        available: true,
+        status_short: "?? new_file.rs",
+        unstaged_diff: "",
+        staged_diff: "",
+        files: [],
+        repo_root: "/repo",
+      },
+      skills: { available: false },
+    },
+    contextPayload: { turns: [] },
+    selectedTurnId: "",
+    logState: { mode: "lens", filter: "all", query: "" },
+  });
+  assert.doesNotMatch(html, /is clean\./);
+  assert.match(html, /uncommitted changes/);
+  assert.match(html, /new_file\.rs/);
+});
+
 test("workbench widget event planners classify click, input, and change targets", () => {
   const clickTarget = (matches) => ({
     closest(selector) {
