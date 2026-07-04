@@ -7,7 +7,7 @@
   "scripts": {
     "typecheck": "tsc --noEmit && tsc -p tsconfig.web-tests.json",
     "build": "vite build",
-    "test": "node --test src/web/*.test.mjs"
+    "test": "node --test --test-concurrency=2 src/web/*.test.mjs"
   },
   "repository": {
     "type": "git",
