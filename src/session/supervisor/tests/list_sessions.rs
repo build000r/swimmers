@@ -207,6 +207,61 @@ esac
 }
 
 #[tokio::test]
+async fn list_sessions_merges_active_tmux_pane_snapshot_for_non_config_target() {
+    let _guard = crate::test_support::ENV_LOCK
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
+    let (_dir, original_path) = install_fake_tmux(
+        r#"#!/bin/sh
+set -eu
+case "${1-} ${2-} ${3-}" in
+  "-L isolated list-panes")
+sep=$(printf '\037')
+printf 'work%s1%s1%s1.1:%%2\n' "$sep" "$sep" "$sep"
+;;
+  *)
+printf 'unexpected tmux command: %s\n' "$*" >&2
+exit 1
+;;
+esac
+"#,
+    );
+
+    let supervisor = SessionSupervisor::new(Arc::new(Config::default()));
+    let mut summary = test_summary("sess-isolated", SessionState::Idle);
+    summary.tmux_name = "work".to_string();
+    summary.tmux_target = crate::tmux_target::TmuxTarget::socket_name("isolated");
+    supervisor
+        .insert_test_handle(spawn_summary_handle(summary).await)
+        .await;
+    supervisor.thought_snapshots.write().await.insert(
+        "tmux:work:1.1:%2".to_string(),
+        ThoughtSnapshot {
+            thought: Some("isolated pane".to_string()),
+            thought_state: ThoughtState::Active,
+            thought_source: ThoughtSource::Llm,
+            rest_state: RestState::Active,
+            commit_candidate: true,
+            action_cues: Vec::new(),
+            objective_changed_at: None,
+            objective_fingerprint: None,
+            token_count: 99,
+            context_limit: 200_000,
+            updated_at: Utc::now(),
+            delivery: ThoughtDeliveryState::default(),
+        },
+    );
+
+    let sessions = supervisor.list_sessions().await;
+
+    restore_test_path(original_path);
+    assert_eq!(sessions.len(), 1);
+    assert_eq!(sessions[0].thought.as_deref(), Some("isolated pane"));
+    assert_eq!(sessions[0].thought_state, ThoughtState::Active);
+    assert_eq!(sessions[0].token_count, 99);
+}
+
+#[tokio::test]
 async fn list_sessions_keeps_summary_when_active_tmux_pane_batch_lookup_fails() {
     let _guard = crate::test_support::ENV_LOCK
         .lock()

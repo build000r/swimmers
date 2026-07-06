@@ -12,7 +12,7 @@ use tokio::process::Command;
 use tokio::sync::Mutex as AsyncMutex;
 use tokio::time::Duration;
 
-use crate::session::actor::run_bounded_tmux_command;
+use crate::session::actor::{run_bounded_tmux_command, run_bounded_tmux_command_for_target};
 use crate::tmux_target::{exact_pane_target, exact_session_target, TmuxTarget};
 #[cfg(test)]
 use crate::types::{AttentionGroupLayout, SessionSummary};
@@ -232,17 +232,16 @@ async fn query_tmux_pane_metadata(
     tmux_target: &TmuxTarget,
 ) -> Result<(Option<String>, Option<String>)> {
     let target = exact_pane_target(tmux_name);
-    let args = tmux_target.command_args(&[
-        "display-message",
-        "-p",
-        "-t",
-        &target,
-        "#{pane_id}\t#{pane_current_path}",
-    ]);
-    let args = args.iter().map(String::as_str).collect::<Vec<_>>();
-    let output = run_bounded_tmux_command(
+    let output = run_bounded_tmux_command_for_target(
         tmux_path.as_os_str(),
-        &args,
+        tmux_target,
+        &[
+            "display-message",
+            "-p",
+            "-t",
+            &target,
+            "#{pane_id}\t#{pane_current_path}",
+        ],
         NATIVE_TMUX_COMMAND_TIMEOUT,
         "display-message",
     )

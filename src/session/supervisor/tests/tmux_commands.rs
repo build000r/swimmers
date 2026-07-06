@@ -188,6 +188,9 @@ async fn bounded_tmux_command_times_out_non_returning_fake_tmux() {
 
 #[tokio::test]
 async fn tmux_probe_circuit_breaker_skips_probes_until_essential_success() {
+    let _guard = crate::test_support::ENV_LOCK
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
     reset_tmux_health_for_tests();
     let dir = tempdir().expect("tempdir");
     let sleepy_tmux = dir.path().join("sleepy-tmux");
@@ -264,6 +267,9 @@ async fn tmux_probe_circuit_breaker_skips_probes_until_essential_success() {
 
 #[tokio::test]
 async fn tmux_probe_circuit_breaker_is_scoped_by_target() {
+    let _guard = crate::test_support::ENV_LOCK
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
     reset_tmux_health_for_tests();
     let dir = tempdir().expect("tempdir");
     let sleepy_tmux = dir.path().join("sleepy-tmux");

@@ -390,6 +390,71 @@ async fn query_tmux_pane_metadata_uses_exact_pane_target_for_numeric_names() {
     );
 }
 
+#[tokio::test]
+async fn query_tmux_pane_metadata_timeout_is_scoped_to_tmux_target() {
+    let _guard = crate::test_support::ENV_LOCK
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
+    crate::session::actor::reset_tmux_health_for_tests();
+    let temp = tempdir().unwrap();
+    let sleepy_tmux = temp.path().join("sleepy-tmux");
+    let fast_tmux = temp.path().join("fast-tmux");
+    let log_path = temp.path().join("tmux-args.log");
+    std::fs::write(
+        &sleepy_tmux,
+        format!(
+            "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'\nif [ -x /bin/sleep ]; then exec /bin/sleep 10; fi\nexec sleep 10\n",
+            log_path.display()
+        ),
+    )
+    .unwrap();
+    std::fs::write(
+        &fast_tmux,
+        format!(
+            "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'\nprintf 'ok\\n'\n",
+            log_path.display()
+        ),
+    )
+    .unwrap();
+    for path in [&sleepy_tmux, &fast_tmux] {
+        let mut perms = std::fs::metadata(path).unwrap().permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(path, perms).unwrap();
+    }
+    let isolated = crate::tmux_target::TmuxTarget::socket_name("native-review");
+
+    query_tmux_pane_metadata(&sleepy_tmux, "7", &isolated)
+        .await
+        .expect_err("isolated metadata query should time out");
+
+    crate::session::actor::run_bounded_tmux_probe_for_target(
+        fast_tmux.as_os_str(),
+        &crate::tmux_target::TmuxTarget::Default,
+        &["capture-pane"],
+        std::time::Duration::from_secs(1),
+        "capture-pane",
+    )
+    .await
+    .expect("default target should not inherit isolated native metadata timeout");
+
+    let skipped = crate::session::actor::run_bounded_tmux_probe_for_target(
+        fast_tmux.as_os_str(),
+        &isolated,
+        &["capture-pane"],
+        std::time::Duration::from_secs(1),
+        "capture-pane",
+    )
+    .await
+    .expect_err("isolated target should inherit its own native metadata timeout");
+    assert!(skipped.to_string().contains("skipped"));
+
+    assert_eq!(
+        std::fs::read_to_string(&log_path).unwrap(),
+        "-L native-review display-message -p -t =7: #{pane_id}\t#{pane_current_path}\ncapture-pane\n"
+    );
+    crate::session::actor::reset_tmux_health_for_tests();
+}
+
 fn attention_group_summary(session_id: &str, tmux_name: &str) -> SessionSummary {
     SessionSummary {
         session_id: session_id.to_string(),

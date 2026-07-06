@@ -63,7 +63,7 @@ use self::summary::{
     active_pane_session_id_for_summary, merge_summary_with_thought_snapshot,
     merge_thought_snapshots_into_summaries, persisted_session_from_summary,
     session_info_from_summary, thought_snapshot_for_summary,
-    tmux_names_requiring_active_pane_lookup,
+    tmux_names_requiring_active_pane_lookup, ActivePaneSessionIdMap,
 };
 pub use self::thought_persistence::SupervisorProvider;
 use self::thought_persistence::THOUGHT_PERSIST_QUEUE_CAP;
@@ -299,8 +299,11 @@ pub struct SessionSupervisor {
 
 #[derive(Default)]
 struct ActivePaneCache {
-    fetched_at: Option<Instant>,
-    tmux_target: TmuxTarget,
+    by_target: HashMap<TmuxTarget, ActivePaneCacheEntry>,
+}
+
+struct ActivePaneCacheEntry {
+    fetched_at: Instant,
     panes: HashMap<String, String>,
 }
 
@@ -393,6 +396,7 @@ impl SessionSupervisor {
     /// reusing a recent `tmux list-panes -a` result when it is within TTL.
     async fn active_pane_session_ids_cached(
         &self,
+        tmux_target: &TmuxTarget,
         tmux_names: &HashSet<String>,
         reason: &'static str,
     ) -> HashMap<String, String> {
@@ -402,16 +406,14 @@ impl SessionSupervisor {
 
         {
             let cache = self.active_pane_cache.lock().await;
-            if let Some(at) = cache.fetched_at {
-                if cache.tmux_target == self.config.tmux_target
-                    && at.elapsed() < ACTIVE_PANE_CACHE_TTL
-                {
-                    return filter_active_panes_to_requested(&cache.panes, tmux_names);
+            if let Some(entry) = cache.by_target.get(tmux_target) {
+                if entry.fetched_at.elapsed() < ACTIVE_PANE_CACHE_TTL {
+                    return filter_active_panes_to_requested(&entry.panes, tmux_names);
                 }
             }
         }
 
-        let fresh = match query_all_active_pane_session_ids(&self.config.tmux_target).await {
+        let fresh = match query_all_active_pane_session_ids(tmux_target).await {
             Ok(panes) => {
                 self.record_tmux_capture_success(reason, panes.len());
                 panes
@@ -431,9 +433,13 @@ impl SessionSupervisor {
 
         {
             let mut cache = self.active_pane_cache.lock().await;
-            cache.fetched_at = Some(Instant::now());
-            cache.tmux_target = self.config.tmux_target.clone();
-            cache.panes = fresh;
+            cache.by_target.insert(
+                tmux_target.clone(),
+                ActivePaneCacheEntry {
+                    fetched_at: Instant::now(),
+                    panes: fresh,
+                },
+            );
         }
 
         filtered
@@ -444,18 +450,24 @@ impl SessionSupervisor {
         summaries: I,
         thought_snapshots: &HashMap<String, ThoughtSnapshot>,
         reason: &'static str,
-    ) -> HashMap<String, String>
+    ) -> ActivePaneSessionIdMap
     where
         I: IntoIterator<Item = &'a SessionSummary>,
     {
-        let tmux_names = tmux_names_requiring_active_pane_lookup(
-            summaries
-                .into_iter()
-                .filter(|summary| summary.tmux_target == self.config.tmux_target),
-            thought_snapshots,
-        );
-        self.active_pane_session_ids_cached(&tmux_names, reason)
-            .await
+        let tmux_names_by_target =
+            tmux_names_requiring_active_pane_lookup(summaries, thought_snapshots);
+        let mut active_panes = ActivePaneSessionIdMap::new();
+        for (tmux_target, tmux_names) in tmux_names_by_target {
+            let target_panes = self
+                .active_pane_session_ids_cached(&tmux_target, &tmux_names, reason)
+                .await;
+            active_panes.extend(
+                target_panes
+                    .into_iter()
+                    .map(|(tmux_name, pane_id)| ((tmux_target.clone(), tmux_name), pane_id)),
+            );
+        }
+        active_panes
     }
 
     fn resolve_repo_theme_for_summary(&self, summary: &mut SessionSummary) -> Option<RepoTheme> {

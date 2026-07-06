@@ -31,7 +31,7 @@ die() {
 timestamp="$(date -u +%Y%m%dT%H%M%SZ)"
 since="-2 hours"
 until="now"
-output_dir="${PWD}/tmux-crash-evidence-${timestamp}"
+output_dir="${TMPDIR:-/tmp}/swimmers-tmux-crash-evidence-${timestamp}"
 data_dir="${SWIMMERS_DATA_DIR:-}"
 include_crash_files=0
 dry_run=0
@@ -351,7 +351,9 @@ if ((include_crash_files)); then
   chmod 700 "${output_dir}/crash-files"
   shopt -s nullglob
   for crash_file in /var/crash/*tmux*; do
-    cp -p -- "${crash_file}" "${output_dir}/crash-files/"
+    [[ -f "${crash_file}" && ! -L "${crash_file}" ]] || continue
+    cp -- "${crash_file}" "${output_dir}/crash-files/$(basename "${crash_file}")"
+    chmod 600 "${output_dir}/crash-files/$(basename "${crash_file}")"
   done
 fi
 

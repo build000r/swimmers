@@ -140,6 +140,16 @@ function payloadToolResultBlock(payload) {
   return content.find((block) => block && typeof block === "object" && block.type === "tool_result") || null;
 }
 
+function payloadThinkingText(payload) {
+  const content = Array.isArray(payload?.content) ? payload.content : [];
+  return content
+    .filter((block) => block && typeof block === "object" && /thinking|reasoning/.test(String(block.type || "")))
+    .map((block) => block.thinking || block.text || payloadTextContent(block.content))
+    .map((part) => String(part || "").trim())
+    .filter(Boolean)
+    .join("\n");
+}
+
 function readableRecordSummary(record, raw) {
   const summary = String(record?.summary || "").trim();
   if (!summary || summary === raw || /^[\[{]/.test(summary)) {
@@ -180,6 +190,9 @@ function transcriptRecordIsCallOutput(kind) {
 
 function transcriptRecordDisplayKind(record, payload) {
   const kind = String(record?.kind || payload?.type || "record");
+  if (/thinking|reasoning/.test(kind)) {
+    return "thinking";
+  }
   if (payloadToolResultBlock(payload)) {
     return "output";
   }
@@ -191,9 +204,6 @@ function transcriptRecordDisplayKind(record, payload) {
   }
   if (transcriptRecordIsCall(kind)) {
     return "command";
-  }
-  if (/thinking|reasoning/.test(kind)) {
-    return "thinking";
   }
   if (/agent_message|assistant_message|message|user_message/.test(kind)) {
     return "operator";
@@ -242,7 +252,12 @@ export function transcriptRecordDisplay(record) {
   const fields = [];
   let body = "";
 
-  if (toolUse || transcriptRecordIsCall(kind)) {
+  if (/thinking|reasoning/.test(kind)) {
+    body = payloadThinkingText(payload) || payloadTextContent(payload?.content) || payloadMessageText(payload) || summary || "Thinking";
+    if (role) {
+      fields.push(["role", role]);
+    }
+  } else if (toolUse || transcriptRecordIsCall(kind)) {
     const name = payload?.name || toolUse?.name || summary.split(":")[0] || "tool";
     const args = parseNestedJsonObject(payload?.arguments || payload?.input || toolUse?.input);
     const command = args?.cmd || args?.command || "";
@@ -265,11 +280,6 @@ export function transcriptRecordDisplay(record) {
       "Tool output";
     if (payload?.call_id || toolResult?.tool_use_id) {
       fields.push(["call", payload?.call_id || toolResult.tool_use_id]);
-    }
-  } else if (/thinking|reasoning/.test(kind)) {
-    body = payloadTextContent(payload?.content) || payloadMessageText(payload) || summary || "Thinking";
-    if (role) {
-      fields.push(["role", role]);
     }
   } else if (/agent_message|assistant_message|message|user_message/.test(kind)) {
     body = payloadMessageText(payload) || payloadTextContent(payload?.content) || summary || "Message";

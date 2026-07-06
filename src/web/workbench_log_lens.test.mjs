@@ -184,6 +184,33 @@ test("transcriptRecordDisplay classifies thinking records with thinking kind and
   assert.ok(display.body.includes("database connection pool"), `thinking body should contain thinking text, got: ${display.body}`);
 });
 
+test("transcriptRecordDisplay keeps mixed thinking and tool_use records as thinking", () => {
+  const thinkingRecord = {
+    id: "mixed-thinking",
+    kind: "thinking",
+    role: "assistant",
+    summary: "Thinking before tool call",
+    raw: JSON.stringify({
+      type: "assistant",
+      message: {
+        role: "assistant",
+        content: [
+          { type: "thinking", thinking: "Need to inspect the failing test first" },
+          { type: "tool_use", id: "tool-1", name: "bash", input: { cmd: "cargo test" } },
+        ],
+      },
+    }),
+    byte_start: 140,
+  };
+
+  const display = transcriptRecordDisplay(thinkingRecord);
+
+  assert.equal(display.kind, "thinking");
+  assert.equal(display.label, "Thinking");
+  assert.ok(display.body.includes("inspect the failing test"), `thinking body should contain thinking text, got: ${display.body}`);
+  assert.equal(display.body.includes("cargo test"), false, "tool command should not replace thinking body");
+});
+
 test("transcriptRecordDisplay classifies reasoning records as thinking", () => {
   const reasoningRecord = {
     id: "r1",
