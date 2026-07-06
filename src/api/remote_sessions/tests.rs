@@ -602,6 +602,45 @@ async fn spawn_remote_smoke_server() -> (String, tokio::task::JoinHandle<()>, Re
     (format!("http://{addr}"), handle, state)
 }
 
+#[tokio::test]
+async fn remote_response_error_preserves_safe_4xx_status_code_message_and_redacts_secret() {
+    let _lock = shared_remote_cache_test_guard();
+    let _observer_guard = TestEnvGuard::set(REMOTE_OBSERVER_TOKEN_ENV, REMOTE_OBSERVER_TOKEN);
+    let (base_url, handle, _state) = spawn_remote_smoke_server().await;
+    let observer_target = remote_smoke_target(&base_url, REMOTE_OBSERVER_TOKEN_ENV);
+
+    let err = create_remote_session_on_target(
+        &observer_target,
+        CreateSessionRequest {
+            name: None,
+            cwd: Some("/monoserver/opensource/swimmers".to_string()),
+            spawn_tool: Some(SpawnTool::Codex),
+            tmux_target: None,
+            launch_target: None,
+            initial_request: None,
+        },
+    )
+    .await
+    .expect_err("observer token must not create sessions");
+
+    assert_eq!(err.status, StatusCode::FORBIDDEN);
+    assert_eq!(err.code, "REMOTE_AUTH_REJECTED");
+    assert!(err.message().contains("[redacted]"));
+    assert!(!err.message().contains(REMOTE_OBSERVER_TOKEN));
+    assert!(!err.message().contains("remote status"));
+    handle.abort();
+}
+
+#[test]
+fn remote_response_error_preserves_only_safe_client_statuses() {
+    assert!(is_safe_remote_client_error(StatusCode::NOT_FOUND));
+    assert!(is_safe_remote_client_error(StatusCode::PAYLOAD_TOO_LARGE));
+    assert!(!is_safe_remote_client_error(
+        StatusCode::INTERNAL_SERVER_ERROR
+    ));
+    assert!(!is_safe_remote_client_error(StatusCode::BAD_GATEWAY));
+}
+
 fn remote_smoke_target(base_url: &str, auth_token_env: &str) -> LaunchTargetSummary {
     let mut target = target();
     target.base_url = Some(base_url.to_string());
@@ -2617,13 +2656,11 @@ async fn remote_api_smoke_matrix_covers_launch_reads_scopes_and_redaction() {
     )
     .await
     .expect_err("observer token must not create sessions");
-    assert_eq!(observer_create.status, StatusCode::BAD_GATEWAY);
-    assert_eq!(observer_create.code, "REMOTE_LAUNCH_FAILED");
+    assert_eq!(observer_create.status, StatusCode::FORBIDDEN);
+    assert_eq!(observer_create.code, "REMOTE_AUTH_REJECTED");
     assert!(observer_create.message().contains("[redacted]"));
     assert!(!observer_create.message().contains(REMOTE_OBSERVER_TOKEN));
-    assert!(observer_create
-        .message()
-        .contains("remote status 403 Forbidden"));
+    assert!(!observer_create.message().contains("remote status"));
 
     let observer_batch = create_remote_sessions_batch_on_target(
         &observer_target,

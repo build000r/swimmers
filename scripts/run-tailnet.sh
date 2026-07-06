@@ -6,6 +6,57 @@ source "${ROOT_DIR}/scripts/web-common.sh"
 
 PORT="${PORT:-3210}"
 
+usage() {
+  cat <<'EOF'
+Usage: scripts/run-tailnet.sh
+
+Run the Swimmers server on this machine's Tailscale IPv4 address.
+
+Environment:
+  PORT                         Server port, default 3210.
+  SWIMMERS_TAILNET_IP          Tailscale IPv4 override.
+  SWIMMERS_BIND                Bind override, defaults to the Tailscale IP.
+  AUTH_MODE                    Auth mode, default tailnet_trust.
+  SWIMMERS_TAILNET_FEATURES    Optional Cargo features for this launcher.
+  SWIMMERS_WEB_FEATURES        Feature fallback when SWIMMERS_TAILNET_FEATURES is unset.
+  SWIMMERS_TAILNET_TARGET_DIR  Cargo target dir, default ~/.cache/swimmers-tailnet.
+  SWIMMERS_TAILNET_DRY_RUN     Set to 1 to print the launch plan without running.
+  SWIMMERS_FRANKENTUI_PKG_DIR  FrankenTerm asset package directory.
+  FRANKENTUI_PKG_DIR           Alternate FrankenTerm asset package directory.
+EOF
+}
+
+parse_args() {
+  while (($#)); do
+    case "$1" in
+      -h|--help)
+        usage
+        exit 0
+        ;;
+      --)
+        shift
+        break
+        ;;
+      -*)
+        printf 'unknown option: %s\n' "$1" >&2
+        printf 'Run scripts/run-tailnet.sh --help for usage.\n' >&2
+        exit 2
+        ;;
+      *)
+        printf 'unexpected argument: %s\n' "$1" >&2
+        printf 'Run scripts/run-tailnet.sh --help for usage.\n' >&2
+        exit 2
+        ;;
+    esac
+  done
+
+  if (($#)); then
+    printf 'unexpected argument: %s\n' "$1" >&2
+    printf 'Run scripts/run-tailnet.sh --help for usage.\n' >&2
+    exit 2
+  fi
+}
+
 tailscale_ipv4() {
   swimmers_require tailscale
   tailscale ip -4 2>/dev/null | head -1 || true
@@ -73,7 +124,7 @@ stop_existing_swimmers_listener() {
 
 announce_urls() {
   local bind="${1}"
-  printf 'swimmers Tailnet server\n'
+  printf 'swimmers Tailnet server target URLs\n'
   printf '  bind:     %s:%s\n' "${bind}" "${PORT}"
   printf '  auth:     %s\n' "${AUTH_MODE}"
   printf '  browser:  http://%s:%s/\n' "${bind}" "${PORT}"
@@ -84,6 +135,7 @@ announce_urls() {
 }
 
 main() {
+  parse_args "$@"
   swimmers_require cargo
   swimmers_require lsof
 

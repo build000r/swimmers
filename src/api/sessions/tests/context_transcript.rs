@@ -22,9 +22,9 @@ async fn remote_agent_context_response_maps_remote_failure() {
 
     let response = remote_agent_context_response(&target, "missing-remote").await;
 
-    assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
     let json = response_json(response).await;
-    assert_eq!(json["code"], "REMOTE_SESSION_REQUEST_FAILED");
+    assert_eq!(json["code"], "SESSION_NOT_FOUND");
     assert!(json["message"]
         .as_str()
         .expect("message")
@@ -190,9 +190,9 @@ async fn fetch_transcript_remote_response_maps_remote_failure() {
     )
     .await;
 
-    assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
     let json = response_json(response).await;
-    assert_eq!(json["code"], "REMOTE_SESSION_REQUEST_FAILED");
+    assert_eq!(json["code"], "SESSION_NOT_FOUND");
     assert!(json["message"]
         .as_str()
         .expect("message")

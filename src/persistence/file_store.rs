@@ -6,6 +6,9 @@
 
 use std::collections::{BTreeMap, HashMap};
 use std::fs::OpenOptions;
+use std::io::Write;
+#[cfg(unix)]
+use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex as StdMutex};
 
@@ -29,6 +32,10 @@ const OP_SESSION_REGISTRY: &str = "session_registry";
 const OP_THOUGHTS: &str = "thoughts";
 const OP_THOUGHT_CONFIG: &str = "thought_config";
 const OP_DIR_GROUPS: &str = "dir_groups";
+#[cfg(unix)]
+const PRIVATE_DIR_MODE: u32 = 0o700;
+#[cfg(unix)]
+const PRIVATE_FILE_MODE: u32 = 0o600;
 
 // ---------------------------------------------------------------------------
 // Persisted data types
@@ -227,12 +234,16 @@ impl FileStore {
     pub async fn new(base_dir: impl Into<PathBuf>) -> anyhow::Result<Arc<Self>> {
         let base_dir = base_dir.into();
 
-        // Create directory structure in a blocking task.
+        // Create and harden directory structure in a blocking task.
         let dir = base_dir.clone();
-        tokio::task::spawn_blocking(move || std::fs::create_dir_all(&dir))
-            .await
-            .map_err(|e| anyhow::anyhow!("spawn_blocking panicked: {e}"))?
-            .map_err(|e| anyhow::anyhow!("failed to create persistence directory: {e}"))?;
+        tokio::task::spawn_blocking(move || -> anyhow::Result<()> {
+            prepare_persistence_dir(&dir)?;
+            harden_existing_store_files(&dir)?;
+            Ok(())
+        })
+        .await
+        .map_err(|e| anyhow::anyhow!("spawn_blocking panicked: {e}"))?
+        .map_err(|e| anyhow::anyhow!("failed to prepare persistence directory: {e:#}"))?;
 
         let store = Arc::new(Self {
             base_dir,
@@ -1051,14 +1062,13 @@ fn write_checksummed_payload_locked(path: &Path, data: String) -> anyhow::Result
     };
     let encoded = serde_json::to_vec_pretty(&envelope)
         .map_err(|e| anyhow::anyhow!("serialize checksummed payload failed: {e}"))?;
-    std::fs::write(&tmp_path, &encoded).map_err(|e| anyhow::anyhow!("write to tmp failed: {e}"))?;
-    std::fs::File::open(&tmp_path)
-        .and_then(|f| f.sync_all())
-        .map_err(|e| anyhow::anyhow!("sync tmp file failed: {e}"))?;
+    harden_existing_private_file(path)?;
+    write_private_file_synced(&tmp_path, &encoded)?;
     if let Err(e) = std::fs::rename(&tmp_path, path) {
         let _ = std::fs::remove_file(&tmp_path);
         return Err(anyhow::anyhow!("rename failed: {e}"));
     }
+    harden_existing_private_file(path)?;
     sync_parent_dir(path)?;
     Ok(())
 }
@@ -1103,9 +1113,9 @@ fn decode_file_payload(path: PathBuf, data: String) -> anyhow::Result<String> {
 
 /// Convenience: convert a `Path` to an owned `PathBuf`.
 #[allow(dead_code)]
-fn ensure_parent(path: &Path) -> std::io::Result<()> {
+fn ensure_parent(path: &Path) -> anyhow::Result<()> {
     if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
+        prepare_persistence_dir(parent)?;
     }
     Ok(())
 }
@@ -1118,13 +1128,17 @@ fn lock_path_for(path: &Path) -> anyhow::Result<PathBuf> {
 }
 
 fn open_lock_file(path: &Path) -> anyhow::Result<std::fs::File> {
-    OpenOptions::new()
-        .read(true)
-        .write(true)
-        .create(true)
-        .truncate(false)
+    let mut options = OpenOptions::new();
+    options.read(true).write(true).create(true).truncate(false);
+    #[cfg(unix)]
+    {
+        options.mode(PRIVATE_FILE_MODE);
+    }
+    let file = options
         .open(path)
-        .map_err(|e| anyhow::anyhow!("open lock file {} failed: {e}", path.display()))
+        .map_err(|e| anyhow::anyhow!("open lock file {} failed: {e}", path.display()))?;
+    harden_open_private_file(&file, path)?;
+    Ok(file)
 }
 
 fn sync_parent_dir(path: &Path) -> anyhow::Result<()> {
@@ -1134,6 +1148,96 @@ fn sync_parent_dir(path: &Path) -> anyhow::Result<()> {
     std::fs::File::open(parent)
         .and_then(|dir| dir.sync_all())
         .map_err(|e| anyhow::anyhow!("sync parent directory {} failed: {e}", parent.display()))
+}
+
+fn prepare_persistence_dir(path: &Path) -> anyhow::Result<()> {
+    std::fs::create_dir_all(path)
+        .map_err(|e| anyhow::anyhow!("create directory {} failed: {e}", path.display()))?;
+    harden_private_dir(path)
+}
+
+fn harden_existing_store_files(base_dir: &Path) -> anyhow::Result<()> {
+    for file_name in [
+        "session_registry.json",
+        "thoughts.json",
+        "thought_config.json",
+        "dir_groups.json",
+        ".lock",
+    ] {
+        harden_existing_private_file(&base_dir.join(file_name))?;
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn harden_private_dir(path: &Path) -> anyhow::Result<()> {
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(PRIVATE_DIR_MODE))
+        .map_err(|e| anyhow::anyhow!("chmod directory {} failed: {e}", path.display()))
+}
+
+#[cfg(not(unix))]
+fn harden_private_dir(_path: &Path) -> anyhow::Result<()> {
+    Ok(())
+}
+
+#[cfg(unix)]
+fn harden_existing_private_file(path: &Path) -> anyhow::Result<()> {
+    let before = match std::fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(err) => return Err(anyhow::anyhow!("metadata {} failed: {err}", path.display())),
+    };
+    if !before.file_type().is_file() {
+        return Ok(());
+    }
+
+    let file = OpenOptions::new()
+        .read(true)
+        .open(path)
+        .map_err(|e| anyhow::anyhow!("open existing file {} failed: {e}", path.display()))?;
+    let after = file
+        .metadata()
+        .map_err(|e| anyhow::anyhow!("metadata opened file {} failed: {e}", path.display()))?;
+    if before.dev() != after.dev() || before.ino() != after.ino() {
+        return Err(anyhow::anyhow!(
+            "refusing to chmod {} because it changed while hardening",
+            path.display()
+        ));
+    }
+    harden_open_private_file(&file, path)
+}
+
+#[cfg(not(unix))]
+fn harden_existing_private_file(_path: &Path) -> anyhow::Result<()> {
+    Ok(())
+}
+
+#[cfg(unix)]
+fn harden_open_private_file(file: &std::fs::File, path: &Path) -> anyhow::Result<()> {
+    file.set_permissions(std::fs::Permissions::from_mode(PRIVATE_FILE_MODE))
+        .map_err(|e| anyhow::anyhow!("chmod file {} failed: {e}", path.display()))
+}
+
+#[cfg(not(unix))]
+fn harden_open_private_file(_file: &std::fs::File, _path: &Path) -> anyhow::Result<()> {
+    Ok(())
+}
+
+fn write_private_file_synced(path: &Path, contents: &[u8]) -> anyhow::Result<()> {
+    let mut options = OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        options.mode(PRIVATE_FILE_MODE);
+    }
+    let mut file = options
+        .open(path)
+        .map_err(|e| anyhow::anyhow!("open tmp file {} failed: {e}", path.display()))?;
+    harden_open_private_file(&file, path)?;
+    file.write_all(contents)
+        .map_err(|e| anyhow::anyhow!("write tmp file {} failed: {e}", path.display()))?;
+    file.sync_all()
+        .map_err(|e| anyhow::anyhow!("sync tmp file {} failed: {e}", path.display()))
 }
 
 #[cfg(test)]

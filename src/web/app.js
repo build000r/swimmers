@@ -1021,9 +1021,40 @@ function reconnectDelayMs() {
   return Math.min(10000, 1000 * 2 ** Math.min(attempt, 3));
 }
 
-function setLoadingState(visible, label = "Loading FrankenTerm...") {
+function setLoadingState(visible, label = "Loading terminal surface...") {
+  const loadingVisible = Boolean(visible);
   el.loadingLabel.textContent = label;
-  el.loadingOverlay.classList.toggle("visible", Boolean(visible));
+  el.loadingOverlay.classList.toggle("visible", loadingVisible);
+  el.loadingOverlay.setAttribute("aria-hidden", loadingVisible ? "false" : "true");
+}
+
+const ACCESSIBLE_SHEET_COPY = Object.freeze({
+  authTitle: "Authentication Required",
+  authCopy: "Paste the authentication token provided by your server administrator.",
+  thoughtEyebrow: "Observation settings",
+  thoughtTitle: "Session Insights",
+  thoughtSummary: "Loading session insight settings...",
+  thoughtEnabledLabel: "Enable AI session observations",
+});
+
+function setElementText(element, text) {
+  if (element && element.textContent !== text) {
+    element.textContent = text;
+  }
+}
+
+function applyAccessibleSheetCopy() {
+  setElementText(document.getElementById("auth-sheet-title"), ACCESSIBLE_SHEET_COPY.authTitle);
+  setElementText(el.authSheet?.querySelector(".sheet-copy"), ACCESSIBLE_SHEET_COPY.authCopy);
+
+  const thoughtHeader = el.thoughtConfigSheet?.querySelector(".sheet-header");
+  setElementText(thoughtHeader?.querySelector(".sheet-eyebrow"), ACCESSIBLE_SHEET_COPY.thoughtEyebrow);
+  setElementText(document.getElementById("thought-config-title"), ACCESSIBLE_SHEET_COPY.thoughtTitle);
+  setElementText(el.thoughtConfigSummary, ACCESSIBLE_SHEET_COPY.thoughtSummary);
+  setElementText(
+    el.thoughtConfigEnabled?.closest("label")?.querySelector("span"),
+    ACCESSIBLE_SHEET_COPY.thoughtEnabledLabel,
+  );
 }
 
 function persistToken(token) {
@@ -2454,13 +2485,14 @@ async function init() {
   dirBrowserViewIsland = await mountDirBrowserViewReactIsland();
   workbenchWidgetsIsland = await mountWorkbenchWidgetsReactIsland();
   mermaidSheetIsland = await mountMermaidSheetReactIsland();
+  applyAccessibleSheetCopy();
   loadInitialState();
   bindEvents();
   installTerminalInputDockResizeObserver();
   installTerminalWorkbenchExpandToggle();
   setUtilityStatus(defaultUtilityLabel(), true);
   syncWriteAccess();
-  setLoadingState(boot.franken_term_available, boot.franken_term_available ? "Loading rendered control surface..." : "Snapshot fallback mode");
+  setLoadingState(boot.franken_term_available, boot.franken_term_available ? "Loading terminal surface..." : "Snapshot fallback mode");
   void warmDirBrowserOnStartup();
   await setupHudSurface();
   renderHudSurface();

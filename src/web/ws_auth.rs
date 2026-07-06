@@ -2,14 +2,16 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use axum::extract::ws::{Message, WebSocketUpgrade};
-use axum::http::StatusCode;
+use axum::http::{HeaderMap, StatusCode};
 use axum::response::Response;
 use futures::StreamExt;
 use serde::Deserialize;
 use subtle::ConstantTimeEq;
 
 use crate::api::AppState;
-use crate::auth::{AuthInfo, AuthScope, OBSERVER_SCOPES, OPERATOR_SCOPES};
+use crate::auth::{
+    validate_trusted_request_headers, AuthInfo, AuthScope, OBSERVER_SCOPES, OPERATOR_SCOPES,
+};
 use crate::config::{AuthMode, Config};
 use crate::session::actor::ActorHandle;
 
@@ -91,12 +93,13 @@ impl SessionWsRoutePlan {
 #[allow(clippy::result_large_err)]
 pub(super) async fn session_ws_route_plan(
     state: &Arc<AppState>,
+    headers: &HeaderMap,
     session_id: &str,
     query: &WsQuery,
 ) -> Result<SessionWsRoutePlan, Response> {
     match state.config.auth_mode {
         AuthMode::LocalTrust | AuthMode::TailnetTrust => {
-            trusted_session_ws_route_plan(state, session_id).await
+            trusted_session_ws_route_plan(state, headers, session_id).await
         }
         AuthMode::Token => token_session_ws_route_plan(query),
     }
@@ -105,12 +108,22 @@ pub(super) async fn session_ws_route_plan(
 #[allow(clippy::result_large_err)]
 async fn trusted_session_ws_route_plan(
     state: &Arc<AppState>,
+    headers: &HeaderMap,
     session_id: &str,
 ) -> Result<SessionWsRoutePlan, Response> {
+    validate_trusted_session_ws_request(&state.config, headers)?;
     let auth = AuthInfo::new(OPERATOR_SCOPES.to_vec());
     auth.require_scope(AuthScope::SessionsRead)?;
     let handle = require_session_ws_handle(state, session_id).await?;
     Ok(SessionWsRoutePlan::Trusted { handle, auth })
+}
+
+#[allow(clippy::result_large_err)]
+fn validate_trusted_session_ws_request(
+    config: &Config,
+    headers: &HeaderMap,
+) -> Result<(), Response> {
+    validate_trusted_request_headers(config, headers)
 }
 
 #[allow(clippy::result_large_err)]
@@ -310,4 +323,102 @@ pub(super) fn resolve_ws_auth(config: &Config, token: Option<&str>) -> Result<Au
 
 fn bearer_tokens_eq(provided: &str, expected: &str) -> bool {
     provided.as_bytes().ct_eq(expected.as_bytes()).into()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::http::{header, HeaderValue};
+    use tokio::sync::RwLock;
+
+    fn ws_headers(host: &str, origin: Option<&str>) -> HeaderMap {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::HOST,
+            HeaderValue::from_str(host).expect("valid host header"),
+        );
+        if let Some(origin) = origin {
+            headers.insert(
+                header::ORIGIN,
+                HeaderValue::from_str(origin).expect("valid origin header"),
+            );
+        }
+        headers
+    }
+
+    fn ws_query() -> WsQuery {
+        WsQuery {
+            token: None,
+            resume_from_seq: None,
+            framed: None,
+        }
+    }
+
+    fn test_state_with_config(config: Config) -> Arc<AppState> {
+        let config = Arc::new(config);
+        let supervisor = crate::session::supervisor::SessionSupervisor::new(config.clone());
+        Arc::new(AppState {
+            supervisor,
+            config,
+            thought_config: Arc::new(RwLock::new(
+                crate::thought::runtime_config::ThoughtConfig::default(),
+            )),
+            native_desktop_app: Arc::new(RwLock::new(crate::types::NativeDesktopApp::Iterm)),
+            ghostty_open_mode: Arc::new(RwLock::new(crate::types::GhosttyOpenMode::Swap)),
+            sync_request_sequence: Arc::new(crate::thought::protocol::SyncRequestSequence::new()),
+            daemon_defaults: crate::api::once_lock_with(None),
+            file_store: crate::api::once_lock_with(None),
+            bridge_health: Arc::new(crate::thought::health::BridgeHealthState::new_with_tick(
+                std::time::Duration::from_secs(15),
+            )),
+            published_selection: Arc::new(RwLock::new(
+                crate::api::PublishedSelectionState::default(),
+            )),
+            repo_actions: crate::host_actions::RepoActionTracker::default(),
+        })
+    }
+
+    fn local_trust_state() -> Arc<AppState> {
+        test_state_with_config(Config::default())
+    }
+
+    fn response_status(result: Result<SessionWsRoutePlan, Response>) -> StatusCode {
+        match result {
+            Ok(_) => panic!("expected route plan rejection"),
+            Err(response) => response.status(),
+        }
+    }
+
+    #[tokio::test]
+    async fn session_ws_local_trust_rejects_hostile_host_before_upgrade() {
+        let state = local_trust_state();
+        let headers = ws_headers("attacker.test:3210", None);
+
+        let status =
+            response_status(session_ws_route_plan(&state, &headers, "missing", &ws_query()).await);
+
+        assert_eq!(status, StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn session_ws_local_trust_rejects_hostile_origin_before_upgrade() {
+        let state = local_trust_state();
+        let headers = ws_headers("127.0.0.1:3210", Some("https://attacker.test"));
+
+        let status =
+            response_status(session_ws_route_plan(&state, &headers, "missing", &ws_query()).await);
+
+        assert_eq!(status, StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn session_ws_local_trust_allows_same_origin_loopback_before_session_lookup() {
+        let state = local_trust_state();
+        let headers = ws_headers("127.0.0.1:3210", Some("http://127.0.0.1:3210"));
+
+        let status =
+            response_status(session_ws_route_plan(&state, &headers, "missing", &ws_query()).await);
+
+        assert_eq!(status, StatusCode::NOT_FOUND);
+    }
 }

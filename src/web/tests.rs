@@ -380,7 +380,9 @@ fn lifecycle_event_delivery_payload_matches_session_lagged_and_closed_cases() {
 async fn index_shell_includes_new_web_parity_sheets() {
     let html = html_string(render_index(false).await).await;
     assert!(html.contains("swimmers-react-root"));
-    assert!(html.find("swimmers-react-root").unwrap() < html.find("terminal-stage").unwrap());
+    assert!(
+        html.find("swimmers-react-root").unwrap() < html.find(r#"id="terminal-stage""#).unwrap()
+    );
     assert!(html.contains("thought-config-sheet"));
     assert!(html.contains("native-sheet"));
     assert!(html.contains("mermaid-sheet"));
@@ -411,6 +413,38 @@ async fn index_shell_includes_new_web_parity_sheets() {
     assert!(html.contains("send-history"));
     assert!(html.contains(FRANKENTERM_FONT_ROUTE));
     assert!(html.contains("window.__SWIMMERS_BOOT__"));
+}
+
+#[tokio::test]
+async fn index_shell_exposes_accessible_terminal_controls_and_copy() {
+    let html = html_string(render_index(false).await).await;
+
+    assert!(html.contains("<title>Swimmers - Terminal Session Manager</title>"));
+    assert!(html.contains(r##"<a class="skip-link" href='#terminal-stage'>Skip to terminal</a>"##));
+    assert!(
+        html.find(r##"class="skip-link""##).unwrap()
+            < html.find(r##"id="terminal-stage""##).unwrap()
+    );
+    assert!(html
+        .contains(r##"class="loading-overlay visible" id="loading-overlay" aria-hidden="true""##));
+
+    for (id, label) in [
+        ("terminal-palette", "Open command palette"),
+        ("terminal-copy-frame", "Copy visible terminal text"),
+        ("terminal-zoom-out", "Zoom out"),
+        ("terminal-zoom-reset", "Reset terminal zoom"),
+        ("terminal-zoom-in", "Zoom in"),
+        ("terminal-mobile-keyboard", "Toggle mobile keyboard"),
+        ("terminal-workbench-toggle", "Toggle session workbench"),
+    ] {
+        assert!(html.contains(&format!(
+            r##"id="{id}" type="button" title="{label}" aria-label="{label}""##
+        )));
+    }
+
+    assert!(html.contains(
+        r##"id="trogdor-launcher" type="button" title="Open repository atlas" aria-label="Open repository atlas""##
+    ));
 }
 
 #[tokio::test]
@@ -1153,6 +1187,30 @@ async fn direct_app_js_route_defers_react_imports_to_vite_shell_path() {
 }
 
 #[tokio::test]
+async fn app_js_keeps_loading_overlay_aria_hidden_in_sync() {
+    let app = response_text(app_js().await).await;
+    assert!(app.contains(r#"const loadingVisible = Boolean(visible);"#));
+    assert!(app.contains(
+        r#"el.loadingOverlay.setAttribute("aria-hidden", loadingVisible ? "false" : "true");"#
+    ));
+    assert!(app.contains(r#""Loading terminal surface...""#));
+    assert!(!app.contains(r#""Loading rendered control surface...""#));
+}
+
+#[tokio::test]
+async fn app_js_applies_clearer_runtime_sheet_copy_after_island_mount() {
+    let app = response_text(app_js().await).await;
+    assert!(app.contains("ACCESSIBLE_SHEET_COPY"));
+    assert!(app.contains("Authentication Required"));
+    assert!(app.contains("Paste the authentication token provided by your server administrator."));
+    assert!(app.contains("Observation settings"));
+    assert!(app.contains("Session Insights"));
+    assert!(app.contains("Loading session insight settings..."));
+    assert!(app.contains("Enable AI session observations"));
+    assert!(app.contains("applyAccessibleSheetCopy();"));
+}
+
+#[tokio::test]
 async fn app_css_serves_concatenated_partials_with_existing_headers() {
     let response = app_css().await.into_response();
     assert_eq!(response.status(), StatusCode::OK);
@@ -1169,6 +1227,8 @@ async fn app_css_serves_concatenated_partials_with_existing_headers() {
         .await
         .expect("css body");
     let css = String::from_utf8(body.to_vec()).expect("utf8 css asset");
+    assert!(css.contains(".skip-link {"));
+    assert!(css.contains(".skip-link:focus"));
     let order_needles = [
         ".loading-overlay.visible",
         ".trogdor-surface",

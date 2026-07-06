@@ -4,7 +4,7 @@ use std::time::Duration;
 
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{Path as AxumPath, Query, State};
-use axum::http::{header, StatusCode};
+use axum::http::{header, HeaderMap, StatusCode};
 use axum::response::{Html, IntoResponse, Response};
 use axum::routing::get;
 use axum::{Json, Router};
@@ -122,12 +122,13 @@ async fn render_index(focus_layout: bool) -> impl IntoResponse {
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>swimmers</title>
+    <title>Swimmers - Terminal Session Manager</title>
     <link rel="preload" href="{franken_term_font_route}" as="font" type="font/woff2" crossorigin />
     {stylesheet_tags}
     {module_preload_tags}
   </head>
   <body class="{body_class}">
+    <a class="skip-link" href='#terminal-stage'>Skip to terminal</a>
     <div class="shell">
       <div id="swimmers-react-root" data-swimmers-react-root="shell">
         <main
@@ -185,13 +186,13 @@ async fn render_index(focus_layout: bool) -> impl IntoResponse {
         aria-label="Back to Trogdor atlas"
         aria-hidden="true">Trogdor</button>
       <div class="terminal-control-strip" id="terminal-control-strip" aria-label="Terminal viewer controls">
-        <button id="terminal-palette" type="button" title="Open command palette">K</button>
-        <button id="terminal-copy-frame" type="button" title="Copy visible terminal text">TXT</button>
-        <button id="terminal-zoom-out" type="button" title="Zoom out">A-</button>
-        <button id="terminal-zoom-reset" type="button" title="Reset terminal zoom">100%</button>
-        <button id="terminal-zoom-in" type="button" title="Zoom in">A+</button>
-        <button id="terminal-mobile-keyboard" type="button" title="Toggle mobile keyboard" aria-pressed="false">KB</button>
-        <button id="terminal-workbench-toggle" type="button" title="Toggle session workbench" aria-pressed="false">WB</button>
+        <button id="terminal-palette" type="button" title="Open command palette" aria-label="Open command palette">K</button>
+        <button id="terminal-copy-frame" type="button" title="Copy visible terminal text" aria-label="Copy visible terminal text">TXT</button>
+        <button id="terminal-zoom-out" type="button" title="Zoom out" aria-label="Zoom out">A-</button>
+        <button id="terminal-zoom-reset" type="button" title="Reset terminal zoom" aria-label="Reset terminal zoom">100%</button>
+        <button id="terminal-zoom-in" type="button" title="Zoom in" aria-label="Zoom in">A+</button>
+        <button id="terminal-mobile-keyboard" type="button" title="Toggle mobile keyboard" aria-label="Toggle mobile keyboard" aria-pressed="false">KB</button>
+        <button id="terminal-workbench-toggle" type="button" title="Toggle session workbench" aria-label="Toggle session workbench" aria-pressed="false">WB</button>
       </div>
       <aside class="terminal-workbench hidden" id="terminal-workbench" aria-label="Session workbench" aria-hidden="true">
         <div class="workbench-header">
@@ -250,7 +251,7 @@ async fn render_index(focus_layout: bool) -> impl IntoResponse {
         <button id="terminal-input-send" type="submit">Send</button>
         <div class="terminal-input-echo" id="terminal-input-echo" aria-live="polite"></div>
       </form>
-      <button class="trogdor-launcher hidden" id="trogdor-launcher" type="button">burninate!</button>
+      <button class="trogdor-launcher hidden" id="trogdor-launcher" type="button" title="Open repository atlas" aria-label="Open repository atlas">burninate!</button>
 
       <div class="modal-root" id="modal-root" aria-hidden="true">
         <div class="modal-backdrop" id="modal-backdrop"></div>
@@ -571,6 +572,7 @@ fn escape_html_attr(value: &str) -> String {
 
 async fn session_ws(
     ws: WebSocketUpgrade,
+    headers: HeaderMap,
     AxumPath(session_id): AxumPath<String>,
     Query(query): Query<WsQuery>,
     State(state): State<Arc<AppState>>,
@@ -578,7 +580,7 @@ async fn session_ws(
     let output_mode = query.output_mode();
     let resume_from_seq = query.resume_from_seq;
 
-    let plan = match session_ws_route_plan(&state, &session_id, &query).await {
+    let plan = match session_ws_route_plan(&state, &headers, &session_id, &query).await {
         Ok(plan) => plan,
         Err(response) => return response,
     };

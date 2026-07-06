@@ -1640,7 +1640,6 @@ impl SessionActor {
         // (SessionActor contains non-Sync fields like dyn MasterPty).
         let tmux_name = self.tmux_name.clone();
         let session_id = self.session_id.clone();
-        let fallback_text = self.replay_ring.snapshot();
         let latest_seq = self.replay_ring.latest_seq();
 
         let tmux_target = self.tmux_target.clone();
@@ -1653,7 +1652,7 @@ impl SessionActor {
                     "capture-pane failed for snapshot, falling back to replay ring: {}",
                     e
                 );
-                fallback_text
+                self.replay_ring.snapshot()
             }
         };
         TerminalSnapshot {

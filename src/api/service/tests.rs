@@ -199,35 +199,45 @@ async fn list_managed_service_entries_dedupes_dirs_skips_missing_and_keeps_metad
 }
 
 #[test]
-fn filter_managed_only_pending_entries_drops_unmapped_nested_children() {
+fn collect_regular_pending_entries_filters_before_child_detection() {
     let dir = tempfile::tempdir().expect("tempdir");
     let base = dir.path().join("repos");
     let nested = base.join("services");
     let managed = nested.join("managed");
     let unmanaged = nested.join("unmanaged");
-    std::fs::create_dir_all(&managed).expect("managed");
-    std::fs::create_dir_all(&unmanaged).expect("unmanaged");
+    std::fs::create_dir_all(managed.join("child")).expect("managed child");
+    std::fs::create_dir_all(unmanaged.join("child")).expect("unmanaged child");
     let service = overlay_service("svc-managed", "services/managed", None);
     let context = OverlayServiceContext {
         base_path: base.clone(),
         services: vec![service.clone()],
     };
-
-    let (mut pending, mut unique_services) = collect_visible_pending_entries(
-        std::fs::read_dir(&nested).expect("nested dir"),
-        Some(&context),
-    );
-    let mut names: Vec<&str> = pending.iter().map(|entry| entry.name.as_str()).collect();
-    names.sort_unstable();
-    assert_eq!(names, vec!["managed", "unmanaged"]);
-
     let config = managed_service_config(&base, vec![service]);
-    filter_managed_only_pending_entries(&mut pending, &mut unique_services, true, Some(&config));
+
+    let read_dir = std::fs::read_dir(&nested).expect("nested dir");
+    let mut scanned = collect_visible_scanned_entries(read_dir, Some(&context));
+    filter_managed_only_scanned_entries(&mut scanned, true, !config.services.is_empty());
+    let unique_services = unique_services_for_scanned(&scanned);
+    let mut child_scan_count = 0;
+    let pending = materialize_pending_entries_with(scanned, |path| {
+        assert_ne!(
+            path, &unmanaged,
+            "unmanaged entries must be filtered before child detection"
+        );
+        child_scan_count += 1;
+        service_directory::has_visible_child_dirs(path)
+    });
 
     let names: Vec<&str> = pending.iter().map(|entry| entry.name.as_str()).collect();
     let services: Vec<&str> = unique_services.iter().map(String::as_str).collect();
     assert_eq!(names, vec!["managed"]);
     assert_eq!(services, vec!["svc-managed"]);
+    assert_eq!(
+        child_scan_count,
+        pending.len(),
+        "child detection should only run after managed filtering"
+    );
+    assert!(pending[0].has_children);
 }
 
 fn repo_search_response_paths(response: &DirRepoSearchResponse) -> Vec<String> {

@@ -198,12 +198,13 @@ fn group_input_batch_error_result(
 
 fn group_input_all_error_response(
     session_ids: Vec<String>,
-    code: &'static str,
+    code: impl Into<String>,
     message: String,
 ) -> SessionGroupInputResponse {
+    let code = code.into();
     let results = session_ids
         .into_iter()
-        .map(|session_id| group_input_error_result(session_id, code, Some(message.clone())))
+        .map(|session_id| group_input_error_result(session_id, code.clone(), Some(message.clone())))
         .collect();
     SessionGroupInputResponse::from_results(results)
 }
@@ -372,14 +373,14 @@ struct RemoteGroupInputTarget {
 
 #[derive(Debug)]
 struct RemoteGroupInputScopeError {
-    code: &'static str,
+    code: String,
     message: String,
 }
 
 impl RemoteGroupInputScopeError {
-    fn new(code: &'static str, message: impl Into<String>) -> Self {
+    fn new(code: impl Into<String>, message: impl Into<String>) -> Self {
         Self {
-            code,
+            code: code.into(),
             message: message.into(),
         }
     }
@@ -518,7 +519,15 @@ pub(super) async fn send_group_input(
             };
             (status, Json(response)).into_response()
         }
-        Err(error) => (StatusCode::BAD_REQUEST, Json(error)).into_response(),
+        Err(error) => (group_input_error_status(&error), Json(error)).into_response(),
+    }
+}
+
+fn group_input_error_status(error: &ErrorResponse) -> StatusCode {
+    if error.code == "INPUT_TOO_LARGE" {
+        StatusCode::PAYLOAD_TOO_LARGE
+    } else {
+        StatusCode::BAD_REQUEST
     }
 }
 

@@ -249,14 +249,20 @@ Run `swimmers config` to see resolved values.
 Run `swimmers config doctor` to validate the active configuration.";
 
 const TUI_ENV_HELP: &str = "ENVIRONMENT VARIABLES:
-  SWIMMERS_TUI_URL  API URL to connect to; unset uses embedded mode
-  AUTH_MODE         'local_trust', 'tailnet_trust', or 'token'
-  AUTH_TOKEN        Bearer token when AUTH_MODE=token
-  CLAWGS_BIN        Override path to the clawgs binary in embedded mode
+  SWIMMERS_TUI_URL             API URL to connect to; unset uses embedded mode
+  PORT                         Embedded backend port when SWIMMERS_TUI_URL is unset
+  SWIMMERS_TUI_REUSE_SERVER    '1' to keep an existing loopback backend
+  SWIMMERS_TUI_LOG             '1' to log TUI diagnostics to disk
+  SWIMMERS_TUI_LOG_DIR         Directory for TUI diagnostic logs
+  AUTH_MODE                    'local_trust', 'tailnet_trust', or 'token'
+  AUTH_TOKEN                   Bearer token when AUTH_MODE=token
+  CLAWGS_BIN                   Override path to the clawgs binary in embedded mode
   SWIMMERS_VOICE_MODEL
-                   Whisper model path for the voice feature
+                              Whisper model path for the voice feature
   SWIMMERS_VOICE_LANGUAGE
-                   Voice language hint (default: auto)";
+                              Voice language hint (default: auto)
+  NO_COLOR                     Disable ANSI color output when set
+  CLICOLOR                     '0' disables ANSI color output";
 
 const CLAWGS_DEFAULTS_DOCTOR_TIMEOUT: Duration = Duration::from_secs(3);
 

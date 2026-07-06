@@ -31,6 +31,33 @@ pub(crate) struct TerminalState {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TerminalColorMode {
+    Color,
+    NoColor,
+}
+
+impl TerminalColorMode {
+    fn from_env() -> Self {
+        Self::from_env_values(
+            std::env::var("NO_COLOR").ok().as_deref(),
+            std::env::var("CLICOLOR").ok().as_deref(),
+        )
+    }
+
+    fn from_env_values(no_color: Option<&str>, clicolor: Option<&str>) -> Self {
+        if no_color.is_some_and(|value| !value.is_empty()) || matches!(clicolor, Some("0")) {
+            Self::NoColor
+        } else {
+            Self::Color
+        }
+    }
+
+    fn allows_color(self) -> bool {
+        matches!(self, Self::Color)
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum FlushOp {
     MoveTo(u16, u16),
     SetForegroundColor(Color),
@@ -134,12 +161,13 @@ fn append_cell_flush_ops(
     x: u16,
     y: u16,
     cell: Cell,
+    color_mode: TerminalColorMode,
 ) {
     if *last_pos != Some((x, y)) {
         ops.push(FlushOp::MoveTo(x, y));
     }
 
-    if cell.fg != *current_color {
+    if color_mode.allows_color() && cell.fg != *current_color {
         ops.push(FlushOp::SetForegroundColor(cell.fg));
         *current_color = cell.fg;
     }
@@ -148,7 +176,13 @@ fn append_cell_flush_ops(
     *last_pos = Some((x.saturating_add(1), y));
 }
 
-fn plan_flush_ops(width: u16, height: u16, buffer: &[Cell], last_buffer: &[Cell]) -> Vec<FlushOp> {
+fn plan_flush_ops(
+    width: u16,
+    height: u16,
+    buffer: &[Cell],
+    last_buffer: &[Cell],
+    color_mode: TerminalColorMode,
+) -> Vec<FlushOp> {
     let visible_len = (width as usize) * (height as usize);
     let mut ops = Vec::new();
     let mut current_color = Color::Reset;
@@ -163,6 +197,7 @@ fn plan_flush_ops(width: u16, height: u16, buffer: &[Cell], last_buffer: &[Cell]
             x,
             y,
             buffer[idx],
+            color_mode,
         );
     }
 
@@ -300,7 +335,13 @@ impl Renderer {
     }
 
     pub(crate) fn flush(&mut self) -> io::Result<()> {
-        for op in plan_flush_ops(self.width, self.height, &self.buffer, &self.last_buffer) {
+        for op in plan_flush_ops(
+            self.width,
+            self.height,
+            &self.buffer,
+            &self.last_buffer,
+            TerminalColorMode::from_env(),
+        ) {
             queue_flush_op(&mut self.stdout, op)?;
         }
         self.stdout.flush()?;
@@ -431,7 +472,7 @@ mod tests {
         ];
 
         assert_eq!(
-            plan_flush_ops(4, 1, &buffer, &last_buffer),
+            plan_flush_ops(4, 1, &buffer, &last_buffer, TerminalColorMode::Color),
             vec![
                 FlushOp::MoveTo(0, 0),
                 FlushOp::SetForegroundColor(Color::Red),
@@ -463,7 +504,7 @@ mod tests {
         ];
 
         assert_eq!(
-            plan_flush_ops(2, 1, &buffer, &last_buffer),
+            plan_flush_ops(2, 1, &buffer, &last_buffer, TerminalColorMode::Color),
             vec![
                 FlushOp::MoveTo(0, 0),
                 FlushOp::SetForegroundColor(Color::Green),
@@ -478,6 +519,71 @@ mod tests {
     fn flush_plan_is_empty_when_no_cells_changed() {
         let buffer = vec![Cell::default(); 6];
 
-        assert!(plan_flush_ops(3, 2, &buffer, &buffer).is_empty());
+        assert!(plan_flush_ops(3, 2, &buffer, &buffer, TerminalColorMode::Color).is_empty());
+    }
+
+    #[test]
+    fn flush_plan_no_color_env_suppresses_foreground_color() {
+        let last_buffer = vec![Cell::default(); 2];
+        let buffer = vec![
+            Cell {
+                ch: 'a',
+                fg: Color::Red,
+            },
+            Cell {
+                ch: 'b',
+                fg: Color::Blue,
+            },
+        ];
+        let color_mode = TerminalColorMode::from_env_values(Some("1"), None);
+
+        let ops = plan_flush_ops(2, 1, &buffer, &last_buffer, color_mode);
+
+        assert_eq!(color_mode, TerminalColorMode::NoColor);
+        assert!(!ops
+            .iter()
+            .any(|op| matches!(op, FlushOp::SetForegroundColor(_))));
+        assert!(!ops.iter().any(|op| matches!(op, FlushOp::ResetColor)));
+        assert_eq!(
+            ops,
+            vec![
+                FlushOp::MoveTo(0, 0),
+                FlushOp::Print('a'),
+                FlushOp::Print('b'),
+            ]
+        );
+    }
+
+    #[test]
+    fn flush_plan_clicolor_zero_no_color_suppresses_foreground_color() {
+        let last_buffer = vec![Cell::default(); 1];
+        let buffer = vec![Cell {
+            ch: 'a',
+            fg: Color::Red,
+        }];
+        let color_mode = TerminalColorMode::from_env_values(None, Some("0"));
+
+        let ops = plan_flush_ops(1, 1, &buffer, &last_buffer, color_mode);
+
+        assert_eq!(color_mode, TerminalColorMode::NoColor);
+        assert!(!ops
+            .iter()
+            .any(|op| matches!(op, FlushOp::SetForegroundColor(_))));
+        assert_eq!(ops, vec![FlushOp::MoveTo(0, 0), FlushOp::Print('a')]);
+    }
+
+    #[test]
+    fn flush_plan_no_color_defaults_to_color_when_env_absent() {
+        let last_buffer = vec![Cell::default(); 1];
+        let buffer = vec![Cell {
+            ch: 'a',
+            fg: Color::Red,
+        }];
+        let color_mode = TerminalColorMode::from_env_values(None, None);
+
+        assert_eq!(color_mode, TerminalColorMode::Color);
+        assert!(plan_flush_ops(1, 1, &buffer, &last_buffer, color_mode)
+            .iter()
+            .any(|op| matches!(op, FlushOp::SetForegroundColor(Color::Red))));
     }
 }

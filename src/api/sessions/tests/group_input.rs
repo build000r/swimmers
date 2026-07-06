@@ -51,7 +51,7 @@ async fn send_group_input_rejects_oversized_text_before_session_lookup() {
     .await
     .into_response();
 
-    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
     let json = response_json(response).await;
     assert_eq!(json["code"], "INPUT_TOO_LARGE");
     assert_eq!(

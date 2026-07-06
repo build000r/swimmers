@@ -806,8 +806,14 @@ mod tests {
     }
 
     fn metrics_auth_test_config(auth_mode: AuthMode) -> Arc<Config> {
+        let bind = if auth_mode == AuthMode::TailnetTrust {
+            "100.64.1.2".to_string()
+        } else {
+            Config::default().bind
+        };
         Arc::new(Config {
             auth_mode,
+            bind,
             auth_token: Some("operator-token".to_string()),
             observer_token: Some("observer-token".to_string()),
             ..Config::default()
@@ -837,9 +843,20 @@ mod tests {
     }
 
     async fn get_metrics(base_url: &str, bearer_token: Option<&str>) -> reqwest::Response {
+        get_metrics_with_host(base_url, bearer_token, None).await
+    }
+
+    async fn get_metrics_with_host(
+        base_url: &str,
+        bearer_token: Option<&str>,
+        host: Option<&str>,
+    ) -> reqwest::Response {
         let mut request = reqwest::Client::new().get(format!("{base_url}/metrics"));
         if let Some(token) = bearer_token {
             request = request.bearer_auth(token);
+        }
+        if let Some(host) = host {
+            request = request.header(reqwest::header::HOST, host);
         }
         request.send().await.expect("metrics response")
     }
@@ -932,7 +949,8 @@ mod tests {
         for auth_mode in [AuthMode::LocalTrust, AuthMode::TailnetTrust] {
             let (base_url, handle) =
                 spawn_metrics_auth_test_server(metrics_auth_test_config(auth_mode)).await;
-            let response = get_metrics(&base_url, None).await;
+            let host = (auth_mode == AuthMode::TailnetTrust).then_some("100.64.1.2");
+            let response = get_metrics_with_host(&base_url, None, host).await;
             assert_eq!(response.status(), reqwest::StatusCode::OK);
             handle.abort();
         }

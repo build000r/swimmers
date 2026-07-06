@@ -47,6 +47,23 @@ cleanup() {
 }
 trap cleanup EXIT
 
+help_output="$("${RUN_UP}" --help)"
+if [[ "${help_output}" != *"Usage: scripts/run-up.sh"* ]]; then
+  printf 'expected run-up.sh help output\n' >&2
+  printf '%s\n' "${help_output}" >&2
+  exit 1
+fi
+
+if "${RUN_UP}" --definitely-bad >"${tmp_dir}/bad-option.out" 2>"${tmp_dir}/bad-option.err"; then
+  printf 'expected run-up.sh to fail on unknown option\n' >&2
+  exit 1
+fi
+grep -q "unknown option: --definitely-bad" "${tmp_dir}/bad-option.err"
+if grep -q "make up requires FrankenTerm assets" "${tmp_dir}/bad-option.err"; then
+  printf 'run-up.sh unknown option reached asset checks before failing\n' >&2
+  exit 1
+fi
+
 write_server_fixture() {
   local server_py="${tmp_dir}/server_fixture.py"
   cat >"${server_py}" <<'PY'
@@ -335,6 +352,7 @@ capture="${tmp_dir}/tui-env.txt"
 PATH="${TAILSCALE_STUB_DIR}:${PATH}" \
   SWIMMERS_UP_TEST_TAILSCALE_IP=100.79.193.34 \
   run_up_for_port "${port}" "${capture}" "${tmp_dir}/fresh.out"
+grep -q "swimmers shared backend target URLs" "${tmp_dir}/fresh.out"
 grep -q "Using FrankenTerm assets from ${FRANKENTERM_PKG}" "${tmp_dir}/fresh.out"
 grep -q "Starting swimmers backend on http://127.0.0.1:${port}" "${tmp_dir}/fresh.out"
 grep -q "tailnet:  not exposed (set SWIMMERS_BIND=100.79.193.34 AUTH_MODE=tailnet_trust)" "${tmp_dir}/fresh.out"

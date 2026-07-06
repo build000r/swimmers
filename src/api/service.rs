@@ -123,6 +123,12 @@ struct PendingEntry {
     services: Vec<String>,
 }
 
+struct ScannedDirEntry {
+    name: String,
+    entry_path: PathBuf,
+    services: Vec<String>,
+}
+
 type RepoProbe = (Option<bool>, Option<RepoActionStatus>);
 
 struct RestartActionPlan {
@@ -874,12 +880,11 @@ fn build_dir_entries(
     entries.into_iter().map(|(entry, _)| entry).collect()
 }
 
-fn collect_visible_pending_entries(
+fn collect_visible_scanned_entries(
     read_dir: std::fs::ReadDir,
     service_context: Option<&OverlayServiceContext>,
-) -> (Vec<PendingEntry>, BTreeSet<String>) {
-    let mut pending = Vec::new();
-    let mut unique_services = BTreeSet::new();
+) -> Vec<ScannedDirEntry> {
+    let mut scanned = Vec::new();
     for entry in read_dir.flatten() {
         let Ok(file_type) = entry.file_type() else {
             continue;
@@ -894,43 +899,35 @@ fn collect_visible_pending_entries(
         }
 
         let entry_path = entry.path();
-        let has_children = has_visible_child_dirs(&entry_path);
-        let modified_at = modified_secs(&entry_path);
-
         let services = service_context
             .map(|context| services_for_directory(&entry_path, context))
             .unwrap_or_default();
-        extend_unique_services(&mut unique_services, &services);
 
-        pending.push(PendingEntry {
+        scanned.push(ScannedDirEntry {
             name,
             entry_path,
-            has_children,
-            modified_at,
             services,
         });
     }
 
-    (pending, unique_services)
+    scanned
 }
 
-fn filter_managed_only_pending_entries(
-    pending: &mut Vec<PendingEntry>,
-    unique_services: &mut BTreeSet<String>,
+fn filter_managed_only_scanned_entries(
+    scanned: &mut Vec<ScannedDirEntry>,
     managed_only: bool,
-    dir_config: Option<&OverlayDirConfig>,
+    has_managed_services: bool,
 ) {
-    if !managed_only || dir_config.is_none_or(|config| config.services.is_empty()) {
+    if !managed_only || !has_managed_services {
         return;
     }
 
-    pending.retain(|entry| !entry.services.is_empty());
-    *unique_services = unique_services_for_pending(pending);
+    scanned.retain(|entry| !entry.services.is_empty());
 }
 
-fn unique_services_for_pending(pending: &[PendingEntry]) -> BTreeSet<String> {
+fn unique_services_for_scanned(scanned: &[ScannedDirEntry]) -> BTreeSet<String> {
     let mut unique_services = BTreeSet::new();
-    for entry in pending {
+    for entry in scanned {
         extend_unique_services(&mut unique_services, &entry.services);
     }
     unique_services
@@ -938,6 +935,76 @@ fn unique_services_for_pending(pending: &[PendingEntry]) -> BTreeSet<String> {
 
 fn extend_unique_services(unique_services: &mut BTreeSet<String>, services: &[String]) {
     unique_services.extend(services.iter().cloned());
+}
+
+fn materialize_pending_entries(scanned: Vec<ScannedDirEntry>) -> Vec<PendingEntry> {
+    materialize_pending_entries_with(scanned, has_visible_child_dirs)
+}
+
+fn materialize_pending_entries_with(
+    scanned: Vec<ScannedDirEntry>,
+    mut has_child_dirs: impl FnMut(&Path) -> bool,
+) -> Vec<PendingEntry> {
+    scanned
+        .into_iter()
+        .map(|entry| {
+            let has_children = has_child_dirs(&entry.entry_path);
+            let modified_at = modified_secs(&entry.entry_path);
+            PendingEntry {
+                name: entry.name,
+                entry_path: entry.entry_path,
+                has_children,
+                modified_at,
+                services: entry.services,
+            }
+        })
+        .collect()
+}
+
+fn collect_regular_pending_entries_sync(
+    canonical: &Path,
+    service_context: Option<&OverlayServiceContext>,
+    managed_only: bool,
+    has_managed_services: bool,
+) -> Result<(Vec<PendingEntry>, BTreeSet<String>), ApiServiceError> {
+    let read_dir = std::fs::read_dir(canonical).map_err(dir_read_error)?;
+    let mut scanned = collect_visible_scanned_entries(read_dir, service_context);
+    filter_managed_only_scanned_entries(&mut scanned, managed_only, has_managed_services);
+    let unique_services = unique_services_for_scanned(&scanned);
+    let pending = materialize_pending_entries(scanned);
+    Ok((pending, unique_services))
+}
+
+async fn collect_regular_pending_entries(
+    canonical: PathBuf,
+    service_context: Option<OverlayServiceContext>,
+    managed_only: bool,
+    has_managed_services: bool,
+) -> Result<(Vec<PendingEntry>, BTreeSet<String>), ApiServiceError> {
+    tokio::task::spawn_blocking(move || {
+        collect_regular_pending_entries_sync(
+            &canonical,
+            service_context.as_ref(),
+            managed_only,
+            has_managed_services,
+        )
+    })
+    .await
+    .map_err(|error| {
+        ApiServiceError::new(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "DIR_READ_ERROR",
+            format!("directory listing task failed: {error}"),
+        )
+    })?
+}
+
+fn dir_read_error(error: io::Error) -> ApiServiceError {
+    ApiServiceError::new(
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "DIR_READ_ERROR",
+        error.to_string(),
+    )
 }
 
 fn managed_service_context(config: &OverlayDirConfig) -> OverlayServiceContext {
@@ -1198,29 +1265,21 @@ async fn list_regular_dir_response(
     managed_only: bool,
     request_started: Instant,
 ) -> Result<DirListResponse, ApiServiceError> {
-    let read_dir = std::fs::read_dir(canonical).map_err(|error| {
-        ApiServiceError::new(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "DIR_READ_ERROR",
-            error.to_string(),
-        )
-    })?;
-
     let service_context = dir_config.map(|config| OverlayServiceContext {
         base_path: config.base_path.clone(),
         services: config.services.clone(),
     });
 
-    let (mut pending, mut unique_services) =
-        collect_visible_pending_entries(read_dir, service_context.as_ref());
-    filter_managed_only_pending_entries(
-        &mut pending,
-        &mut unique_services,
+    let has_managed_services = dir_config.is_some_and(|config| !config.services.is_empty());
+    let (pending, unique_services) = collect_regular_pending_entries(
+        canonical.to_path_buf(),
+        service_context,
         managed_only,
-        dir_config,
-    );
-    let pending_phase_ms = request_started.elapsed().as_millis() as u64;
+        has_managed_services,
+    )
+    .await?;
     let pending_count = pending.len();
+    let pending_phase_ms = request_started.elapsed().as_millis() as u64;
     let probe_started = Instant::now();
     let probes = probe_pending_entries(state, &pending).await;
     let probe_phase_ms = probe_started.elapsed().as_millis() as u64;

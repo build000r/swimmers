@@ -1,4 +1,9 @@
 use std::collections::VecDeque;
+#[cfg(test)]
+use std::sync::atomic::{AtomicUsize, Ordering};
+
+#[cfg(test)]
+static SNAPSHOT_CALLS: AtomicUsize = AtomicUsize::new(0);
 
 /// A fixed-capacity ring buffer that stores terminal output frames with
 /// monotonically increasing sequence numbers. Used for replay on reconnect.
@@ -120,9 +125,22 @@ impl ReplayRing {
         self.total_bytes
     }
 
+    #[cfg(test)]
+    pub(crate) fn reset_snapshot_call_count_for_tests() {
+        SNAPSHOT_CALLS.store(0, Ordering::SeqCst);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn snapshot_call_count_for_tests() -> usize {
+        SNAPSHOT_CALLS.load(Ordering::SeqCst)
+    }
+
     /// Concatenate all retained frames into a UTF-8 string (lossy) representing
     /// the visible terminal text. Used for snapshot / screen capture.
     pub fn snapshot(&self) -> String {
+        #[cfg(test)]
+        SNAPSHOT_CALLS.fetch_add(1, Ordering::SeqCst);
+
         let total: usize = self.frames.iter().map(|f| f.data.len()).sum();
         let mut buf = Vec::with_capacity(total);
         for frame in &self.frames {

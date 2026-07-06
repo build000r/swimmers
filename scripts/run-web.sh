@@ -6,8 +6,54 @@ source "${ROOT_DIR}/scripts/web-common.sh"
 PORT="${PORT:-3210}"
 WEB_ROUTE_PATH="${WEB_ROUTE_PATH:-/app.js}"
 
+usage() {
+  cat <<'EOF'
+Usage: scripts/run-web.sh
+
+Run the Swimmers web surface server for local browser use.
+
+Environment:
+  PORT                    Loopback port, default 3210.
+  SWIMMERS_WEB_FEATURES   Optional Cargo features passed to the server build.
+  SWIMMERS_FRANKENTUI_PKG_DIR
+                          FrankenTerm asset package directory.
+  FRANKENTUI_PKG_DIR      Alternate FrankenTerm asset package directory.
+EOF
+}
+
+parse_args() {
+  while (($#)); do
+    case "$1" in
+      -h|--help)
+        usage
+        exit 0
+        ;;
+      --)
+        shift
+        break
+        ;;
+      -*)
+        printf 'unknown option: %s\n' "$1" >&2
+        printf 'Run scripts/run-web.sh --help for usage.\n' >&2
+        exit 2
+        ;;
+      *)
+        printf 'unexpected argument: %s\n' "$1" >&2
+        printf 'Run scripts/run-web.sh --help for usage.\n' >&2
+        exit 2
+        ;;
+    esac
+  done
+
+  if (($#)); then
+    printf 'unexpected argument: %s\n' "$1" >&2
+    printf 'Run scripts/run-web.sh --help for usage.\n' >&2
+    exit 2
+  fi
+}
+
 announce_urls() {
-  printf 'swimmers web surface\n'
+  printf 'swimmers web surface target URLs\n'
   printf '  local:    http://127.0.0.1:%s/\n' "${PORT}"
   printf '  selected: http://127.0.0.1:%s/selected\n' "${PORT}"
 
@@ -102,6 +148,7 @@ handle_existing_listener() {
 }
 
 main() {
+  parse_args "$@"
   swimmers_require cargo
 
   local web_features feature_args

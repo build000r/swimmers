@@ -6,6 +6,48 @@ source "${ROOT_DIR}/scripts/web-common.sh"
 
 PORT="${PORT:-3210}"
 
+usage() {
+  cat <<'EOF'
+Usage: scripts/run-kill.sh
+
+Stop the local Swimmers backend listening on the configured loopback port.
+
+Environment:
+  PORT  Loopback port to inspect, default 3210.
+EOF
+}
+
+parse_args() {
+  while (($#)); do
+    case "$1" in
+      -h|--help)
+        usage
+        exit 0
+        ;;
+      --)
+        shift
+        break
+        ;;
+      -*)
+        printf 'unknown option: %s\n' "$1" >&2
+        printf 'Run scripts/run-kill.sh --help for usage.\n' >&2
+        exit 2
+        ;;
+      *)
+        printf 'unexpected argument: %s\n' "$1" >&2
+        printf 'Run scripts/run-kill.sh --help for usage.\n' >&2
+        exit 2
+        ;;
+    esac
+  done
+
+  if (($#)); then
+    printf 'unexpected argument: %s\n' "$1" >&2
+    printf 'Run scripts/run-kill.sh --help for usage.\n' >&2
+    exit 2
+  fi
+}
+
 listener_pid() {
   command -v lsof >/dev/null 2>&1 || return 1
   lsof -nP -t -iTCP:"${PORT}" -sTCP:LISTEN 2>/dev/null | head -1 || true
@@ -36,6 +78,7 @@ wait_for_listener_to_stop() {
 }
 
 main() {
+  parse_args "$@"
   swimmers_require lsof
 
   local pid

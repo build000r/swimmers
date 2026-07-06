@@ -509,15 +509,15 @@ impl<C: TuiApi> App<C> {
 
     /// Return a terse status-bar message for a refresh transport error.
     /// For the first `BACKEND_OFFLINE_ESCALATION` of downtime the user sees
-    /// only "backend offline"; after that the full diagnostic is shown so
-    /// they know how to recover.
+    /// a short recovery hint; after that the full diagnostic is shown so they
+    /// know how to recover.
     fn refresh_error_message(&self, verbose: String) -> String {
         let dominated = self
             .last_successful_refresh
             .map(|t| t.elapsed() < BACKEND_OFFLINE_ESCALATION)
             .unwrap_or(false);
         if dominated {
-            "backend offline".to_string()
+            "backend offline - check server status or restart".to_string()
         } else {
             verbose
         }

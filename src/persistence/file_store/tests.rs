@@ -1,5 +1,23 @@
 use super::*;
 use fs2::FileExt;
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
+
+#[cfg(unix)]
+fn path_mode(path: &Path) -> u32 {
+    std::fs::metadata(path)
+        .expect("metadata")
+        .permissions()
+        .mode()
+        & 0o777
+}
+
+#[cfg(unix)]
+fn chmod(path: &Path, mode: u32) {
+    let mut permissions = std::fs::metadata(path).expect("metadata").permissions();
+    permissions.set_mode(mode);
+    std::fs::set_permissions(path, permissions).expect("chmod");
+}
 
 fn fixed_utc(value: &str) -> DateTime<Utc> {
     DateTime::parse_from_rfc3339(value)
@@ -25,6 +43,92 @@ fn test_thought_snapshot(
         updated_at: fixed_utc("2026-01-01T00:00:00Z"),
         delivery: ThoughtDeliveryState::default(),
     }
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn file_store_new_hardens_unix_data_dir_and_existing_files() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    chmod(dir.path(), 0o755);
+
+    let registry_path = dir.path().join("session_registry.json");
+    let thoughts_path = dir.path().join("thoughts.json");
+    let config_path = dir.path().join("thought_config.json");
+    let dir_groups_path = dir.path().join("dir_groups.json");
+    let lock_path = dir.path().join(".lock");
+    std::fs::write(&registry_path, "[]").expect("write registry");
+    std::fs::write(&thoughts_path, "{}").expect("write thoughts");
+    std::fs::write(
+        &config_path,
+        serde_json::to_string(&ThoughtConfig::default()).expect("serialize thought config"),
+    )
+    .expect("write thought config");
+    std::fs::write(
+        &dir_groups_path,
+        serde_json::to_string(&DirGroupMemberships::default()).expect("serialize dir groups"),
+    )
+    .expect("write dir groups");
+    std::fs::write(&lock_path, "").expect("write lock");
+    for path in [
+        &registry_path,
+        &thoughts_path,
+        &config_path,
+        &dir_groups_path,
+        &lock_path,
+    ] {
+        chmod(path, 0o644);
+    }
+
+    let _store = FileStore::new(dir.path()).await.expect("store");
+
+    assert_eq!(path_mode(dir.path()), PRIVATE_DIR_MODE);
+    for path in [
+        &registry_path,
+        &thoughts_path,
+        &config_path,
+        &dir_groups_path,
+        &lock_path,
+    ] {
+        assert_eq!(path_mode(path), PRIVATE_FILE_MODE, "{}", path.display());
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn write_private_file_synced_creates_unix_private_files() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("temp.json");
+
+    write_private_file_synced(&path, b"{\"ok\":true}").expect("write private file");
+
+    assert_eq!(path_mode(&path), PRIVATE_FILE_MODE);
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn atomic_write_hardens_unix_parent_lock_and_final_file() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    chmod(dir.path(), 0o755);
+    let path = dir.path().join("session_registry.json");
+    std::fs::write(&path, "[]").expect("write existing registry");
+    chmod(&path, 0o644);
+
+    atomic_write_blocking(path.clone(), "[]".to_string())
+        .await
+        .expect("atomic write");
+
+    assert_eq!(path_mode(dir.path()), PRIVATE_DIR_MODE);
+    assert_eq!(path_mode(&path), PRIVATE_FILE_MODE);
+    assert_eq!(
+        path_mode(&lock_path_for(&path).expect("lock path")),
+        PRIVATE_FILE_MODE
+    );
+    let temp_files = std::fs::read_dir(dir.path())
+        .expect("read tempdir")
+        .filter_map(Result::ok)
+        .filter(|entry| entry.file_name().to_string_lossy().contains(".tmp."))
+        .count();
+    assert_eq!(temp_files, 0);
 }
 
 #[tokio::test]

@@ -8,6 +8,7 @@ use std::sync::{Arc, Mutex as StdMutex};
 use std::time::{Duration, Instant};
 
 use chrono::Utc;
+use futures::StreamExt;
 #[cfg(test)]
 use tokio::process::Command;
 use tokio::sync::{broadcast, oneshot, Mutex, Notify, RwLock};
@@ -71,6 +72,7 @@ use self::thought_persistence::THOUGHT_PERSIST_QUEUE_CAP;
 const PROCESS_EXIT_SUMMARY_TIMEOUT: Duration = Duration::from_millis(250);
 const TMUX_REDISCOVERY_INTERVAL: Duration = Duration::from_secs(10);
 const TMUX_KILL_SESSION_TIMEOUT: Duration = Duration::from_millis(500);
+const THOUGHT_SNAPSHOT_COLLECTION_CONCURRENCY: usize = 8;
 
 enum SummaryCollectOutcome {
     Live(SessionSummary),
@@ -1118,16 +1120,12 @@ impl SessionSupervisor {
         };
         let thought_snapshots = self.thought_snapshots.read().await.clone();
 
-        let futs: Vec<_> = handles
-            .into_iter()
+        let summaries_with_replay: Vec<(SessionSummary, String)> = futures::stream::iter(handles)
             .map(|handle| Self::collect_summary_and_replay(handle, timeout))
-            .collect();
-
-        let summaries_with_replay: Vec<(SessionSummary, String)> = futures::future::join_all(futs)
-            .await
-            .into_iter()
-            .flatten()
-            .collect();
+            .buffer_unordered(THOUGHT_SNAPSHOT_COLLECTION_CONCURRENCY)
+            .filter_map(futures::future::ready)
+            .collect()
+            .await;
 
         let active_pane_session_ids = self
             .active_pane_session_ids_for_summaries(

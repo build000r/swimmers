@@ -48,15 +48,15 @@ static REMOTE_TARGET_SESSION_CACHE: OnceLock<Mutex<HashMap<String, RemoteTargetS
 #[derive(Debug)]
 pub struct RemoteSessionError {
     status: StatusCode,
-    code: &'static str,
+    code: String,
     message: String,
 }
 
 impl RemoteSessionError {
-    fn new(status: StatusCode, code: &'static str, message: impl Into<String>) -> Self {
+    fn new(status: StatusCode, code: impl Into<String>, message: impl Into<String>) -> Self {
         Self {
             status,
-            code,
+            code: code.into(),
             message: message.into(),
         }
     }
@@ -65,12 +65,12 @@ impl RemoteSessionError {
         &self.message
     }
 
-    pub(crate) fn code(&self) -> &'static str {
-        self.code
+    pub(crate) fn code(&self) -> &str {
+        &self.code
     }
 
     pub fn display_message(&self, status: impl std::fmt::Display) -> String {
-        ErrorResponse::with_message(self.code, &self.message).display_message(status)
+        ErrorResponse::with_message(self.code.as_str(), &self.message).display_message(status)
     }
 
     pub fn into_response(self) -> Response {
@@ -2631,15 +2631,43 @@ async fn remote_response_error(
     fallback: String,
 ) -> RemoteSessionError {
     let status = response.status();
-    let message = match response.json::<ErrorResponse>().await {
-        Ok(body) => body.message.unwrap_or(fallback),
-        Err(_) => fallback,
-    };
+    let mut response_code = code.to_string();
+    let mut message = fallback;
+    if let Ok(body) = response.json::<ErrorResponse>().await {
+        if !body.code.trim().is_empty() {
+            response_code = body.code;
+        }
+        if let Some(remote_message) = body.message {
+            message = remote_message;
+        }
+    }
     let message = redact_remote_secret_values(target, message);
+    if is_safe_remote_client_error(status) {
+        return RemoteSessionError::new(status, response_code, message);
+    }
     RemoteSessionError::new(
         StatusCode::BAD_GATEWAY,
         code,
         format!("{message} (remote status {status})"),
+    )
+}
+
+fn is_safe_remote_client_error(status: StatusCode) -> bool {
+    matches!(
+        status,
+        StatusCode::BAD_REQUEST
+            | StatusCode::UNAUTHORIZED
+            | StatusCode::FORBIDDEN
+            | StatusCode::NOT_FOUND
+            | StatusCode::METHOD_NOT_ALLOWED
+            | StatusCode::NOT_ACCEPTABLE
+            | StatusCode::CONFLICT
+            | StatusCode::GONE
+            | StatusCode::PRECONDITION_FAILED
+            | StatusCode::PAYLOAD_TOO_LARGE
+            | StatusCode::UNSUPPORTED_MEDIA_TYPE
+            | StatusCode::UNPROCESSABLE_ENTITY
+            | StatusCode::TOO_MANY_REQUESTS
     )
 }
 

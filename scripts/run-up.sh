@@ -133,8 +133,60 @@ if [[ "${UP_TARGET_DIR}" != /* ]]; then
   UP_TARGET_DIR="${ROOT_DIR}/${UP_TARGET_DIR}"
 fi
 
+usage() {
+  cat <<'EOF'
+Usage: scripts/run-up.sh
+
+Build or reuse the current-checkout backend, verify required routes, then
+launch the native TUI against that shared backend.
+
+Environment:
+  PORT                         Backend port, default 3210.
+  SWIMMERS_BIND                Backend bind address, default 127.0.0.1.
+  SWIMMERS_UP_FEATURES         Optional Cargo features for backend and TUI.
+  SWIMMERS_TUI_FEATURES        Feature fallback when SWIMMERS_UP_FEATURES is unset.
+  SWIMMERS_UP_TARGET_DIR       Cargo target dir for make up builds.
+  SWIMMERS_UP_SERVER_BIN       Existing swimmers binary to use instead of building.
+  SWIMMERS_UP_SERVER_LOG       Backend log path.
+  SWIMMERS_UP_TUI_SHIM         TUI wrapper path, default scripts/run-tui.sh.
+  SWIMMERS_FRANKENTUI_PKG_DIR  FrankenTerm asset package directory.
+  FRANKENTUI_PKG_DIR           Alternate FrankenTerm asset package directory.
+EOF
+}
+
+parse_args() {
+  while (($#)); do
+    case "$1" in
+      -h|--help)
+        usage
+        exit 0
+        ;;
+      --)
+        shift
+        break
+        ;;
+      -*)
+        printf 'unknown option: %s\n' "$1" >&2
+        printf 'Run scripts/run-up.sh --help for usage.\n' >&2
+        exit 2
+        ;;
+      *)
+        printf 'unexpected argument: %s\n' "$1" >&2
+        printf 'Run scripts/run-up.sh --help for usage.\n' >&2
+        exit 2
+        ;;
+    esac
+  done
+
+  if (($#)); then
+    printf 'unexpected argument: %s\n' "$1" >&2
+    printf 'Run scripts/run-up.sh --help for usage.\n' >&2
+    exit 2
+  fi
+}
+
 announce_urls() {
-  printf 'swimmers shared backend\n'
+  printf 'swimmers shared backend target URLs\n'
   printf '  tui api:  %s\n' "${BASE_URL}"
   if host_is_loopback "${BIND_HOST}" || host_is_wildcard "${BIND_HOST}"; then
     printf '  local:    http://127.0.0.1:%s/\n' "${PORT}"
@@ -574,6 +626,7 @@ ensure_backend() {
 }
 
 main() {
+  parse_args "$@"
   swimmers_require curl
 
   local pkg_dir=""
@@ -595,7 +648,7 @@ main() {
     SWIMMERS_TUI_URL="${BASE_URL}" \
     SWIMMERS_TUI_REUSE_SERVER=1 \
     SWIMMERS_TUI_FEATURES="${UP_FEATURES}" \
-    "${RUN_TUI}" "$@"
+    "${RUN_TUI}"
 }
 
 main "$@"

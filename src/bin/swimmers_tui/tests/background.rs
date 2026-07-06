@@ -403,7 +403,7 @@ fn background_refresh_error_retains_previous_entities() {
     assert_eq!(app.entities.len(), 1, "entities retained after error");
     assert_eq!(
         app.message.as_ref().map(|(m, _)| m.as_str()),
-        Some("backend offline"),
+        Some("backend offline - check server status or restart"),
         "recent success should produce short message, not full diagnostic"
     );
     assert!(
@@ -432,7 +432,7 @@ fn refresh_error_escalates_after_prolonged_outage() {
     app.refresh(layout);
     assert_eq!(
         app.message.as_ref().map(|(m, _)| m.as_str()),
-        Some("backend offline"),
+        Some("backend offline - check server status or restart"),
     );
 
     // Simulate stale last_successful_refresh beyond BACKEND_OFFLINE_ESCALATION.

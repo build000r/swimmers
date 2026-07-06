@@ -1803,6 +1803,43 @@ fn replay_ring_snapshot_preserves_recent_output() {
 }
 
 #[tokio::test]
+async fn build_snapshot_uses_capture_text_without_replay_snapshot_allocation() {
+    let _guard = crate::test_support::ENV_LOCK
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
+    let (_dir, previous_path) = install_fake_tmux("#!/bin/sh\nprintf 'captured text\\n'\n");
+
+    ReplayRing::reset_snapshot_call_count_for_tests();
+    let mut actor = test_actor();
+    actor.replay_ring.push(b"replay fallback\n");
+
+    let snapshot = actor.build_snapshot().await;
+    restore_path(previous_path);
+
+    assert_eq!(snapshot.screen_text, "captured text\n");
+    assert_eq!(ReplayRing::snapshot_call_count_for_tests(), 0);
+}
+
+#[tokio::test]
+async fn build_snapshot_allocates_replay_snapshot_only_after_capture_failure() {
+    let _guard = crate::test_support::ENV_LOCK
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
+    let (_dir, previous_path) =
+        install_fake_tmux("#!/bin/sh\nprintf 'capture failed\\n' >&2\nexit 1\n");
+
+    ReplayRing::reset_snapshot_call_count_for_tests();
+    let mut actor = test_actor();
+    actor.replay_ring.push(b"replay fallback\n");
+
+    let snapshot = actor.build_snapshot().await;
+    restore_path(previous_path);
+
+    assert_eq!(snapshot.screen_text, "replay fallback\n");
+    assert_eq!(ReplayRing::snapshot_call_count_for_tests(), 1);
+}
+
+#[tokio::test]
 async fn query_tmux_session_created_reads_epoch_from_tmux() {
     let dir = tempfile::tempdir().expect("tempdir");
     let bin_dir = dir.path().join("bin");

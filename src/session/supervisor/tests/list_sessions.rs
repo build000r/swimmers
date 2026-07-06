@@ -539,3 +539,52 @@ async fn collect_session_snapshots_fans_out_actor_requests_before_timeouts() {
     ]);
     assert_eq!(observed, expected);
 }
+
+#[tokio::test]
+async fn collect_session_snapshots_bounds_in_flight_actor_requests() {
+    let supervisor = SessionSupervisor::new(Arc::new(Config::default()));
+    let (observed_tx, mut observed_rx) = mpsc::unbounded_channel();
+    let cap = super::super::THOUGHT_SNAPSHOT_COLLECTION_CONCURRENCY;
+
+    for idx in 0..(cap + 1) {
+        supervisor
+            .insert_test_handle(
+                spawn_observed_hung_summary_handle(&format!("sess-{idx}"), "", observed_tx.clone())
+                    .await,
+            )
+            .await;
+    }
+    drop(observed_tx);
+
+    let collect = supervisor.collect_session_snapshots_with_timeout(Duration::from_secs(10));
+    tokio::pin!(collect);
+    let observations = async {
+        let mut observed = Vec::new();
+        for _ in 0..cap {
+            let session_id = tokio::time::timeout(Duration::from_secs(1), observed_rx.recv())
+                .await
+                .expect("bounded snapshot collection should fill the first batch")
+                .expect("observed summary request");
+            observed.push(session_id);
+        }
+        let extra_request =
+            tokio::time::timeout(Duration::from_millis(100), observed_rx.recv()).await;
+        (observed, extra_request)
+    };
+    tokio::pin!(observations);
+
+    let (observed, extra_request) = tokio::time::timeout(Duration::from_secs(2), async {
+        tokio::select! {
+            _ = &mut collect => panic!("hung actors should keep collection pending"),
+            result = &mut observations => result,
+        }
+    })
+    .await
+    .expect("snapshot collection should start only the bounded first batch");
+
+    assert_eq!(observed.len(), cap);
+    assert!(
+        extra_request.is_err(),
+        "snapshot collection should wait for an in-flight slot before requesting another actor"
+    );
+}

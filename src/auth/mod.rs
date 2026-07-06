@@ -10,7 +10,7 @@
 use std::sync::Arc;
 
 use axum::extract::Request;
-use axum::http::StatusCode;
+use axum::http::{header, uri::Authority, HeaderMap, StatusCode, Uri};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 use axum::Json;
@@ -100,6 +100,17 @@ fn forbidden_response() -> Response {
         .into_response()
 }
 
+fn untrusted_request_response() -> Response {
+    (
+        StatusCode::FORBIDDEN,
+        Json(ErrorResponse {
+            code: "UNTRUSTED_REQUEST_ORIGIN".to_string(),
+            message: Some("Host or Origin is not allowed for trusted auth mode".to_string()),
+        }),
+    )
+        .into_response()
+}
+
 // ---------------------------------------------------------------------------
 // Middleware
 // ---------------------------------------------------------------------------
@@ -129,10 +140,123 @@ fn token_mode_auth_info(config: &Config, request: &Request) -> Result<AuthInfo, 
     Err(not_authenticated_response())
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct TrustedAuthority {
+    host: String,
+    port: Option<u16>,
+}
+
+#[allow(clippy::result_large_err)]
+pub(crate) fn validate_trusted_request_headers(
+    config: &Config,
+    headers: &HeaderMap,
+) -> Result<(), Response> {
+    if matches!(config.auth_mode, AuthMode::Token) {
+        return Ok(());
+    }
+
+    let Some(host) = trusted_authority_from_header(headers, header::HOST) else {
+        return Err(untrusted_request_response());
+    };
+    if !trusted_authority_allowed(config, &host) {
+        return Err(untrusted_request_response());
+    }
+
+    if let Some(origin) = headers.get(header::ORIGIN) {
+        let Some(origin) = trusted_authority_from_origin(origin.to_str().ok()) else {
+            return Err(untrusted_request_response());
+        };
+        if origin != host {
+            return Err(untrusted_request_response());
+        }
+    }
+
+    Ok(())
+}
+
+fn trusted_authority_from_header(
+    headers: &HeaderMap,
+    name: header::HeaderName,
+) -> Option<TrustedAuthority> {
+    headers
+        .get(name)
+        .and_then(|value| value.to_str().ok())
+        .and_then(trusted_authority_from_authority_str)
+}
+
+fn trusted_authority_from_origin(value: Option<&str>) -> Option<TrustedAuthority> {
+    let uri = value?.trim().parse::<Uri>().ok()?;
+    let scheme = uri.scheme_str()?;
+    if !matches!(scheme, "http" | "https") {
+        return None;
+    }
+    trusted_authority_from_authority(uri.authority()?)
+}
+
+fn trusted_authority_from_authority_str(value: &str) -> Option<TrustedAuthority> {
+    let authority = value.trim().parse::<Authority>().ok()?;
+    trusted_authority_from_authority(&authority)
+}
+
+fn trusted_authority_from_authority(authority: &Authority) -> Option<TrustedAuthority> {
+    let host = normalize_authority_host(authority.host())?;
+    Some(TrustedAuthority {
+        host,
+        port: authority.port_u16(),
+    })
+}
+
+fn normalize_authority_host(host: &str) -> Option<String> {
+    let host = host
+        .trim()
+        .trim_start_matches('[')
+        .trim_end_matches(']')
+        .to_ascii_lowercase();
+    (!host.is_empty()).then_some(host)
+}
+
+fn trusted_authority_allowed(config: &Config, authority: &TrustedAuthority) -> bool {
+    match config.auth_mode {
+        AuthMode::LocalTrust => trusted_host_is_loopback(&authority.host),
+        AuthMode::TailnetTrust => {
+            trusted_host_matches_config_bind(config, &authority.host)
+                && trusted_host_is_tailnet(&authority.host)
+        }
+        AuthMode::Token => true,
+    }
+}
+
+fn trusted_host_matches_config_bind(config: &Config, host: &str) -> bool {
+    normalize_authority_host(crate::cli::bind_host(&config.bind)).is_some_and(|bind| bind == host)
+}
+
+fn trusted_host_is_loopback(host: &str) -> bool {
+    host == "localhost"
+        || host
+            .parse::<std::net::IpAddr>()
+            .map(|ip| ip.is_loopback())
+            .unwrap_or(false)
+}
+
+fn trusted_host_is_tailnet(host: &str) -> bool {
+    match host.parse::<std::net::IpAddr>() {
+        Ok(std::net::IpAddr::V4(ip)) => {
+            let octets = ip.octets();
+            octets[0] == 100 && (64..=127).contains(&octets[1])
+        }
+        Ok(std::net::IpAddr::V6(ip)) => {
+            let segments = ip.segments();
+            segments[0] == 0xfd7a && segments[1] == 0x115c && segments[2] == 0xa1e0
+        }
+        Err(_) => false,
+    }
+}
+
 #[allow(clippy::result_large_err)]
 fn auth_info_for_request(config: &Config, request: &Request) -> Result<AuthInfo, Response> {
     match config.auth_mode {
         AuthMode::LocalTrust | AuthMode::TailnetTrust => {
+            validate_trusted_request_headers(config, request.headers())?;
             Ok(AuthInfo::new(OPERATOR_SCOPES.to_vec()))
         }
         AuthMode::Token => token_mode_auth_info(config, request),
@@ -146,9 +270,9 @@ fn bearer_tokens_eq(provided: &str, expected: &str) -> bool {
 /// Axum `from_fn` middleware that enforces authentication based on the
 /// application's [`Config::auth_mode`].
 ///
-/// In `LocalTrust` and `TailnetTrust` modes this is a transparent pass-through:
-/// an `AuthInfo` with all operator scopes is inserted and the request continues
-/// immediately. Startup validation controls where those trust modes may bind.
+/// In `LocalTrust` and `TailnetTrust` modes the request Host and any browser
+/// Origin must still match the configured trust boundary before operator scopes
+/// are inserted. Startup validation controls where those trust modes may bind.
 ///
 /// In `Token` mode the `Authorization: Bearer <token>` header is validated
 /// against [`Config::auth_token`]. A missing or invalid token results in a 401
@@ -196,6 +320,42 @@ fn extract_bearer_token(request: &Request) -> Option<&str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn request_with_host_origin(host: &str, origin: Option<&str>) -> Request {
+        let mut request = Request::builder()
+            .uri("/test")
+            .body(axum::body::Body::empty())
+            .unwrap();
+        request.headers_mut().insert(
+            header::HOST,
+            axum::http::HeaderValue::from_str(host).expect("valid host header"),
+        );
+        if let Some(origin) = origin {
+            request.headers_mut().insert(
+                header::ORIGIN,
+                axum::http::HeaderValue::from_str(origin).expect("valid origin header"),
+            );
+        }
+        request
+    }
+
+    fn token_request_with_host_origin(host: &str, origin: Option<&str>, token: &str) -> Request {
+        let mut request = request_with_host_origin(host, origin);
+        request.headers_mut().insert(
+            header::AUTHORIZATION,
+            axum::http::HeaderValue::from_str(&format!("Bearer {token}"))
+                .expect("valid authorization header"),
+        );
+        request
+    }
+
+    fn trust_mode_config(auth_mode: AuthMode, bind: &str) -> Config {
+        Config {
+            auth_mode,
+            bind: bind.to_string(),
+            ..Config::default()
+        }
+    }
 
     #[test]
     fn auth_info_has_scope() {
@@ -384,22 +544,113 @@ mod tests {
 
     #[test]
     fn auth_info_for_request_trust_modes_grant_operator_scopes() {
-        let request = Request::builder()
-            .uri("/test")
-            .body(axum::body::Body::empty())
-            .unwrap();
-
-        for auth_mode in [AuthMode::LocalTrust, AuthMode::TailnetTrust] {
-            let config = Config {
-                auth_mode,
-                ..Config::default()
-            };
+        for (auth_mode, bind, host, origin) in [
+            (
+                AuthMode::LocalTrust,
+                "127.0.0.1",
+                "127.0.0.1:3210",
+                "http://127.0.0.1:3210",
+            ),
+            (
+                AuthMode::TailnetTrust,
+                "100.64.1.2",
+                "100.64.1.2:3210",
+                "http://100.64.1.2:3210",
+            ),
+        ] {
+            let request = request_with_host_origin(host, Some(origin));
+            let config = trust_mode_config(auth_mode, bind);
             let info = auth_info_for_request(&config, &request).expect("trust mode auth");
 
             assert!(info.has_scope(AuthScope::SessionsRead));
             assert!(info.has_scope(AuthScope::SessionsWrite));
             assert!(info.has_scope(AuthScope::StreamWrite));
         }
+    }
+
+    #[test]
+    fn trusted_request_rejects_hostile_host_before_granting_scopes() {
+        for config in [
+            trust_mode_config(AuthMode::LocalTrust, "127.0.0.1"),
+            trust_mode_config(AuthMode::TailnetTrust, "100.64.1.2"),
+        ] {
+            let request = request_with_host_origin("attacker.test:3210", None);
+            let response =
+                auth_info_for_request(&config, &request).expect_err("hostile host rejected");
+
+            assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        }
+    }
+
+    #[test]
+    fn trusted_request_rejects_hostile_origin_before_granting_scopes() {
+        for (config, host) in [
+            (
+                trust_mode_config(AuthMode::LocalTrust, "127.0.0.1"),
+                "127.0.0.1:3210",
+            ),
+            (
+                trust_mode_config(AuthMode::TailnetTrust, "100.64.1.2"),
+                "100.64.1.2:3210",
+            ),
+        ] {
+            let request = request_with_host_origin(host, Some("https://attacker.test"));
+            let response =
+                auth_info_for_request(&config, &request).expect_err("hostile origin rejected");
+
+            assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        }
+    }
+
+    #[test]
+    fn trusted_request_allows_loopback_and_configured_tailnet_hosts() {
+        for (config, host, origin) in [
+            (
+                trust_mode_config(AuthMode::LocalTrust, "127.0.0.1"),
+                "localhost:3210",
+                "http://localhost:3210",
+            ),
+            (
+                trust_mode_config(AuthMode::LocalTrust, "127.0.0.1"),
+                "127.9.8.7:3210",
+                "http://127.9.8.7:3210",
+            ),
+            (
+                trust_mode_config(AuthMode::LocalTrust, "::1"),
+                "[::1]:3210",
+                "http://[::1]:3210",
+            ),
+            (
+                trust_mode_config(AuthMode::TailnetTrust, "100.64.1.2"),
+                "100.64.1.2:3210",
+                "http://100.64.1.2:3210",
+            ),
+        ] {
+            let request = request_with_host_origin(host, Some(origin));
+            let info = auth_info_for_request(&config, &request).expect("trusted request allowed");
+
+            assert!(info.has_scope(AuthScope::SessionsWrite));
+        }
+    }
+
+    #[test]
+    fn trusted_request_token_mode_ignores_host_origin_guard() {
+        let config = Config {
+            auth_mode: AuthMode::Token,
+            auth_token: Some("secret".to_string()),
+            observer_token: Some("observer".to_string()),
+            ..Config::default()
+        };
+        let request = token_request_with_host_origin(
+            "attacker.test:3210",
+            Some("https://attacker.test"),
+            "secret",
+        );
+
+        let info =
+            auth_info_for_request(&config, &request).expect("token mode still authenticates");
+
+        assert!(info.has_scope(AuthScope::SessionsWrite));
     }
 
     #[test]
