@@ -3,6 +3,8 @@ use std::str::FromStr;
 
 use serde::{Deserialize, Serialize};
 
+use crate::tmux_target::TmuxTarget;
+
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum AuthMode {
@@ -144,6 +146,7 @@ pub struct Config {
     pub replay_buffer_size: usize,
     pub outbound_queue_bound: usize,
     pub thought_backend: ThoughtBackend,
+    pub tmux_target: TmuxTarget,
 }
 
 impl Default for Config {
@@ -160,6 +163,7 @@ impl Default for Config {
             // NOTE: empirical default — sized well above the 600-frame burst floor verified in tests.
             outbound_queue_bound: 4096,
             thought_backend: ThoughtBackend::Daemon,
+            tmux_target: TmuxTarget::Default,
         }
     }
 }
@@ -406,6 +410,37 @@ fn apply_env_replay_buffer_size(load: &mut ConfigLoad, defaults: &Config) {
     }
 }
 
+fn apply_env_tmux_target(load: &mut ConfigLoad) {
+    let socket_name = parse_env_non_empty_string(load, "SWIMMERS_TMUX_SOCKET_NAME");
+    let socket_path = parse_env_non_empty_string(load, "SWIMMERS_TMUX_SOCKET_PATH");
+
+    match (socket_name, socket_path) {
+        (Some(name), None) => {
+            let target = TmuxTarget::socket_name(name);
+            apply_validated_tmux_target(load, target, "SWIMMERS_TMUX_SOCKET_NAME");
+        }
+        (None, Some(path)) => {
+            let target = TmuxTarget::socket_path(path);
+            apply_validated_tmux_target(load, target, "SWIMMERS_TMUX_SOCKET_PATH");
+        }
+        (Some(_), Some(_)) => push_error(
+            load,
+            "SWIMMERS_TMUX_SOCKET_PATH",
+            "set either SWIMMERS_TMUX_SOCKET_NAME or SWIMMERS_TMUX_SOCKET_PATH, not both",
+        ),
+        (None, None) => {}
+    }
+}
+
+fn apply_validated_tmux_target(load: &mut ConfigLoad, target: TmuxTarget, key: &'static str) {
+    match target.validate() {
+        Ok(()) => {
+            load.config.tmux_target = target;
+        }
+        Err(error) => push_error(load, key, error.to_string()),
+    }
+}
+
 fn validate_auth_token_mode(load: &mut ConfigLoad) {
     if matches!(load.config.auth_mode, AuthMode::Token) && load.config.auth_token.is_none() {
         push_error(
@@ -468,6 +503,7 @@ impl Config {
         apply_env_thought_tick_ms(&mut load, &defaults);
         apply_env_outbound_queue_bound(&mut load, &defaults);
         apply_env_replay_buffer_size(&mut load, &defaults);
+        apply_env_tmux_target(&mut load);
         validate_auth_cross_fields(&mut load);
 
         load
@@ -490,6 +526,8 @@ mod tests {
         "SWIMMERS_THOUGHT_TICK_MS",
         "SWIMMERS_OUTBOUND_QUEUE_BOUND",
         "SWIMMERS_REPLAY_BUFFER_SIZE",
+        "SWIMMERS_TMUX_SOCKET_NAME",
+        "SWIMMERS_TMUX_SOCKET_PATH",
     ];
 
     fn clear_config_env() {
@@ -563,6 +601,42 @@ mod tests {
     #[test]
     fn default_config_uses_daemon_backend() {
         assert_eq!(Config::default().thought_backend, ThoughtBackend::Daemon);
+    }
+
+    #[test]
+    fn default_config_uses_default_tmux_target() {
+        assert_eq!(Config::default().tmux_target, TmuxTarget::Default);
+    }
+
+    #[test]
+    fn config_reads_tmux_socket_name_from_env() {
+        let load = load_with_env(&[("SWIMMERS_TMUX_SOCKET_NAME", "tiktok")]);
+        assert_eq!(load.config.tmux_target, TmuxTarget::socket_name("tiktok"));
+        assert!(load.diagnostics.is_empty());
+    }
+
+    #[test]
+    fn config_reads_tmux_socket_path_from_env() {
+        let load = load_with_env(&[("SWIMMERS_TMUX_SOCKET_PATH", "/tmp/tmux-critical")]);
+        assert_eq!(
+            load.config.tmux_target,
+            TmuxTarget::socket_path("/tmp/tmux-critical")
+        );
+        assert!(load.diagnostics.is_empty());
+    }
+
+    #[test]
+    fn config_rejects_conflicting_tmux_socket_env() {
+        let load = load_with_env(&[
+            ("SWIMMERS_TMUX_SOCKET_NAME", "tiktok"),
+            ("SWIMMERS_TMUX_SOCKET_PATH", "/tmp/tmux-critical"),
+        ]);
+        assert_eq!(load.config.tmux_target, TmuxTarget::Default);
+        assert!(load.has_errors());
+        assert_eq!(
+            diagnostic_for(&load, "SWIMMERS_TMUX_SOCKET_PATH").level,
+            ConfigDiagnosticLevel::Error
+        );
     }
 
     #[test]

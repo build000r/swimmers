@@ -425,6 +425,7 @@ mod tests {
         SessionSummary {
             session_id: session_id.to_string(),
             tmux_name: tmux_name.to_string(),
+            tmux_target: crate::tmux_target::TmuxTarget::Default,
             state,
             current_command: None,
             state_evidence: StateEvidence::new("test"),

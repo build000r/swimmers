@@ -54,6 +54,7 @@ async fn fetch_remote_git_diff_response(session_id: &str) -> Option<Response> {
     Some(fetch_remote_target_git_diff_response(&target, remote_session_id).await)
 }
 
+#[allow(clippy::result_large_err)]
 fn remote_git_diff_target(
     session_id: &str,
 ) -> Result<Option<(LaunchTargetSummary, &str)>, Response> {

@@ -3,10 +3,17 @@
   "entry": "main",
   "shortLink": { "username": "buildooor", "slug": "swimmers-project-status" },
   "links": [
-    { "from": "main", "label": "Open proof status", "to": "proof-status", "title": "Open swimmers proof status" },
-    { "from": "main", "label": "Open primary flows", "to": "primary-flows", "title": "Open swimmers primary flows" },
     { "from": "main", "label": "Open epic status", "to": "epic-gantt", "title": "Open swimmers epic status" },
-    { "from": "main", "label": "Open next move", "to": "next-move", "title": "Open swimmers next move" }
+    { "from": "main", "label": "Open epic map", "to": "epic-map", "title": "Open swimmers epic dependency map" },
+    { "from": "main", "label": "Open primary flows", "to": "primary-flows", "title": "Open swimmers primary flows" },
+    { "from": "main", "label": "Open lifecycle", "to": "lifecycle", "title": "Open swimmers session lifecycle" },
+    { "from": "main", "label": "Open architecture", "to": "architecture-boundary", "title": "Open swimmers architecture boundary" },
+    { "from": "main", "label": "Open proof status", "to": "proof-status", "title": "Open swimmers proof status" },
+    { "from": "main", "label": "Open drift", "to": "drift", "title": "Open swimmers docs-code-beads drift" },
+    { "from": "main", "label": "Open next move", "to": "next-move", "title": "Open swimmers next move" },
+    { "from": "main", "label": "Open data model", "to": "erd", "title": "Open swimmers file-store ERD" },
+    { "from": "architecture-boundary", "label": "Open data model", "to": "erd", "title": "Open swimmers file-store ERD" },
+    { "from": "primary-flows", "label": "Open lifecycle", "to": "lifecycle", "title": "Open swimmers session lifecycle" }
   ]
 }
 -->
@@ -14,13 +21,22 @@
 ## chart main Swimmers Project Status Crux
 ```mermaid
 flowchart LR
-  vision["swimmers: visual tmux aquarium and thought rail"]:::gray
-  suite["GREEN cargo test green 677 lib 3 main 358 tui 9 metamorphic"]:::green
-  install["GREEN cargo install proven swimmers and swimmers-tui 0.3.0"]:::green
-  smoke["GREEN fresh-server health and live tmux discovery smoke 0by.8"]:::green
-  perf["GREEN fleet list_sessions p95 375ms to 844us 0by.9"]:::green
-  publish["GREEN this status stack published 0by.6"]:::green
-  vision --> suite --> install --> smoke --> perf --> publish
+  vision["swimmers: visual tmux aquarium, thought rail, and browser cockpit for parallel agents"]:::gray
+  core["GREEN Rust API plus native TUI aquarium and thought bridge shipped"]:::green
+  web["GREEN web Trogdor cockpit terminal sheets islands with Node web tests and Web CI gate"]:::green
+  fleet["GREEN remote multi-SSH fleet environments and operator-pressure atlas"]:::green
+  release["GREEN v0.3.0 tagged curl-sh installer macOS-arm64 plus Linux prebuilt binaries"]:::green
+  crates["RED cargo install swimmers still planned crate not published to crates.io no open bead"]:::red
+  next["Next move cut 0.3.x for unreleased Web-CI work or publish crate"]:::gray
+  vision --> core --> web --> fleet --> release
+  release --> crates --> next
+  class vision gray
+  class core green
+  class web green
+  class fleet green
+  class release green
+  class crates red
+  class next gray
   classDef green fill:#dff7df,stroke:#20833a,stroke-width:2px,color:#0f2f18
   classDef yellow fill:#fff3bf,stroke:#b7791f,stroke-width:2px,color:#3a2a00
   classDef red fill:#ffd6d6,stroke:#c53030,stroke-width:2px,color:#3a0505
@@ -30,27 +46,47 @@ flowchart LR
 ## chart epic-gantt Swimmers Epic Status
 ```mermaid
 gantt
-  title swimmers status as of 2026-05-29
+  title swimmers status as of 2026-07-05
   dateFormat YYYY-MM-DD
-  section GREEN Proven
-  GREEN full cargo test suite green :done, 2026-05-29, 1d
-  GREEN restricted PATH prompt cleanup fix 0by.7 :done, 2026-05-28, 1d
-  GREEN install and TUI API smoke 0by.8 :done, 2026-05-29, 1d
-  GREEN fleet-scale profiling 0by.9 :done, 2026-05-29, 1d
-  GREEN spawn prompt-file refactor 0by.10 :done, 2026-05-29, 1d
-  GREEN publish status stack 0by.6 :done, 2026-05-29, 1d
+  section GREEN Shipped
+  GREEN core API TUI thought bridge :done, 2026-04-08, 8d
+  GREEN v0.2.0 in-process TUI bootstrap :done, 2026-04-16, 1d
+  GREEN wave-3 follow-ups 0by.7-0by.10 :done, 2026-05-28, 2d
+  GREEN web Trogdor cockpit surface :done, 2026-05-30, 12d
+  GREEN remote multi-SSH fleet and environments :done, 2026-06-05, 10d
+  GREEN state-evidence and operator-pressure :done, 2026-06-18, 3d
+  GREEN v0.3.0 release installer prebuilt bins :done, 2026-06-20, 1d
+  section YELLOW Unreleased on main
+  YELLOW Web CI gate landed awaiting next tag :active, 2026-07-04, 1d
+  section RED No bead
+  RED publish crate to crates.io :crit, 2026-07-05, 1d
 ```
 
 ## chart epic-map Swimmers Dependency Map
 ```mermaid
 flowchart TD
-  api["GREEN API TUI thought bridge suite green"]:::green
-  fix["GREEN DONE prompt cleanup test repair 0by.7"]:::green
-  smoke["GREEN DONE install and local smoke 0by.8"]:::green
-  perf["GREEN DONE list_sessions tmux thought profiling 0by.9"]:::green
-  refactor["GREEN DONE spawn prompt-file refactor 0by.10"]:::green
-  publish["GREEN DONE publish status stack 0by.6"]:::green
-  api --> fix --> smoke --> perf --> refactor --> publish
+  core["GREEN DONE core API TUI thought bridge"]:::green
+  boot["GREEN DONE v0.2.0 in-process TUI bootstrap"]:::green
+  wave3["GREEN DONE wave-3 follow-ups 0by.7-0by.10"]:::green
+  web["GREEN DONE web Trogdor cockpit terminal sheets islands"]:::green
+  remote["GREEN DONE remote multi-SSH fleet and environments"]:::green
+  evidence["GREEN DONE state-evidence and operator-pressure atlas"]:::green
+  release["GREEN DONE v0.3.0 installer and prebuilt binaries"]:::green
+  webci["YELLOW PARTIAL Web CI gate on main unreleased"]:::yellow
+  crates["RED PLANNED publish crate to crates.io no bead"]:::red
+  core --> boot --> wave3
+  wave3 --> web --> remote --> evidence --> release
+  release --> webci
+  release --> crates
+  class core green
+  class boot green
+  class wave3 green
+  class web green
+  class remote green
+  class evidence green
+  class release green
+  class webci yellow
+  class crates red
   classDef green fill:#dff7df,stroke:#20833a,stroke-width:2px,color:#0f2f18
   classDef yellow fill:#fff3bf,stroke:#b7791f,stroke-width:2px,color:#3a2a00
   classDef red fill:#ffd6d6,stroke:#c53030,stroke-width:2px,color:#3a0505
@@ -59,13 +95,85 @@ flowchart TD
 ## chart primary-flows Swimmers Primary Flows
 ```mermaid
 flowchart TD
-  operator["Parallel-agent operator"]:::gray
-  discover["GREEN discover tmux sessions"]:::green
-  aquarium["GREEN TUI aquarium state model"]:::green
-  thought["GREEN thought bridge"]:::green
-  launch["GREEN install and launch smoke 0by.8"]:::green
-  fleet["GREEN fleet-scale list p95 844us 0by.9"]:::green
-  operator --> discover --> aquarium --> thought --> launch --> fleet
+  operator["Operator running many tmux agents"]:::gray
+  discover["GREEN discover tmux sessions via API"]:::green
+  aquarium["GREEN TUI aquarium state-driven fish sprites"]:::green
+  thought["GREEN thought rail per-session AI thought stream"]:::green
+  handoff["GREEN native handoff open in iTerm or Ghostty plus attention group"]:::green
+  web["GREEN web cockpit browser terminal Activity Diffs Logs Artifacts Skills"]:::green
+  batch["GREEN group-input send one response to many ready sessions"]:::green
+  remote["GREEN point TUI at remote server or route launches to SSH targets"]:::green
+  operator --> discover --> aquarium --> thought
+  aquarium --> handoff
+  discover --> web --> batch
+  discover --> remote
+  class operator gray
+  class discover green
+  class aquarium green
+  class thought green
+  class handoff green
+  class web green
+  class batch green
+  class remote green
+  classDef green fill:#dff7df,stroke:#20833a,stroke-width:2px,color:#0f2f18
+  classDef yellow fill:#fff3bf,stroke:#b7791f,stroke-width:2px,color:#3a2a00
+  classDef gray fill:#eef2f7,stroke:#64748b,stroke-width:1px,color:#111827
+```
+
+## chart lifecycle Swimmers Session Lifecycle
+```mermaid
+flowchart TD
+  spawn["GREEN discover or adopt tmux session"]:::green
+  idle["GREEN idle state fish dozing"]:::green
+  active["GREEN active swimming from pane activity"]:::green
+  busy["GREEN busy bubbling high token throughput"]:::green
+  attention["GREEN attention or error x-eyes needs operator"]:::green
+  evidence["GREEN state_evidence marks observed vs stale or inferred"]:::green
+  input["GREEN operator input or group-input batch response"]:::green
+  sleep["GREEN drowsy sleeping deep-sleep exited"]:::green
+  spawn --> idle --> active --> busy --> attention
+  attention --> input --> active
+  active --> sleep
+  busy --> evidence
+  attention --> evidence
+  class spawn green
+  class idle green
+  class active green
+  class busy green
+  class attention green
+  class evidence green
+  class input green
+  class sleep green
+  classDef green fill:#dff7df,stroke:#20833a,stroke-width:2px,color:#0f2f18
+  classDef yellow fill:#fff3bf,stroke:#b7791f,stroke-width:2px,color:#3a2a00
+  classDef red fill:#ffd6d6,stroke:#c53030,stroke-width:2px,color:#3a0505
+```
+
+## chart architecture-boundary Swimmers Architecture Boundary
+```mermaid
+flowchart TD
+  tmux["GRAY tmux the only external dependency"]:::gray
+  api["GREEN Rust API server supervisor session discovery"]:::green
+  inproc["GREEN InProcessApi embedded mode single swimmers-tui binary"]:::green
+  tui["GREEN native TUI ratatui aquarium client"]:::green
+  web["GREEN web surface axum static assets plus WS sessions"]:::green
+  store["GREEN file-based JSON persistence no database no Docker"]:::green
+  metrics["GREEN Prometheus GET metrics auth-protected"]:::green
+  remote["GREEN remote-sessions proxy and SSH-only handoff targets"]:::green
+  tmux --> api
+  api --> inproc --> tui
+  api --> web
+  api --> store
+  api --> metrics
+  api --> remote
+  class tmux gray
+  class api green
+  class inproc green
+  class tui green
+  class web green
+  class store green
+  class metrics green
+  class remote green
   classDef green fill:#dff7df,stroke:#20833a,stroke-width:2px,color:#0f2f18
   classDef yellow fill:#fff3bf,stroke:#b7791f,stroke-width:2px,color:#3a2a00
   classDef gray fill:#eef2f7,stroke:#64748b,stroke-width:1px,color:#111827
@@ -74,31 +182,120 @@ flowchart TD
 ## chart proof-status Swimmers Proof Status
 ```mermaid
 flowchart TD
-  read["GREEN README and VISION read"]:::green
-  cargo["GREEN cargo test exit 0 zero failures"]:::green
-  detail["GREEN grok cleanup unknown-target and concurrency tests pass"]:::green
-  install["GREEN cargo install --path . both bins run 0.3.0"]:::green
-  health["GREEN fresh server health and version ok no stale state"]:::green
-  discovery["GREEN GET v1 sessions discovered live tmux session"]:::green
-  perf["GREEN profiling artifacts 20260529T015943Z-xso"]:::green
-  caveat["GRAY interactive TUI not auto-driven needs PTY covered by run-tui.sh shim"]:::gray
-  read --> cargo --> detail --> install --> health --> discovery --> perf
-  discovery --> caveat
+  ci["GREEN CI test clippy fmt rustdoc gate on every push and PR"]:::green
+  webci["GREEN Web CI npm ci tsc bounded Node web tests and Vite build"]:::green
+  changelog["GREEN CHANGELOG documents 0.3.0 shipped surfaces"]:::green
+  release["GREEN v0.3.0 tagged release notes rendered from CHANGELOG block"]:::green
+  beads["GREEN 709 beads all closed 0 open per br stats"]:::green
+  localtest["GRAY cargo test NOT run here disk 94 percent no builds allowed"]:::gray
+  tui["GRAY interactive TUI needs PTY not auto-driven relies on run-tui.sh shim"]:::gray
+  crates["RED no crates.io publish proof install swimmers path unverified"]:::red
+  ci --> webci --> changelog --> release --> beads
+  beads --> localtest
+  beads --> tui
+  release --> crates
+  class ci green
+  class webci green
+  class changelog green
+  class release green
+  class beads green
+  class localtest gray
+  class tui gray
+  class crates red
   classDef green fill:#dff7df,stroke:#20833a,stroke-width:2px,color:#0f2f18
   classDef yellow fill:#fff3bf,stroke:#b7791f,stroke-width:2px,color:#3a2a00
   classDef red fill:#ffd6d6,stroke:#c53030,stroke-width:2px,color:#3a0505
   classDef gray fill:#eef2f7,stroke:#64748b,stroke-width:1px,color:#111827
 ```
 
+## chart drift Swimmers Docs Code Beads Drift
+```mermaid
+flowchart TD
+  stale["RED prior status stack was stale frozen at 2026-05-29 wave-3 only"]:::red
+  fixed["GREEN this refresh reconciles web remote release surfaces landed since"]:::green
+  beadsgap["RED beads DB shows 0 open yet crates.io publish promise has no covering bead"]:::red
+  readme["GREEN README honestly marks cargo install swimmers as planned matches code"]:::green
+  unreleased["YELLOW Unreleased Web-CI work on main not yet in a tagged release"]:::yellow
+  stale --> fixed
+  fixed --> beadsgap
+  fixed --> readme
+  fixed --> unreleased
+  class stale red
+  class fixed green
+  class beadsgap red
+  class readme green
+  class unreleased yellow
+  classDef green fill:#dff7df,stroke:#20833a,stroke-width:2px,color:#0f2f18
+  classDef yellow fill:#fff3bf,stroke:#b7791f,stroke-width:2px,color:#3a2a00
+  classDef red fill:#ffd6d6,stroke:#c53030,stroke-width:2px,color:#3a0505
+```
+
 ## chart next-move Swimmers Next Move
 ```mermaid
 flowchart TD
-  rank["Power-map customer is operator managing many tmux agents at a glance"]:::gray
-  done["GREEN portfolio wave-3 follow-ups 0by.7 through 0by.10 all landed"]:::green
-  noopen["GREEN no open implementation beads remain after 0by.6"]:::green
-  next["GRAY next move mint fresh ideas via idea-wizard or cut a tagged 0.3.x release"]:::gray
-  rank --> done --> noopen --> next
+  crux["Customer is the operator watching many tmux agents at a glance"]:::gray
+  done["GREEN core web remote release surfaces all shipped and CI-gated"]:::green
+  gap["RED crates.io publish promise open with no covering bead file one first"]:::red
+  move1["Next A open a bead then publish crate to crates.io to honor install swimmers"]:::gray
+  move2["Next B cut 0.3.x to release the Unreleased Web-CI work on main"]:::gray
+  crux --> done --> gap
+  gap --> move1
+  done --> move2
+  class crux gray
+  class done green
+  class gap red
+  class move1 gray
+  class move2 gray
   classDef green fill:#dff7df,stroke:#20833a,stroke-width:2px,color:#0f2f18
-  classDef yellow fill:#fff3bf,stroke:#b7791f,stroke-width:2px,color:#3a2a00
+  classDef red fill:#ffd6d6,stroke:#c53030,stroke-width:2px,color:#3a0505
   classDef gray fill:#eef2f7,stroke:#64748b,stroke-width:1px,color:#111827
+```
+
+## chart erd Swimmers File-Store Data Model
+```mermaid
+erDiagram
+  PERSISTED_SESSION ||--o| THOUGHT_SNAPSHOT : "keyed by session_id"
+  PERSISTED_SESSION }o--o| REPO_THEME : "repo colors override"
+  DIR_GROUP_MEMBERSHIPS ||--o{ DIR_GROUP_DELTA : contains
+  THOUGHT_CONFIG ||--o| PERSISTED_SESSION : "daemon runtime applies"
+  PERSISTED_SESSION {
+    string session_id PK
+    string tmux_name
+    string state
+    string tool
+    u64 token_count
+    u64 context_limit
+    string thought_state
+    string rest_state
+    bool commit_candidate
+  }
+  THOUGHT_SNAPSHOT {
+    string session_id PK
+    string thought
+    string thought_state
+    string thought_source
+    string rest_state
+    u64 token_count
+    u64 context_limit
+    datetime updated_at
+  }
+  THOUGHT_CONFIG {
+    string file "thought_config.json"
+    string daemon_defaults
+  }
+  DIR_GROUP_MEMBERSHIPS {
+    string file "dir_groups.json"
+    string directory PK
+    string group
+  }
+  DIR_GROUP_DELTA {
+    string directory
+    string op "add remove move"
+  }
+  REPO_THEME {
+    string file "colors.json"
+    string repo PK
+    string colors
+    string sprite_override
+  }
 ```

@@ -369,7 +369,7 @@ esac
     supervisor.stale_sessions.write().await.push(stale);
 
     let adopted = supervisor
-        .adopt_tmux_session("alpha".to_string(), None)
+        .adopt_tmux_session("alpha".to_string(), None, None)
         .await
         .expect("adopt stale tmux session");
     assert!(adopted.reused_session_id);
@@ -383,7 +383,7 @@ esac
     assert!(supervisor.stale_sessions.read().await.is_empty());
 
     let duplicate = supervisor
-        .adopt_tmux_session("alpha".to_string(), None)
+        .adopt_tmux_session("alpha".to_string(), None, None)
         .await
         .expect_err("already tracked tmux should be rejected");
     assert_eq!(
@@ -446,7 +446,7 @@ esac
     let supervisor = SessionSupervisor::new(Arc::new(Config::default()));
     assert_eq!(
         supervisor
-            .adopt_tmux_session(String::new(), None)
+            .adopt_tmux_session(String::new(), None, None)
             .await
             .expect_err("empty tmux target should still be rejected"),
         TmuxAdoptError::EmptyTmuxName
@@ -457,7 +457,7 @@ esac
     supervisor.stale_sessions.write().await.push(stale);
 
     let adopted = supervisor
-        .adopt_tmux_session("  padded  ".to_string(), Some("sess_7".to_string()))
+        .adopt_tmux_session("  padded  ".to_string(), None, Some("sess_7".to_string()))
         .await
         .expect("exact whitespace-padded tmux target should be adopted");
     assert!(adopted.reused_session_id);
@@ -474,7 +474,7 @@ esac
     assert_eq!(attach_args, "attach-session\n-t\n=  padded  \n");
 
     let missing_trimmed = supervisor
-        .adopt_tmux_session("padded".to_string(), None)
+        .adopt_tmux_session("padded".to_string(), None, None)
         .await
         .expect_err("trimmed spelling should not match exact tmux target");
     assert_eq!(
@@ -537,7 +537,7 @@ esac
     std::fs::write(&sessions_file, "alpha\n").expect("sessions");
     assert_eq!(
         supervisor
-            .adopt_tmux_session("beta".to_string(), None)
+            .adopt_tmux_session("beta".to_string(), None, None)
             .await
             .expect_err("missing tmux target should be rejected"),
         TmuxAdoptError::TargetNotFound {
@@ -548,7 +548,7 @@ esac
     std::fs::write(&sessions_file, "alpha\nalpha\n").expect("duplicate sessions");
     assert_eq!(
         supervisor
-            .adopt_tmux_session("alpha".to_string(), None)
+            .adopt_tmux_session("alpha".to_string(), None, None)
             .await
             .expect_err("ambiguous tmux target should be rejected"),
         TmuxAdoptError::AmbiguousTarget {
@@ -562,7 +562,7 @@ esac
     supervisor.stale_sessions.write().await.push(stale);
     assert_eq!(
         supervisor
-            .adopt_tmux_session("alpha".to_string(), Some("sess_7".to_string()))
+            .adopt_tmux_session("alpha".to_string(), None, Some("sess_7".to_string()))
             .await
             .expect_err("conflicting stale identity should be rejected"),
         TmuxAdoptError::StaleSessionConflict {

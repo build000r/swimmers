@@ -6,7 +6,13 @@ use tokio::process::Command;
 use tokio::sync::Mutex;
 use tracing::debug;
 
-use super::{liveness, query_tmux_display_message};
+#[cfg(test)]
+use crate::tmux_target::TmuxTarget;
+
+use super::liveness;
+#[cfg(test)]
+use super::metadata::query_tmux_pane_metadata;
+use super::metadata::TmuxPaneMetadata;
 
 const PROCESS_ENTRIES_QUERY_TIMEOUT: Duration = Duration::from_millis(750);
 pub(super) const PROCESS_ENTRIES_CACHE_TTL: Duration = Duration::from_millis(1_500);
@@ -88,25 +94,31 @@ pub(super) fn process_entries_cache() -> &'static Mutex<ProcessEntriesCache> {
     PROCESS_ENTRIES_CACHE.get_or_init(|| Mutex::new(ProcessEntriesCache::default()))
 }
 
+#[cfg(test)]
 pub(super) async fn query_tool_from_tmux_process_tree(
     tmux_name: &str,
+    tmux_target: &TmuxTarget,
 ) -> anyhow::Result<Option<String>> {
-    if let Ok(comm) = query_tmux_current_command(tmux_name).await {
-        if let Some(tool) = crate::types::detect_tool_name(&comm) {
+    let metadata = query_tmux_pane_metadata(tmux_name, tmux_target).await?;
+    detect_tool_from_tmux_pane_metadata(&metadata).await
+}
+
+pub(super) async fn detect_tool_from_tmux_pane_metadata(
+    metadata: &TmuxPaneMetadata,
+) -> anyhow::Result<Option<String>> {
+    if let Ok(comm) = metadata.current_command() {
+        if let Some(tool) = crate::types::detect_tool_name(comm) {
             return Ok(Some(tool.to_string()));
         }
     }
 
-    let pane_pid = query_tmux_pane_pid(tmux_name).await?;
+    let pane_pid = metadata.pane_pid()?;
     let snapshot = query_process_entries().await?;
 
     match detect_tool_from_process_snapshot(pane_pid, snapshot) {
         ProcessSnapshotToolDetection::Detected(tool) => Ok(Some(tool)),
         ProcessSnapshotToolDetection::Stale => {
-            debug!(
-                tmux_name,
-                "skipping tool detection from stale process snapshot"
-            );
+            debug!("skipping tool detection from stale process snapshot");
             Ok(None)
         }
         ProcessSnapshotToolDetection::NotFound => Ok(None),
@@ -143,8 +155,7 @@ pub(super) struct PaneLiveness {
 /// aggregate CPU usage. This is the ground-truth signal for idle vs busy:
 /// if the shell is the leaf process, no command is running regardless of what
 /// the terminal output looks like.
-pub(super) async fn query_pane_liveness(tmux_name: &str) -> anyhow::Result<PaneLiveness> {
-    let pane_pid = query_tmux_pane_pid(tmux_name).await?;
+pub(super) async fn query_pane_liveness_for_pid(pane_pid: u32) -> anyhow::Result<PaneLiveness> {
     let snapshot = query_process_entries().await?;
     let mut liveness = compute_pane_liveness(pane_pid, snapshot.entries);
     liveness.process_snapshot_fresh = snapshot.fresh;
@@ -154,23 +165,6 @@ pub(super) async fn query_pane_liveness(tmux_name: &str) -> anyhow::Result<PaneL
 /// Pure BFS over the process tree rooted at `pane_pid`. Exported for testing.
 fn compute_pane_liveness(pane_pid: u32, entries: Vec<ProcessEntry>) -> PaneLiveness {
     liveness::compute_pane_liveness(pane_pid, entries)
-}
-
-async fn query_tmux_current_command(tmux_name: &str) -> anyhow::Result<String> {
-    let comm = query_tmux_display_message(tmux_name, "#{pane_current_command}").await?;
-    if comm.is_empty() {
-        return Err(anyhow::anyhow!("tmux returned empty pane_current_command"));
-    }
-    Ok(comm)
-}
-
-async fn query_tmux_pane_pid(tmux_name: &str) -> anyhow::Result<u32> {
-    let pane_pid = query_tmux_display_message(tmux_name, "#{pane_pid}")
-        .await?
-        .parse::<u32>()
-        .map_err(|e| anyhow::anyhow!("invalid pane_pid from tmux: {}", e))?;
-
-    Ok(pane_pid)
 }
 
 async fn query_process_entries() -> anyhow::Result<ProcessEntriesSnapshot> {
@@ -483,9 +477,13 @@ mod tests {
         let bin_dir = dir.path().join("bin");
         std::fs::create_dir_all(&bin_dir).expect("bin dir");
         let tmux = bin_dir.join("tmux");
+        let tmux_log = dir.path().join("tmux.log");
         std::fs::write(
             &tmux,
-            "#!/bin/sh\nif [ \"${5-}\" = \"#{pane_current_command}\" ]; then\n  printf 'codex\\n'\nelse\n  printf '101\\n'\nfi\n",
+            format!(
+                "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'\nprintf '/tmp/project\\037codex\\037101\\0371774274168\\n'\n",
+                tmux_log.display()
+            ),
         )
         .expect("tmux");
         make_executable(&tmux);
@@ -496,10 +494,17 @@ mod tests {
             std::env::join_paths([bin_dir.as_path()]).expect("path"),
         );
 
-        let tool = query_tool_from_tmux_process_tree("demo")
-            .await
-            .expect("tool query");
+        let tool =
+            query_tool_from_tmux_process_tree("demo", &crate::tmux_target::TmuxTarget::Default)
+                .await
+                .expect("tool query");
         assert_eq!(tool.as_deref(), Some("Codex"));
+        let calls = std::fs::read_to_string(&tmux_log).expect("tmux log");
+        assert_eq!(calls.lines().count(), 1);
+        assert!(calls.contains("#{pane_current_path}"));
+        assert!(calls.contains("#{pane_current_command}"));
+        assert!(calls.contains("#{pane_pid}"));
+        assert!(calls.contains("#{session_created}"));
 
         restore_path(previous_path);
     }
@@ -515,15 +520,13 @@ mod tests {
         std::fs::create_dir_all(&bin_dir).expect("bin dir");
 
         let tmux = bin_dir.join("tmux");
+        let tmux_log = dir.path().join("tmux.log");
         std::fs::write(
             &tmux,
-            r##"#!/bin/sh
-if [ "${5-}" = "#{pane_current_command}" ]; then
-  printf 'bash\n'
-else
-  printf '101\n'
-fi
-"##,
+            format!(
+                "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'\nprintf '/tmp/project\\037bash\\037101\\0371774274168\\n'\n",
+                tmux_log.display()
+            ),
         )
         .expect("tmux");
         let ps = bin_dir.join("ps");
@@ -542,10 +545,18 @@ fi
             std::env::join_paths([bin_dir.as_path()]).expect("path"),
         );
 
-        let tool = query_tool_from_tmux_process_tree("demo")
-            .await
-            .expect("tool query");
+        let tool =
+            query_tool_from_tmux_process_tree("demo", &crate::tmux_target::TmuxTarget::Default)
+                .await
+                .expect("tool query");
         assert_eq!(tool.as_deref(), Some("Claude Code"));
+        assert_eq!(
+            std::fs::read_to_string(&tmux_log)
+                .expect("tmux log")
+                .lines()
+                .count(),
+            1
+        );
 
         restore_path(previous_path);
         clear_process_entries_cache().await;
@@ -564,13 +575,7 @@ fi
         let tmux = bin_dir.join("tmux");
         std::fs::write(
             &tmux,
-            r##"#!/bin/sh
-if [ "${5-}" = "#{pane_current_command}" ]; then
-  printf 'bash\n'
-else
-  printf '101\n'
-fi
-"##,
+            "#!/bin/sh\nprintf '/tmp/project\\037bash\\037101\\0371774274168\\n'\n",
         )
         .expect("tmux");
         let ps = bin_dir.join("ps");
@@ -604,9 +609,10 @@ fi
         )
         .await;
 
-        let tool = query_tool_from_tmux_process_tree("demo")
-            .await
-            .expect("tool query");
+        let tool =
+            query_tool_from_tmux_process_tree("demo", &crate::tmux_target::TmuxTarget::Default)
+                .await
+                .expect("tool query");
         assert_eq!(tool, None);
 
         restore_path(previous_path);

@@ -22,6 +22,7 @@ data/
 /MODE_OUTPUT_*.md
 /SMART_RECOMMENDATION_CHAIN.md
 /DUELING_WIZARDS_REPORT.md
+/WIZARD_*.md
 
 # Coverage artifacts
 lcov.info

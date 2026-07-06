@@ -16,6 +16,8 @@ struct GlanceFixtureManifest {
 struct GlanceFixtureSession {
     id: String,
     tmux_name: String,
+    #[serde(default)]
+    tmux_target: swimmers::tmux_target::TmuxTarget,
     role: String,
     state: SessionState,
     rest_state: RestState,
@@ -58,6 +60,7 @@ fn session_from_glance_fixture(fixture: &GlanceFixtureSession, tmux_name: &str) 
     );
     session.transport_health = fixture.transport_health;
     session.current_command = fixture.current_command.clone();
+    session.tmux_target = fixture.tmux_target.clone();
     session
 }
 

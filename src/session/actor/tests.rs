@@ -55,6 +55,7 @@ fn test_actor() -> SessionActor {
     SessionActor {
         session_id: "sess-test".to_string(),
         tmux_name: "demo".to_string(),
+        tmux_target: crate::tmux_target::TmuxTarget::Default,
         config: Arc::new(Config::default()),
         master: pair.master,
         writer,
@@ -70,6 +71,7 @@ fn test_actor() -> SessionActor {
         last_cwd_refresh_at: Instant::now(),
         last_tool_refresh_at: Instant::now(),
         last_liveness_check_at: Instant::now(),
+        tmux_pane_metadata_cache: None,
         tool: Some("Codex".to_string()),
         last_skill: None,
         batch: None,
@@ -78,6 +80,55 @@ fn test_actor() -> SessionActor {
         session_started_at: Utc::now(),
         clear_replay_on_first_idle: false,
     }
+}
+
+#[tokio::test]
+async fn startup_metadata_refreshes_reuse_one_tmux_metadata_query() {
+    let _guard = crate::test_support::ENV_LOCK
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
+    let dir = tempfile::tempdir().expect("tempdir");
+    let bin_dir = dir.path().join("bin");
+    std::fs::create_dir_all(&bin_dir).expect("bin dir");
+    let tmux = bin_dir.join("tmux");
+    let tmux_log = dir.path().join("tmux.log");
+    std::fs::write(
+        &tmux,
+        format!(
+            "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'\nprintf '/tmp/batched\\037codex\\037101\\0371774274168\\n'\n",
+            tmux_log.display()
+        ),
+    )
+    .expect("tmux");
+    make_executable(&tmux);
+
+    let previous_path = std::env::var_os("PATH");
+    std::env::set_var(
+        "PATH",
+        std::env::join_paths([bin_dir.as_path()]).expect("path"),
+    );
+
+    let mut actor = test_actor();
+    actor.cwd.clear();
+    actor.tool = None;
+    actor.maybe_refresh_session_started_at().await;
+    actor.maybe_refresh_cwd_from_tmux(true).await;
+    actor.maybe_refresh_tool_from_tmux(true).await;
+
+    assert_eq!(actor.cwd, "/tmp/batched");
+    assert_eq!(actor.tool.as_deref(), Some("Codex"));
+    assert_eq!(
+        actor.session_started_at,
+        Utc.timestamp_opt(1_774_274_168, 0).single().unwrap()
+    );
+    let calls = std::fs::read_to_string(&tmux_log).expect("tmux log");
+    assert_eq!(calls.lines().count(), 1, "{calls}");
+    assert!(calls.contains("#{pane_current_path}"));
+    assert!(calls.contains("#{pane_current_command}"));
+    assert!(calls.contains("#{pane_pid}"));
+    assert!(calls.contains("#{session_created}"));
+
+    restore_path(previous_path);
 }
 
 fn output_frame(seq: u64, data: &[u8]) -> OutputFrame {
@@ -309,7 +360,13 @@ fn spawn_start_cwd_validation_only_applies_to_new_sessions() {
 
 #[test]
 fn spawn_attach_command_targets_exact_tmux_session() {
-    let command = build_tmux_spawn_command_args(TmuxSpawnMode::Attach, "demo.session", None, None);
+    let command = build_tmux_spawn_command_args(
+        TmuxSpawnMode::Attach,
+        &crate::tmux_target::TmuxTarget::Default,
+        "demo.session",
+        None,
+        None,
+    );
 
     assert_eq!(
         argv_strings(&command),
@@ -326,6 +383,7 @@ fn spawn_attach_command_targets_exact_tmux_session() {
 fn spawn_new_session_command_preserves_optional_cwd_and_initial_command_order() {
     let command = build_tmux_spawn_command_args(
         TmuxSpawnMode::New,
+        &crate::tmux_target::TmuxTarget::Default,
         "demo.session",
         Some("/tmp/project"),
         Some("cargo test"),
@@ -347,7 +405,13 @@ fn spawn_new_session_command_preserves_optional_cwd_and_initial_command_order() 
 
 #[test]
 fn spawn_new_session_command_omits_absent_optional_args() {
-    let command = build_tmux_spawn_command_args(TmuxSpawnMode::New, "demo.session", None, None);
+    let command = build_tmux_spawn_command_args(
+        TmuxSpawnMode::New,
+        &crate::tmux_target::TmuxTarget::Default,
+        "demo.session",
+        None,
+        None,
+    );
 
     assert_eq!(
         argv_strings(&command),
@@ -376,6 +440,7 @@ fn spawn_command_env_removes_nested_tmux_and_sets_terminal_defaults() {
 
     let command = build_tmux_spawn_command(
         TmuxSpawnMode::Attach,
+        &crate::tmux_target::TmuxTarget::Default,
         "sess-test",
         "demo.session",
         None,
@@ -892,8 +957,8 @@ async fn maybe_check_liveness_runs_query_when_interval_elapsed() {
     let (_dir, previous_path) = install_fake_tmux("#!/bin/sh\nexit 1\n");
     let mut actor = test_actor();
     // Push last_liveness_check_at far enough back to pass the interval guard.
-    actor.last_liveness_check_at = Instant::now() - Duration::from_millis(2_100); // past LIVENESS_CHECK_INTERVAL (2s)
-                                                                                  // query_pane_liveness will fail for tmux_name "demo" (no real tmux),
+    actor.last_liveness_check_at = Instant::now() - Duration::from_millis(5_100); // past LIVENESS_CHECK_INTERVAL.
+                                                                                  // tmux metadata lookup will fail for tmux_name "demo" (no real tmux),
                                                                                   // but the Err branch just logs — it must not panic.
     actor.maybe_check_liveness().await;
     // last_liveness_check_at is updated even on query failure
@@ -914,15 +979,7 @@ async fn maybe_check_liveness_skips_stale_process_cache_that_would_mark_busy() {
     let tmux = bin_dir.join("tmux");
     std::fs::write(
         &tmux,
-        r##"#!/bin/sh
-if [ "${5-}" = "#{pane_pid}" ]; then
-  printf '101\n'
-elif [ "${5-}" = "#{pane_current_command}" ]; then
-  printf 'bash\n'
-else
-  printf '\n'
-fi
-"##,
+        "#!/bin/sh\nprintf '/tmp/project\\037bash\\037101\\0371774274168\\n'\n",
     )
     .expect("tmux");
     let ps = bin_dir.join("ps");
@@ -965,15 +1022,7 @@ async fn maybe_check_liveness_skips_stale_process_cache_that_would_mark_idle() {
     let tmux = bin_dir.join("tmux");
     std::fs::write(
         &tmux,
-        r##"#!/bin/sh
-if [ "${5-}" = "#{pane_pid}" ]; then
-  printf '101\n'
-elif [ "${5-}" = "#{pane_current_command}" ]; then
-  printf 'bash\n'
-else
-  printf '\n'
-fi
-"##,
+        "#!/bin/sh\nprintf '/tmp/project\\037bash\\037101\\0371774274168\\n'\n",
     )
     .expect("tmux");
     let ps = bin_dir.join("ps");
@@ -1702,7 +1751,11 @@ async fn query_tmux_session_created_reads_epoch_from_tmux() {
     let bin_dir = dir.path().join("bin");
     std::fs::create_dir_all(&bin_dir).expect("bin dir");
     let tmux = bin_dir.join("tmux");
-    std::fs::write(&tmux, "#!/bin/sh\nprintf '1774274168\\n'\n").expect("tmux");
+    std::fs::write(
+        &tmux,
+        "#!/bin/sh\nprintf '/tmp/project\\037bash\\037101\\0371774274168\\n'\n",
+    )
+    .expect("tmux");
     let mut perms = std::fs::metadata(&tmux).expect("metadata").permissions();
     perms.set_mode(0o755);
     std::fs::set_permissions(&tmux, perms).expect("chmod");
@@ -1716,7 +1769,7 @@ async fn query_tmux_session_created_reads_epoch_from_tmux() {
         std::env::join_paths([bin_dir.as_path()]).expect("path"),
     );
 
-    let created_at = query_tmux_session_created("demo")
+    let created_at = query_tmux_session_created("demo", &crate::tmux_target::TmuxTarget::Default)
         .await
         .expect("session_created query");
     assert_eq!(
@@ -1750,9 +1803,10 @@ async fn capture_pane_tail_uses_exact_session_target_for_numeric_names() {
     perms.set_mode(0o755);
     std::fs::set_permissions(&tmux, perms).expect("chmod");
 
-    let captured = capture_pane_tail_with_command(&tmux, "0", 20)
-        .await
-        .expect("capture pane");
+    let captured =
+        capture_pane_tail_with_command(&tmux, "0", &crate::tmux_target::TmuxTarget::Default, 20)
+            .await
+            .expect("capture pane");
     assert_eq!(captured.trim(), "captured");
     assert_eq!(
         std::fs::read_to_string(&target_file).expect("target file"),

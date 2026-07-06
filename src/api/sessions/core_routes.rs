@@ -104,6 +104,7 @@ async fn create_local_session_response(
         body.name,
         body.cwd,
         body.spawn_tool,
+        body.tmux_target,
         body.initial_request,
     )
     .await
@@ -137,7 +138,7 @@ pub(super) async fn adopt_session(
 
     match state
         .supervisor
-        .adopt_tmux_session(body.tmux_name, body.session_id)
+        .adopt_tmux_session(body.tmux_name, body.tmux_target, body.session_id)
         .await
     {
         Ok(adopted) => (
@@ -171,6 +172,7 @@ fn adopt_session_error_response(error: TmuxAdoptError) -> axum::response::Respon
         TmuxAdoptError::StaleSessionConflict { .. } => {
             (StatusCode::CONFLICT, "STALE_SESSION_CONFLICT")
         }
+        TmuxAdoptError::InvalidTarget { .. } => (StatusCode::BAD_REQUEST, "INVALID_TMUX_TARGET"),
         TmuxAdoptError::SpawnFailed { .. } => {
             tracing::error!("adopt_session failed: {error}");
             (StatusCode::INTERNAL_SERVER_ERROR, "TMUX_ADOPT_FAILED")
@@ -218,7 +220,14 @@ async fn create_local_sessions_batch_response(
     body: CreateSessionsBatchRequest,
 ) -> Response {
     let explicit_local_override = explicit_local_launch_override(body.launch_target.as_deref());
-    match create_local_sessions_batch(state, body.dirs, body.spawn_tool, body.initial_request).await
+    match create_local_sessions_batch(
+        state,
+        body.dirs,
+        body.spawn_tool,
+        body.tmux_target,
+        body.initial_request,
+    )
+    .await
     {
         Ok(mut response) => {
             if explicit_local_override {
@@ -293,6 +302,7 @@ pub(super) async fn delete_session(
     delete_session_response(&state, &session_id, delete_mode).await
 }
 
+#[allow(clippy::result_large_err)]
 pub(super) fn parse_delete_session_mode(mode: Option<&str>) -> Result<SessionDeleteMode, Response> {
     match mode {
         None | Some("detach_bridge") => Ok(SessionDeleteMode::DetachBridge),

@@ -118,12 +118,22 @@ async fn open_or_focus_passes_cached_pane_id_on_repeat_calls() {
     std::env::set_var("PATH", path_value);
     std::env::set_var(TMUX_BIN_ENV, &fake_tmux);
 
-    let first = open_or_focus_iterm_session("sess-cache", "tmux-cache", "/tmp/fallback")
-        .await
-        .unwrap();
-    let second = open_or_focus_iterm_session("sess-cache", "tmux-cache", "/tmp/fallback")
-        .await
-        .unwrap();
+    let first = open_or_focus_iterm_session(
+        "sess-cache",
+        "tmux-cache",
+        &crate::tmux_target::TmuxTarget::Default,
+        "/tmp/fallback",
+    )
+    .await
+    .unwrap();
+    let second = open_or_focus_iterm_session(
+        "sess-cache",
+        "tmux-cache",
+        &crate::tmux_target::TmuxTarget::Default,
+        "/tmp/fallback",
+    )
+    .await
+    .unwrap();
 
     match original_path {
         Some(value) => std::env::set_var("PATH", value),
@@ -197,9 +207,14 @@ async fn open_or_focus_retries_transient_missing_session_error() {
     std::env::set_var("PATH", path_value);
     std::env::set_var(TMUX_BIN_ENV, &fake_tmux);
 
-    let result = open_or_focus_iterm_session("sess-retry", "tmux-retry", "/Users/b/repos/retry")
-        .await
-        .unwrap();
+    let result = open_or_focus_iterm_session(
+        "sess-retry",
+        "tmux-retry",
+        &crate::tmux_target::TmuxTarget::Default,
+        "/Users/b/repos/retry",
+    )
+    .await
+    .unwrap();
 
     match original_path {
         Some(value) => std::env::set_var("PATH", value),
@@ -254,9 +269,14 @@ async fn open_or_focus_retries_transient_tab_creation_resolution_error() {
     std::env::set_var("PATH", path_value);
     std::env::set_var(TMUX_BIN_ENV, &fake_tmux);
 
-    let result = open_or_focus_iterm_session("sess-race", "tmux-race", "/Users/b/repos/race")
-        .await
-        .unwrap();
+    let result = open_or_focus_iterm_session(
+        "sess-race",
+        "tmux-race",
+        &crate::tmux_target::TmuxTarget::Default,
+        "/Users/b/repos/race",
+    )
+    .await
+    .unwrap();
 
     match original_path {
         Some(value) => std::env::set_var("PATH", value),
@@ -320,6 +340,7 @@ async fn open_or_focus_ghostty_runs_script_with_expected_args() {
     let result = open_or_focus_ghostty_session(
         "sess-ghostty",
         "tmux-ghostty",
+        &crate::tmux_target::TmuxTarget::Default,
         "/Users/b/repos/fallback",
         GhosttyOpenMode::Swap,
     )
@@ -405,6 +426,7 @@ async fn open_or_focus_ghostty_swap_passes_cached_preview_id_on_repeat_calls() {
     let first = open_or_focus_ghostty_session(
         "sess-ghostty-a",
         "tmux-ghostty-a",
+        &crate::tmux_target::TmuxTarget::Default,
         "/Users/b/repos/fallback",
         GhosttyOpenMode::Swap,
     )
@@ -413,6 +435,7 @@ async fn open_or_focus_ghostty_swap_passes_cached_preview_id_on_repeat_calls() {
     let second = open_or_focus_ghostty_session(
         "sess-ghostty-b",
         "tmux-ghostty-b",
+        &crate::tmux_target::TmuxTarget::Default,
         "/Users/b/repos/fallback",
         GhosttyOpenMode::Swap,
     )
@@ -493,6 +516,7 @@ async fn open_or_focus_ghostty_swap_scopes_cached_preview_id_to_active_tab() {
     open_or_focus_ghostty_session(
         "sess-ghostty-a1",
         "tmux-ghostty-a1",
+        &crate::tmux_target::TmuxTarget::Default,
         "/Users/b/repos/fallback",
         GhosttyOpenMode::Swap,
     )
@@ -501,6 +525,7 @@ async fn open_or_focus_ghostty_swap_scopes_cached_preview_id_to_active_tab() {
     open_or_focus_ghostty_session(
         "sess-ghostty-b1",
         "tmux-ghostty-b1",
+        &crate::tmux_target::TmuxTarget::Default,
         "/Users/b/repos/fallback",
         GhosttyOpenMode::Swap,
     )
@@ -509,6 +534,7 @@ async fn open_or_focus_ghostty_swap_scopes_cached_preview_id_to_active_tab() {
     open_or_focus_ghostty_session(
         "sess-ghostty-a2",
         "tmux-ghostty-a2",
+        &crate::tmux_target::TmuxTarget::Default,
         "/Users/b/repos/fallback",
         GhosttyOpenMode::Swap,
     )
@@ -574,6 +600,7 @@ async fn open_or_focus_ghostty_rejects_older_versions_before_running_script() {
     let error = open_or_focus_ghostty_session(
         "sess-ghostty",
         "tmux-ghostty",
+        &crate::tmux_target::TmuxTarget::Default,
         "/tmp/fallback",
         GhosttyOpenMode::Swap,
     )

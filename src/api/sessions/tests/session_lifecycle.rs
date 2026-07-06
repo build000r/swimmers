@@ -9,6 +9,7 @@ async fn create_session_requires_write_scope() {
             name: None,
             cwd: None,
             spawn_tool: None,
+            tmux_target: None,
             launch_target: None,
             initial_request: None,
         }),
@@ -26,6 +27,7 @@ async fn adopt_session_requires_write_scope() {
         State(test_state()),
         Json(AdoptSessionRequest {
             tmux_name: "alpha".to_string(),
+            tmux_target: None,
             session_id: None,
         }),
     )
@@ -47,6 +49,7 @@ async fn adopt_session_rejects_already_tracked_tmux_without_duplication() {
         State(state),
         Json(AdoptSessionRequest {
             tmux_name,
+            tmux_target: None,
             session_id: None,
         }),
     )
@@ -80,6 +83,7 @@ async fn create_session_rejects_unknown_non_local_launch_target_explicitly() {
                     .into_owned(),
             ),
             spawn_tool: None,
+            tmux_target: None,
             launch_target: Some("not-configured-target-for-test".to_string()),
             initial_request: None,
         }),
@@ -108,6 +112,7 @@ async fn create_session_rejects_missing_cwd_as_validation_error() {
             name: None,
             cwd: Some(missing.to_string_lossy().into_owned()),
             spawn_tool: None,
+            tmux_target: None,
             launch_target: None,
             initial_request: None,
         }),
@@ -122,6 +127,37 @@ async fn create_session_rejects_missing_cwd_as_validation_error() {
         .as_str()
         .expect("message")
         .contains("cwd does not exist"));
+}
+
+#[tokio::test]
+async fn create_session_rejects_invalid_tmux_target_as_validation_error() {
+    let response = create_session(
+        Extension(AuthInfo::new(OPERATOR_SCOPES.to_vec())),
+        State(test_state()),
+        Json(CreateSessionRequest {
+            name: None,
+            cwd: Some(
+                std::env::current_dir()
+                    .expect("current dir")
+                    .to_string_lossy()
+                    .into_owned(),
+            ),
+            spawn_tool: None,
+            tmux_target: Some(crate::tmux_target::TmuxTarget::socket_name("")),
+            launch_target: None,
+            initial_request: None,
+        }),
+    )
+    .await
+    .into_response();
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let json = response_json(response).await;
+    assert_eq!(json["code"], "VALIDATION_FAILED");
+    assert!(json["message"]
+        .as_str()
+        .expect("message")
+        .contains("tmux socket name"));
 }
 
 #[tokio::test]

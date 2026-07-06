@@ -5,6 +5,7 @@ const WORKBENCH_LOG_KIND_LABELS = {
   status: "Status",
   diff: "Diff",
   output: "Output",
+  thinking: "Thinking",
   truncation: "Trimmed",
 };
 
@@ -191,6 +192,9 @@ function transcriptRecordDisplayKind(record, payload) {
   if (transcriptRecordIsCall(kind)) {
     return "command";
   }
+  if (/thinking|reasoning/.test(kind)) {
+    return "thinking";
+  }
   if (/agent_message|assistant_message|message|user_message/.test(kind)) {
     return "operator";
   }
@@ -261,6 +265,11 @@ export function transcriptRecordDisplay(record) {
       "Tool output";
     if (payload?.call_id || toolResult?.tool_use_id) {
       fields.push(["call", payload?.call_id || toolResult.tool_use_id]);
+    }
+  } else if (/thinking|reasoning/.test(kind)) {
+    body = payloadTextContent(payload?.content) || payloadMessageText(payload) || summary || "Thinking";
+    if (role) {
+      fields.push(["role", role]);
     }
   } else if (/agent_message|assistant_message|message|user_message/.test(kind)) {
     body = payloadMessageText(payload) || payloadTextContent(payload?.content) || summary || "Message";

@@ -176,6 +176,7 @@ const state = {
   terminal: null,
   terminalAcceptsBytes: true,
   terminalSessionId: null,
+  terminalAttachedSessionId: null,
   ws: null,
   lastTerminalSeqBySession: new Map(),
   pendingTerminalByteChunks: [],
@@ -407,7 +408,7 @@ const {
   normalizeSessionId: normalizeTrogdorSessionId,
   resetAgentContextForSession,
   resetWorkbenchWidgetsForSession,
-  closeTrogdorAtlasForTerminal,
+  closeTrogdorAtlasForTerminal: closeTrogdorAtlasForReader,
   renderHudSurface: (...args) => renderHudSurface(...args),
 });
 
@@ -848,6 +849,8 @@ const terminalWorkbenchController = createTerminalWorkbenchController({
   normalizeSessionId,
   sessionDisplayName,
   summarizeThought,
+  terminalAttached: terminalAttachedToCurrentSession,
+  openSelectedTerminal,
   apiFetch,
   apiMaybeFetch,
   responseJson,
@@ -901,6 +904,15 @@ const mermaidArtifactController = createMermaidArtifactController({
 
 function currentSession() {
   return state.sessions.find((session) => session.session_id === state.selectedSessionId) ?? null;
+}
+
+function terminalAttachedToCurrentSession() {
+  const selectedSessionId = normalizeSessionId(state.selectedSessionId);
+  return Boolean(selectedSessionId && state.terminalAttachedSessionId === selectedSessionId);
+}
+
+function currentTerminalSession() {
+  return terminalAttachedToCurrentSession() ? currentSession() : null;
 }
 
 function fleetFilterEquals(left = {}, right = {}) {
@@ -1055,9 +1067,14 @@ function syncTrogdorBackButton() {
     return;
   }
   const visible = Boolean(currentSession() && !state.trogdorAtlasOpen);
+  const attached = terminalAttachedToCurrentSession();
+  const title = attached ? "Back to session reader" : "Back to Trogdor atlas";
   el.terminalTrogdorBack.classList.toggle("hidden", !visible);
   el.terminalTrogdorBack.disabled = !visible;
   el.terminalTrogdorBack.setAttribute("aria-hidden", visible ? "false" : "true");
+  el.terminalTrogdorBack.textContent = attached ? "Reader" : "Trogdor";
+  el.terminalTrogdorBack.title = title;
+  el.terminalTrogdorBack.setAttribute("aria-label", title);
 }
 
 function syncTerminalWorkbench() {
@@ -1123,7 +1140,7 @@ function syncTerminalTools() {
     el.sendMode.disabled = plan.sendModeDisabled;
   }
   el.sendSubmitButton.disabled = plan.sendSubmitDisabled;
-  Array.from(el.createForm.elements).forEach((element) => {
+  Array.from(el.createForm.elements || []).forEach((element) => {
     element.disabled = plan.createFormElementsDisabled;
   });
 
@@ -1558,7 +1575,7 @@ terminalZoomInputController = createTerminalZoomInputController({
   URLImpl: URL,
   surfaceSupports,
   terminalSupports,
-  currentSession,
+  currentSession: currentTerminalSession,
   updateTerminalFallbackText,
   sendLineToSession,
   rememberSendHistory,
@@ -1716,7 +1733,34 @@ function closeTrogdorAtlasForTerminal() {
   syncTerminalPresentation();
 }
 
+function closeTrogdorAtlasForReader() {
+  Object.assign(state, trogdorAtlasTransitionState("close_terminal"));
+  syncTrogdorReaderTimer();
+  applyTrogdorAtlasVisibility();
+  syncTerminalPresentation();
+}
+
+function detachTerminalToReader() {
+  if (!currentSession()) {
+    openTrogdorAtlas();
+    return false;
+  }
+  state.terminalAttachedSessionId = null;
+  teardownTerminal();
+  closeTrogdorAtlasForReader();
+  renderHudSurface();
+  syncTerminalTools();
+  void refreshAgentContextForSelectedSession({ force: true });
+  void refreshWorkbenchWidgetsForSelectedSession({ force: true });
+  setUtilityStatus("Back to session reader.", false, 1600);
+  return true;
+}
+
 function openTrogdorAtlas() {
+  state.terminalAttachedSessionId = null;
+  if (state.ws || state.terminal || state.terminalFallbackActive) {
+    teardownTerminal();
+  }
   Object.assign(state, trogdorAtlasTransitionState("open"));
   closeMobileKeyboard();
   renderHudSurface();
@@ -1728,18 +1772,45 @@ async function selectSession(sessionId) {
   if (!normalized) {
     return;
   }
-  closeTrogdorAtlasForTerminal();
   if (state.followPublishedSelection) {
     setFollowPublishedSelection(false);
   }
+  state.terminalAttachedSessionId = null;
   persistSelectedSession(normalized);
+  if (state.ws || state.terminal || state.terminalFallbackActive) {
+    teardownTerminal();
+  }
+  closeTrogdorAtlasForReader();
   renderHudSurface();
-  await connectSelectedSession();
+  syncTerminalTools();
   void refreshAgentContextForSelectedSession({ force: true });
   void refreshWorkbenchWidgetsForSelectedSession({ force: true });
   if (state.activeSheet === "mermaid") {
     await refreshMermaidArtifact();
   }
+}
+
+async function openSelectedTerminal(options = {}) {
+  const session = currentSession();
+  if (!session) {
+    return false;
+  }
+  state.terminalAttachedSessionId = session.session_id;
+  closeTrogdorAtlasForTerminal();
+  syncTerminalTools();
+  try {
+    await connectSelectedSession();
+  } catch (error) {
+    state.terminalAttachedSessionId = null;
+    syncTerminalPresentation();
+    setConnectionStatus(`terminal attach failed: ${error?.message || "unavailable"}`, true);
+    return false;
+  }
+  syncTerminalPresentation();
+  if (options.focus) {
+    focusTerminalInputSurface({ preventScroll: true });
+  }
+  return true;
 }
 
 async function openTrogdorAgentTerminal(sessionId) {
@@ -1749,7 +1820,7 @@ async function openTrogdorAgentTerminal(sessionId) {
   }
 
   await selectSession(normalized);
-  focusTerminalInputSurface({ preventScroll: true });
+  await openSelectedTerminal({ focus: true });
   const session = currentSession();
   setUtilityStatus(
     session
@@ -2015,6 +2086,13 @@ const {
   openMermaidArtifactHost,
   openTrogdorAgentTerminal,
   openTrogdorAtlas,
+  handleTerminalTrogdorBackNavigation: () => {
+    if (terminalAttachedToCurrentSession()) {
+      detachTerminalToReader();
+      return;
+    }
+    openTrogdorAtlas();
+  },
   queueMeasureAndResizeSurface,
   refreshAgentContextForSelectedSession,
   refreshMermaidArtifact,
@@ -2273,6 +2351,9 @@ export const __swimmersWebTest = {
   state,
   el,
   openTrogdorAtlas,
+  openSelectedTerminal,
+  detachTerminalToReader,
+  terminalAttachedToCurrentSession,
   persistSelectedSession,
   renderHudSurface,
   measureAndResizeSurface,

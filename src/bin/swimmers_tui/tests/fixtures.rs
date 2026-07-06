@@ -9,6 +9,7 @@ fn session_summary(session_id: &str, tmux_name: &str, cwd: &str) -> SessionSumma
     SessionSummary {
         session_id: session_id.to_string(),
         tmux_name: tmux_name.to_string(),
+        tmux_target: swimmers::tmux_target::TmuxTarget::Default,
         state: SessionState::Idle,
         current_command: None,
         state_evidence: StateEvidence::new("osc133_prompt"),

@@ -25,6 +25,8 @@ export function createTerminalWorkbenchController({
   normalizeSessionId = (sessionId) => sessionId || null,
   sessionDisplayName = (session) => session?.session_id || "No session",
   summarizeThought = (session) => session?.thought || "",
+  terminalAttached = () => false,
+  openSelectedTerminal = async () => false,
   apiFetch,
   apiMaybeFetch,
   responseJson,
@@ -60,7 +62,10 @@ export function createTerminalWorkbenchController({
   function syncTerminalWorkbench() {
     const hasSession = Boolean(currentSession() && !state.trogdorAtlasOpen);
     const visible = terminalWorkbenchVisible();
+    const attached = Boolean(hasSession && terminalAttached());
     documentRef.body.classList.toggle("terminal-workbench-open", visible);
+    documentRef.body.classList.toggle("terminal-reader-mode", Boolean(visible && !attached));
+    documentRef.body.classList.toggle("terminal-session-attached", attached);
     if (el.terminalWorkbenchToggle) {
       el.terminalWorkbenchToggle.disabled = !hasSession;
       el.terminalWorkbenchToggle.setAttribute("aria-pressed", visible ? "true" : "false");
@@ -183,6 +188,9 @@ export function createTerminalWorkbenchController({
         filter: state.workbenchLogFilter,
         query: state.workbenchLogSearch,
       },
+      readerState: {
+        terminalAttached: terminalAttached(),
+      },
     });
     writeWorkbenchWidgetsView({
       html: renderWorkbenchWidgetsViewModelHtml(model),
@@ -209,6 +217,10 @@ export function createTerminalWorkbenchController({
     event.preventDefault();
     if (plan.type === "open_mermaid") {
       openSheet("mermaid");
+      return;
+    }
+    if (plan.type === "open_terminal") {
+      void openSelectedTerminal({ focus: true });
       return;
     }
     const refreshWidgets = plan.type === "select_turn";

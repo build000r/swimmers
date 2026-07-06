@@ -141,6 +141,7 @@ mod tests {
         crate::types::SessionSummary {
             session_id: session_id.to_string(),
             tmux_name: format!("tmux-{session_id}"),
+            tmux_target: crate::tmux_target::TmuxTarget::Default,
             state,
             current_command: None,
             state_evidence: Default::default(),

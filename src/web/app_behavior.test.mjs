@@ -183,6 +183,7 @@ globalThis.requestAnimationFrame = (callback) => {
 };
 globalThis.cancelAnimationFrame = () => {};
 globalThis.WebSocket = globalThis.WebSocket || { OPEN: 1 };
+globalThis.window.WebSocket = globalThis.WebSocket;
 
 const { __swimmersWebTest: web } = await import("./app.js?behavior-test");
 
@@ -262,6 +263,7 @@ function resetWebState() {
   web.state.hud = null;
   web.state.terminal = null;
   web.state.terminalAcceptsBytes = true;
+  web.state.terminalAttachedSessionId = null;
   web.state.pendingTerminalByteChunks = [];
   web.state.pendingTerminalByteLength = 0;
   web.state.frankenModule = null;
@@ -380,7 +382,7 @@ function jsonResponse(status, body) {
   };
 }
 
-test("selecting a Trogdor swordsman forces the terminal view, not just URL state", () => {
+test("selecting a Trogdor swordsman opens the reader without terminal attach", async () => {
   resetWebState();
   web.state.trogdorAtlasOpen = true;
   web.state.hoveredTrogdorSessionId = "sess_0";
@@ -388,18 +390,65 @@ test("selecting a Trogdor swordsman forces the terminal view, not just URL state
   web.el.trogdorSurface.style.display = "";
   document.body.classList.add("trogdor-mode");
 
-  web.persistSelectedSession("sess_0");
+  await web.handleSurfaceAction({ type: "session", sessionId: "sess_0" });
+  web.syncTerminalInputDock();
 
   assert.equal(web.state.selectedSessionId, "sess_0");
   assert.equal(web.state.trogdorAtlasOpen, false);
+  assert.equal(web.terminalAttachedToCurrentSession(), false);
+  assert.equal(web.state.ws, null);
+  assert.equal(web.state.terminal, null);
   assert.equal(web.state.hoveredTrogdorSessionId, null);
   assert.equal(web.el.trogdorSurface.classList.contains("hidden"), true);
   assert.equal(web.el.trogdorSurface.style.display, "none");
   assert.equal(web.el.trogdorSurface.getAttribute("aria-hidden"), "true");
   assert.equal(document.body.classList.contains("trogdor-mode"), false);
   assert.equal(document.body.classList.contains("terminal-focus-mode"), true);
+  assert.equal(document.body.classList.contains("terminal-reader-mode"), true);
   assert.equal(web.el.terminalStage.classList.contains("terminal-view-active"), true);
+  assert.equal(web.el.terminalWorkbench.classList.contains("hidden"), false);
+  assert.equal(web.el.terminalWorkbenchWidgets.innerHTML.includes('data-workbench-open-terminal="true"'), true);
+  assert.equal(web.el.terminalInputDock.classList.contains("hidden"), true);
   assert.equal(window.location.search, "?session=sess_0");
+});
+
+test("reader terminal action attaches and terminal back returns to reader", async () => {
+  resetWebState();
+  web.state.selectedSessionId = "sess_0";
+  web.state.trogdorAtlasOpen = false;
+  let socketClosed = false;
+  web.state.ws = {
+    readyState: WebSocket.OPEN,
+    sessionId: "sess_0",
+    close() {
+      socketClosed = true;
+    },
+    send() {},
+  };
+  const previousFetch = globalThis.fetch;
+  globalThis.fetch = async () => jsonResponse(200, { screen_text: "$ cargo test" });
+  try {
+    assert.equal(await web.openSelectedTerminal(), true);
+  } finally {
+    globalThis.fetch = previousFetch;
+  }
+
+  assert.equal(web.terminalAttachedToCurrentSession(), true);
+  assert.equal(web.state.terminalFallbackActive, true);
+  web.syncTerminalInputDock();
+  assert.equal(web.el.terminalInputDock.classList.contains("hidden"), false);
+  assert.equal(web.el.terminalTrogdorBack.textContent, "Reader");
+
+  assert.equal(web.detachTerminalToReader(), true);
+
+  assert.equal(socketClosed, true);
+  assert.equal(web.terminalAttachedToCurrentSession(), false);
+  assert.equal(web.state.ws, null);
+  assert.equal(web.state.trogdorAtlasOpen, false);
+  assert.equal(web.el.terminalWorkbench.classList.contains("hidden"), false);
+  assert.equal(document.body.classList.contains("terminal-reader-mode"), true);
+  assert.equal(web.el.terminalInputDock.classList.contains("hidden"), true);
+  assert.equal(web.el.terminalTrogdorBack.textContent, "Trogdor");
 });
 
 test("Trogdor atlas renders dragon sprite assets and flames burnt swordsmen", () => {
@@ -1013,6 +1062,7 @@ test("terminal text fallback does not replace a useful snapshot with blank live 
 test("terminal input dock appears in terminal mode and disables empty sends", () => {
   resetWebState();
   web.state.selectedSessionId = "sess_0";
+  web.state.terminalAttachedSessionId = "sess_0";
   web.state.trogdorAtlasOpen = false;
 
   web.syncTerminalInputDock();
@@ -1030,6 +1080,7 @@ test("terminal input dock appears in terminal mode and disables empty sends", ()
 test("terminal input dock sends a line to tmux and keeps a local echo", async () => {
   resetWebState();
   web.state.selectedSessionId = "sess_0";
+  web.state.terminalAttachedSessionId = "sess_0";
   web.state.trogdorAtlasOpen = false;
   web.state.terminalFallbackActive = true;
   web.el.terminalFallback.textContent = "$ ";
@@ -1055,6 +1106,7 @@ test("terminal input dock sends a line to tmux and keeps a local echo", async ()
 test("terminal key strip sends Ctrl-C and navigation bytes from the dock", () => {
   resetWebState();
   web.state.selectedSessionId = "sess_0";
+  web.state.terminalAttachedSessionId = "sess_0";
   web.state.trogdorAtlasOpen = false;
   web.state.terminalFallbackActive = true;
   const sent = [];
@@ -1078,6 +1130,7 @@ test("terminal key strip sends Ctrl-C and navigation bytes from the dock", () =>
 test("terminal composer turns empty-field Ctrl-C and arrows into terminal controls", () => {
   resetWebState();
   web.state.selectedSessionId = "sess_0";
+  web.state.terminalAttachedSessionId = "sess_0";
   web.state.trogdorAtlasOpen = false;
   web.el.terminalInlineInput.value = "";
   web.el.terminalInlineInput.selectionStart = 0;
@@ -1113,6 +1166,7 @@ test("terminal composer turns empty-field Ctrl-C and arrows into terminal contro
 test("terminal composer keydown handler preserves control sends and propagation", () => {
   resetWebState();
   web.state.selectedSessionId = "sess_0";
+  web.state.terminalAttachedSessionId = "sess_0";
   web.state.trogdorAtlasOpen = false;
   web.state.terminalFallbackActive = true;
   web.el.terminalInlineInput.value = "";
@@ -1159,6 +1213,7 @@ test("terminal composer keydown handler preserves control sends and propagation"
 test("input ack updates pending terminal dock delivery status", async () => {
   resetWebState();
   web.state.selectedSessionId = "sess_0";
+  web.state.terminalAttachedSessionId = "sess_0";
   web.state.trogdorAtlasOpen = false;
   web.el.terminalInlineInput.value = "echo acked";
   const sent = [];

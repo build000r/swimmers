@@ -516,6 +516,7 @@ impl TuiApi for InProcessApi {
                     name: None,
                     cwd: Some(cwd),
                     spawn_tool: Some(spawn_tool),
+                    tmux_target: None,
                     launch_target,
                     initial_request,
                 })
@@ -527,6 +528,7 @@ impl TuiApi for InProcessApi {
                 None,
                 Some(cwd),
                 Some(spawn_tool),
+                None,
                 initial_request,
             )
             .await
@@ -543,6 +545,7 @@ impl TuiApi for InProcessApi {
     fn adopt_session(
         &self,
         tmux_name: &str,
+        tmux_target: Option<swimmers::tmux_target::TmuxTarget>,
         session_id: Option<&str>,
     ) -> BoxFuture<'_, Result<AdoptSessionResponse, String>> {
         let tmux_name = tmux_name.to_string();
@@ -551,7 +554,7 @@ impl TuiApi for InProcessApi {
             let adopted = self
                 .state
                 .supervisor
-                .adopt_tmux_session(tmux_name, session_id)
+                .adopt_tmux_session(tmux_name, tmux_target, session_id)
                 .await
                 .map_err(|err| err.to_string())?;
             Ok(AdoptSessionResponse {
@@ -576,13 +579,14 @@ impl TuiApi for InProcessApi {
                 return remote_sessions::create_remote_sessions_batch(CreateSessionsBatchRequest {
                     dirs,
                     spawn_tool: Some(spawn_tool),
+                    tmux_target: None,
                     launch_target,
                     initial_request,
                 })
                 .await
                 .map_err(|err| err.display_message("in-process API"));
             }
-            create_local_sessions_batch(state, dirs, Some(spawn_tool), initial_request)
+            create_local_sessions_batch(state, dirs, Some(spawn_tool), None, initial_request)
                 .await
                 .map(|mut response| {
                     if explicit_local_override {
@@ -678,6 +682,7 @@ mod tests {
         SessionSummary {
             session_id: session_id.to_string(),
             tmux_name: format!("tmux-{session_id}"),
+            tmux_target: swimmers::tmux_target::TmuxTarget::Default,
             state,
             current_command: None,
             state_evidence: StateEvidence::new("test"),

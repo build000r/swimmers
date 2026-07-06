@@ -3,7 +3,8 @@ use std::time::{Duration, Instant};
 
 use tracing::warn;
 
-use crate::session::actor::run_bounded_tmux_command;
+use crate::session::actor::run_bounded_tmux_probe_for_target;
+use crate::tmux_target::TmuxTarget;
 
 const ACTIVE_PANE_LOOKUP_TIMEOUT: Duration = Duration::from_millis(500);
 const ACTIVE_PANE_LOOKUP_WARN_THRESHOLD: Duration = Duration::from_millis(200);
@@ -18,14 +19,17 @@ fn format_tmux_active_pane_session_id(tmux_name: &str, pane_selector: &str) -> S
 /// with [`filter_active_panes_to_requested`]; keeping the query unfiltered
 /// lets the supervisor share one tmux call across callers within the cache
 /// TTL window.
-pub(super) async fn query_all_active_pane_session_ids() -> anyhow::Result<HashMap<String, String>> {
+pub(super) async fn query_all_active_pane_session_ids(
+    tmux_target: &TmuxTarget,
+) -> anyhow::Result<HashMap<String, String>> {
     let started = Instant::now();
     let pane_format = format!(
         "#{{session_name}}{sep}#{{window_active}}{sep}#{{pane_active}}{sep}#{{window_index}}.#{{pane_index}}:#{{pane_id}}",
         sep = TMUX_LIST_PANES_FIELD_SEPARATOR
     );
-    let output = run_bounded_tmux_command(
+    let output = run_bounded_tmux_probe_for_target(
         "tmux",
+        tmux_target,
         &["list-panes", "-a", "-F", pane_format.as_str()],
         ACTIVE_PANE_LOOKUP_TIMEOUT,
         "list-panes",
@@ -167,7 +171,7 @@ mod tests {
         prepend_test_path(&bin_dir, original_path.as_deref());
 
         let requested = HashSet::from_iter(["0".to_string(), "work".to_string()]);
-        let all = query_all_active_pane_session_ids()
+        let all = query_all_active_pane_session_ids(&crate::tmux_target::TmuxTarget::Default)
             .await
             .expect("active pane session ids");
         let pane_ids = filter_active_panes_to_requested(&all, &requested);

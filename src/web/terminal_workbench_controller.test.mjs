@@ -103,6 +103,7 @@ test("terminal workbench controller delegates widget view rendering without chan
 
   assert.equal(renderViews.length, 1);
   assert.deepEqual(renderViews[0].model.items.map((item) => item.title), [
+    "Terminal",
     "Turns",
     "Logs",
     "Activity",
@@ -111,9 +112,10 @@ test("terminal workbench controller delegates widget view rendering without chan
     "Skills",
   ]);
   assert.match(renderViews[0].html, /workbench-widget-title/);
-  assert.match(renderViews[0].model.items[0].bodyHtml, /data-workbench-turn-id="turn-1"/);
-  assert.match(renderViews[0].model.items[1].bodyHtml, /workbench-log-lens/);
-  assert.match(renderViews[0].model.items[4].bodyHtml, /data-workbench-open-mermaid="true"/);
+  assert.match(renderViews[0].model.items[0].bodyHtml, /data-workbench-open-terminal="true"/);
+  assert.match(renderViews[0].model.items[1].bodyHtml, /data-workbench-turn-id="turn-1"/);
+  assert.match(renderViews[0].model.items[2].bodyHtml, /workbench-log-lens/);
+  assert.match(renderViews[0].model.items[5].bodyHtml, /data-workbench-open-mermaid="true"/);
   assert.equal(container.innerHTML, "", "React-rendered path does not use legacy innerHTML");
   assert.ok(state.workbenchWidgets.lastHtml.includes("workbench-widget-title"));
 });

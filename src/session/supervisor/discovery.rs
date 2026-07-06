@@ -31,6 +31,7 @@ struct MissingTrackedSessionSummary {
 
 struct AdoptSessionPlan {
     session_id: String,
+    tmux_target: TmuxTarget,
     stale_seed: Option<SessionSummary>,
     reused_session_id: bool,
     last_activity_override: Option<chrono::DateTime<Utc>>,
@@ -38,15 +39,21 @@ struct AdoptSessionPlan {
 }
 
 impl SessionSupervisor {
-    async fn list_tmux_session_names(&self, reason: &'static str) -> ListedTmuxSessions {
+    async fn list_tmux_session_names(
+        &self,
+        reason: &'static str,
+        tmux_target: &TmuxTarget,
+    ) -> ListedTmuxSessions {
         let list_started = Instant::now();
         info!(
             reason,
             phase = "tmux_list_sessions",
+            tmux_target = %tmux_target.display_label(),
             "running tmux list-sessions"
         );
-        let output = run_bounded_tmux_command(
+        let output = run_bounded_tmux_command_for_target(
             "tmux",
+            tmux_target,
             &["list-sessions", "-F", "#{session_name}"],
             TMUX_LIST_SESSIONS_TIMEOUT,
             "list-sessions",
@@ -123,19 +130,24 @@ impl SessionSupervisor {
         }
     }
 
-    async fn tracked_tmux_names(&self) -> HashSet<String> {
+    async fn tracked_tmux_names(&self, tmux_target: &TmuxTarget) -> HashSet<String> {
         let sessions = self.sessions.read().await;
         sessions
             .values()
+            .filter(|handle| &handle.tmux_target == tmux_target)
             .map(|handle| handle.tmux_name.clone())
             .collect()
     }
 
-    async fn active_session_id_for_tmux(&self, tmux_name: &str) -> Option<String> {
+    async fn active_session_id_for_tmux(
+        &self,
+        tmux_name: &str,
+        tmux_target: &TmuxTarget,
+    ) -> Option<String> {
         let sessions = self.sessions.read().await;
         sessions
             .values()
-            .find(|handle| handle.tmux_name == tmux_name)
+            .find(|handle| handle.tmux_name == tmux_name && handle.tmux_target == *tmux_target)
             .map(|handle| handle.session_id.clone())
     }
 
@@ -147,19 +159,26 @@ impl SessionSupervisor {
             .cloned()
     }
 
-    async fn stale_summaries_for_tmux(&self, tmux_name: &str) -> Vec<SessionSummary> {
+    async fn stale_summaries_for_tmux(
+        &self,
+        tmux_name: &str,
+        tmux_target: &TmuxTarget,
+    ) -> Vec<SessionSummary> {
         let stale = self.stale_sessions.read().await;
         stale
             .iter()
-            .filter(|summary| summary.tmux_name == tmux_name)
+            .filter(|summary| summary.tmux_name == tmux_name && summary.tmux_target == *tmux_target)
             .cloned()
             .collect()
     }
 
-    async fn stale_session_ids_by_tmux(&self) -> HashMap<String, String> {
+    async fn stale_session_ids_by_tmux(&self, tmux_target: &TmuxTarget) -> HashMap<String, String> {
         let stale = self.stale_sessions.read().await;
         let mut by_tmux = HashMap::new();
         for summary in stale.iter() {
+            if summary.tmux_target != *tmux_target {
+                continue;
+            }
             by_tmux
                 .entry(summary.tmux_name.clone())
                 .or_insert_with(|| summary.session_id.clone());
@@ -171,9 +190,10 @@ impl SessionSupervisor {
         self: &Arc<Self>,
         reason: &'static str,
         listed_tmux_names: &[String],
+        tmux_target: &TmuxTarget,
     ) -> u64 {
-        let tracked_tmux_names = self.tracked_tmux_names().await;
-        let stale_session_ids_by_tmux = self.stale_session_ids_by_tmux().await;
+        let tracked_tmux_names = self.tracked_tmux_names(tmux_target).await;
+        let stale_session_ids_by_tmux = self.stale_session_ids_by_tmux(tmux_target).await;
         let (candidates, highest_numeric) = plan_tmux_discovery_candidates(
             listed_tmux_names,
             &tracked_tmux_names,
@@ -181,7 +201,8 @@ impl SessionSupervisor {
         );
 
         for candidate in candidates {
-            self.attach_discovery_candidate(candidate, reason).await;
+            self.attach_discovery_candidate(candidate, reason, tmux_target.clone())
+                .await;
         }
 
         highest_numeric
@@ -191,6 +212,7 @@ impl SessionSupervisor {
         self: &Arc<Self>,
         candidate: DiscoveryCandidate,
         reason: &'static str,
+        tmux_target: TmuxTarget,
     ) {
         let tmux_name = candidate.tmux_name;
         let session_id = match candidate.reuse_session_id {
@@ -203,6 +225,7 @@ impl SessionSupervisor {
         info!(
             session_id = %session_id,
             tmux_name = %tmux_name,
+            tmux_target = %tmux_target.display_label(),
             "discovered existing tmux session"
         );
 
@@ -217,6 +240,7 @@ impl SessionSupervisor {
         match crate::session::actor::SessionActor::spawn(
             session_id.clone(),
             tmux_name.clone(),
+            tmux_target.clone(),
             true,
             None,
             None,
@@ -232,7 +256,7 @@ impl SessionSupervisor {
                 {
                     return;
                 }
-                self.emit_discovered_created_event(session_id, tmux_name, reason);
+                self.emit_discovered_created_event(session_id, tmux_name, tmux_target, reason);
             }
             Err(error) => {
                 error!(tmux_name = %tmux_name, "failed to attach to tmux session: {}", error);
@@ -247,12 +271,12 @@ impl SessionSupervisor {
         handle: ActorHandle,
     ) -> bool {
         let mut sessions = self.sessions.write().await;
-        if sessions
-            .values()
-            .any(|existing| existing.tmux_name == tmux_name)
-        {
+        if sessions.values().any(|existing| {
+            existing.tmux_name == tmux_name && existing.tmux_target == handle.tmux_target
+        }) {
             debug!(
                 tmux_name = %tmux_name,
+                tmux_target = %handle.tmux_target.display_label(),
                 "skipping duplicate discovered tmux session"
             );
             drop(sessions);
@@ -267,9 +291,11 @@ impl SessionSupervisor {
         &self,
         session_id: String,
         tmux_name: String,
+        tmux_target: TmuxTarget,
         reason: &'static str,
     ) {
-        let summary = self.build_placeholder_summary(&session_id, &tmux_name);
+        let mut summary = self.build_placeholder_summary(&session_id, &tmux_name);
+        summary.tmux_target = tmux_target;
         let _ = self.lifecycle_tx.send(LifecycleEvent::Created {
             session_id,
             summary,
@@ -282,6 +308,7 @@ impl SessionSupervisor {
         &self,
         discovery_reliable: bool,
         listed_tmux_names: &[String],
+        tmux_target: &TmuxTarget,
     ) {
         if !discovery_reliable {
             warn!("skipping stale reconciliation due unreliable tmux discovery");
@@ -291,9 +318,17 @@ impl SessionSupervisor {
         let discovered_tmux_names: HashSet<String> = listed_tmux_names.iter().cloned().collect();
         let unresolved_stale = {
             let mut stale = self.stale_sessions.write().await;
-            stale.retain(|summary| !discovered_tmux_names.contains(&summary.tmux_name));
-            let unresolved = stale.clone();
-            stale.clear();
+            let mut unresolved = Vec::new();
+            stale.retain(|summary| {
+                if summary.tmux_target != *tmux_target {
+                    return true;
+                }
+                if discovered_tmux_names.contains(&summary.tmux_name) {
+                    return false;
+                }
+                unresolved.push(summary.clone());
+                false
+            });
             unresolved
         };
 
@@ -343,11 +378,14 @@ impl SessionSupervisor {
     async fn missing_tracked_handles(
         &self,
         listed_tmux_names: &HashSet<String>,
+        tmux_target: &TmuxTarget,
     ) -> Vec<ActorHandle> {
         let sessions = self.sessions.read().await;
         sessions
             .values()
-            .filter(|handle| !listed_tmux_names.contains(&handle.tmux_name))
+            .filter(|handle| {
+                handle.tmux_target == *tmux_target && !listed_tmux_names.contains(&handle.tmux_name)
+            })
             .cloned()
             .collect()
     }
@@ -378,13 +416,17 @@ impl SessionSupervisor {
         &self,
         missing_handles: &[ActorHandle],
         listed_tmux_names: &HashSet<String>,
+        tmux_target: &TmuxTarget,
     ) -> Vec<ActorHandle> {
         let mut sessions = self.sessions.write().await;
         let mut removed = Vec::with_capacity(missing_handles.len());
         for handle in missing_handles {
             let still_missing = sessions
                 .get(&handle.session_id)
-                .map(|current| !listed_tmux_names.contains(&current.tmux_name))
+                .map(|current| {
+                    current.tmux_target == *tmux_target
+                        && !listed_tmux_names.contains(&current.tmux_name)
+                })
                 .unwrap_or(false);
             if still_missing {
                 if let Some(handle) = sessions.remove(&handle.session_id) {
@@ -415,7 +457,8 @@ impl SessionSupervisor {
             }
             stale.retain(|existing| {
                 existing.session_id != stale_summary.summary.session_id
-                    && existing.tmux_name != stale_summary.summary.tmux_name
+                    && !(existing.tmux_name == stale_summary.summary.tmux_name
+                        && existing.tmux_target == stale_summary.summary.tmux_target)
             });
             stale.push(stale_summary.summary.clone());
         }
@@ -447,13 +490,16 @@ impl SessionSupervisor {
         &self,
         discovery_reliable: bool,
         listed_tmux_names: &[String],
+        tmux_target: &TmuxTarget,
     ) {
         if !discovery_reliable {
             return;
         }
 
         let listed_tmux_names = listed_tmux_names.iter().cloned().collect::<HashSet<_>>();
-        let missing_handles = self.missing_tracked_handles(&listed_tmux_names).await;
+        let missing_handles = self
+            .missing_tracked_handles(&listed_tmux_names, tmux_target)
+            .await;
         if missing_handles.is_empty() {
             return;
         }
@@ -462,7 +508,7 @@ impl SessionSupervisor {
             .stale_summaries_for_missing_tracked_handles(&missing_handles)
             .await;
         let removed_handles = self
-            .remove_still_missing_tracked_handles(&missing_handles, &listed_tmux_names)
+            .remove_still_missing_tracked_handles(&missing_handles, &listed_tmux_names, tmux_target)
             .await;
         if removed_handles.is_empty() {
             return;
@@ -529,15 +575,16 @@ impl SessionSupervisor {
     async fn resolve_adopt_session_identity(
         self: &Arc<Self>,
         tmux_name: &str,
+        tmux_target: &TmuxTarget,
         requested_session_id: Option<String>,
     ) -> Result<(String, Option<SessionSummary>), TmuxAdoptError> {
         match requested_session_id {
             Some(session_id) => {
-                self.resolve_requested_adopt_session_identity(tmux_name, session_id)
+                self.resolve_requested_adopt_session_identity(tmux_name, tmux_target, session_id)
                     .await
             }
             None => {
-                self.resolve_unrequested_adopt_session_identity(tmux_name)
+                self.resolve_unrequested_adopt_session_identity(tmux_name, tmux_target)
                     .await
             }
         }
@@ -546,6 +593,7 @@ impl SessionSupervisor {
     async fn resolve_requested_adopt_session_identity(
         &self,
         tmux_name: &str,
+        tmux_target: &TmuxTarget,
         session_id: String,
     ) -> Result<(String, Option<SessionSummary>), TmuxAdoptError> {
         if self.sessions.read().await.contains_key(&session_id) {
@@ -561,7 +609,7 @@ impl SessionSupervisor {
             .ok_or_else(|| TmuxAdoptError::StaleSessionNotFound {
                 session_id: session_id.clone(),
             })?;
-        if stale.tmux_name != tmux_name {
+        if stale.tmux_name != tmux_name || stale.tmux_target != *tmux_target {
             return Err(TmuxAdoptError::StaleSessionConflict {
                 session_id,
                 stale_tmux_name: stale.tmux_name,
@@ -575,8 +623,9 @@ impl SessionSupervisor {
     async fn resolve_unrequested_adopt_session_identity(
         &self,
         tmux_name: &str,
+        tmux_target: &TmuxTarget,
     ) -> Result<(String, Option<SessionSummary>), TmuxAdoptError> {
-        let stale_matches = self.stale_summaries_for_tmux(tmux_name).await;
+        let stale_matches = self.stale_summaries_for_tmux(tmux_name, tmux_target).await;
         match stale_matches.len() {
             0 => Ok((self.allocate_unique_session_id().await, None)),
             1 => {
@@ -593,8 +642,12 @@ impl SessionSupervisor {
     async fn reject_already_tracked_adopt_target(
         &self,
         tmux_name: &str,
+        tmux_target: &TmuxTarget,
     ) -> Result<(), TmuxAdoptError> {
-        if let Some(active_id) = self.active_session_id_for_tmux(tmux_name).await {
+        if let Some(active_id) = self
+            .active_session_id_for_tmux(tmux_name, tmux_target)
+            .await
+        {
             return Err(TmuxAdoptError::AlreadyTracked {
                 tmux_name: tmux_name.to_string(),
                 session_id: active_id,
@@ -604,8 +657,14 @@ impl SessionSupervisor {
         Ok(())
     }
 
-    async fn verify_adopt_target_exists(&self, tmux_name: &str) -> Result<(), TmuxAdoptError> {
-        let listed = self.list_tmux_session_names("manual_tmux_adopt").await;
+    async fn verify_adopt_target_exists(
+        &self,
+        tmux_name: &str,
+        tmux_target: &TmuxTarget,
+    ) -> Result<(), TmuxAdoptError> {
+        let listed = self
+            .list_tmux_session_names("manual_tmux_adopt", tmux_target)
+            .await;
         if !listed.reliable {
             return Err(TmuxAdoptError::DiscoveryUnavailable);
         }
@@ -636,10 +695,11 @@ impl SessionSupervisor {
     async fn prepare_adopt_session_plan(
         self: &Arc<Self>,
         tmux_name: &str,
+        tmux_target: &TmuxTarget,
         requested_session_id: Option<String>,
     ) -> Result<AdoptSessionPlan, TmuxAdoptError> {
         let (session_id, stale_seed) = self
-            .resolve_adopt_session_identity(tmux_name, requested_session_id)
+            .resolve_adopt_session_identity(tmux_name, tmux_target, requested_session_id)
             .await?;
         let reused_session_id = stale_seed.is_some();
         if reused_session_id {
@@ -660,6 +720,7 @@ impl SessionSupervisor {
 
         Ok(AdoptSessionPlan {
             session_id,
+            tmux_target: tmux_target.clone(),
             stale_seed,
             reused_session_id,
             last_activity_override,
@@ -675,6 +736,7 @@ impl SessionSupervisor {
         crate::session::actor::SessionActor::spawn(
             plan.session_id.clone(),
             tmux_name.to_string(),
+            plan.tmux_target.clone(),
             true,
             None,
             None,
@@ -693,12 +755,14 @@ impl SessionSupervisor {
         &self,
         session_id: &str,
         tmux_name: &str,
+        tmux_target: &TmuxTarget,
         stale_seed: Option<SessionSummary>,
         reason: &'static str,
     ) -> (SessionSummary, Option<RepoTheme>) {
         let mut summary = stale_seed
             .unwrap_or_else(|| self.build_placeholder_summary(session_id, tmux_name))
             .revive_from_stale(session_id, tmux_name, reason);
+        summary.tmux_target = tmux_target.clone();
         let repo_theme = self.resolve_repo_theme_for_summary(&mut summary);
         (summary, repo_theme)
     }
@@ -709,6 +773,7 @@ impl SessionSupervisor {
         session_id: &str,
         handle: ActorHandle,
     ) -> Result<(), TmuxAdoptError> {
+        let tmux_target = handle.tmux_target.clone();
         if self
             .insert_discovered_handle(session_id.to_string(), tmux_name.to_string(), handle)
             .await
@@ -717,7 +782,7 @@ impl SessionSupervisor {
         }
 
         let active_id = self
-            .active_session_id_for_tmux(tmux_name)
+            .active_session_id_for_tmux(tmux_name, &tmux_target)
             .await
             .unwrap_or_else(|| "<unknown>".to_string());
         Err(TmuxAdoptError::AlreadyTracked {
@@ -740,10 +805,15 @@ impl SessionSupervisor {
         } else {
             "manual_tmux_adopt"
         };
-        let (summary, repo_theme) =
-            self.build_adopted_summary(&plan.session_id, tmux_name, plan.stale_seed, reason);
+        let (summary, repo_theme) = self.build_adopted_summary(
+            &plan.session_id,
+            tmux_name,
+            &plan.tmux_target,
+            plan.stale_seed,
+            reason,
+        );
 
-        self.retain_non_adopted_stale_summaries(&plan.session_id, tmux_name)
+        self.retain_non_adopted_stale_summaries(&plan.session_id, tmux_name, &plan.tmux_target)
             .await;
         self.cache_adopted_summary(&plan.session_id, summary.clone())
             .await;
@@ -763,10 +833,16 @@ impl SessionSupervisor {
         })
     }
 
-    async fn retain_non_adopted_stale_summaries(&self, session_id: &str, tmux_name: &str) {
+    async fn retain_non_adopted_stale_summaries(
+        &self,
+        session_id: &str,
+        tmux_name: &str,
+        tmux_target: &TmuxTarget,
+    ) {
         let mut stale = self.stale_sessions.write().await;
         stale.retain(|existing| {
-            existing.session_id != session_id && existing.tmux_name != tmux_name
+            existing.session_id != session_id
+                && !(existing.tmux_name == tmux_name && existing.tmux_target == *tmux_target)
         });
     }
 
@@ -809,12 +885,19 @@ impl SessionSupervisor {
         reason: &'static str,
     ) -> anyhow::Result<()> {
         let _discovery_guard = self.discovery_lock.lock().await;
-        let listed = self.list_tmux_session_names(reason).await;
-        let highest_numeric = self.attach_discovered_sessions(reason, &listed.names).await;
-        self.reconcile_stale_sessions_after_discovery(listed.reliable, &listed.names)
+        let tmux_target = self.config.tmux_target.clone();
+        let listed = self.list_tmux_session_names(reason, &tmux_target).await;
+        let highest_numeric = self
+            .attach_discovered_sessions(reason, &listed.names, &tmux_target)
             .await;
-        self.reconcile_tracked_sessions_after_discovery(listed.reliable, &listed.names)
+        self.reconcile_stale_sessions_after_discovery(listed.reliable, &listed.names, &tmux_target)
             .await;
+        self.reconcile_tracked_sessions_after_discovery(
+            listed.reliable,
+            &listed.names,
+            &tmux_target,
+        )
+        .await;
         self.finish_tmux_discovery(listed.reliable, highest_numeric)
             .await;
 
@@ -827,17 +910,26 @@ impl SessionSupervisor {
     pub async fn adopt_tmux_session(
         self: &Arc<Self>,
         tmux_name: String,
+        tmux_target: Option<TmuxTarget>,
         session_id: Option<String>,
     ) -> Result<AdoptedTmuxSession, TmuxAdoptError> {
         if tmux_name.is_empty() {
             return Err(TmuxAdoptError::EmptyTmuxName);
         }
+        let tmux_target = tmux_target.unwrap_or_else(|| self.config.tmux_target.clone());
+        tmux_target
+            .validate()
+            .map_err(|error| TmuxAdoptError::InvalidTarget {
+                message: error.to_string(),
+            })?;
 
         let _discovery_guard = self.discovery_lock.lock().await;
-        self.reject_already_tracked_adopt_target(&tmux_name).await?;
-        self.verify_adopt_target_exists(&tmux_name).await?;
+        self.reject_already_tracked_adopt_target(&tmux_name, &tmux_target)
+            .await?;
+        self.verify_adopt_target_exists(&tmux_name, &tmux_target)
+            .await?;
         let plan = self
-            .prepare_adopt_session_plan(&tmux_name, session_id)
+            .prepare_adopt_session_plan(&tmux_name, &tmux_target, session_id)
             .await?;
         let handle = self.spawn_adopted_tmux_actor(&tmux_name, &plan)?;
         self.finish_adopted_tmux_session(&tmux_name, plan, handle)

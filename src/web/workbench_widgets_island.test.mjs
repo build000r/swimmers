@@ -69,12 +69,13 @@ function richWorkbenchModel() {
 test("workbench widgets island preserves widget shell and body DOM contract", () => {
   const nodes = createWorkbenchWidgetsElements(createElement, richWorkbenchModel());
   const details = nodes.filter((node) => node.type === "details");
-  const [turns, logs, activity, diffs, artifacts, skills] = details;
+  const [terminal, turns, logs, activity, diffs, artifacts, skills] = details;
 
-  assert.deepEqual(titlesFor(nodes), ["Turns", "Logs", "Activity", "Diffs", "Artifacts", "Skills"]);
-  assert.deepEqual(details.map((node) => node.props.className), Array(6).fill("workbench-widget"));
-  assert.deepEqual(details.map((node) => node.props.key), ["turns", "logs", "activity", "diffs", "artifacts", "skills"]);
-  assert.deepEqual(details.map((node) => node.props.open), [true, true, true, true, false, false]);
+  assert.deepEqual(titlesFor(nodes), ["Terminal", "Turns", "Logs", "Activity", "Diffs", "Artifacts", "Skills"]);
+  assert.deepEqual(details.map((node) => node.props.className), Array(7).fill("workbench-widget"));
+  assert.deepEqual(details.map((node) => node.props.key), ["terminal", "turns", "logs", "activity", "diffs", "artifacts", "skills"]);
+  assert.deepEqual(details.map((node) => node.props.open), [true, true, true, true, true, false, false]);
+  assert.match(bodyHtmlFor(terminal), /data-workbench-open-terminal="true"/);
   assert.equal(turns.props.children[0].type, "summary");
   assert.equal(turns.props.children[0].props.children[1].props.className, "workbench-widget-meta");
   assert.equal(turns.props.children[0].props.children[1].props.children[0], "1 user");
@@ -104,11 +105,12 @@ test("workbench widgets island preserves loading, error, and empty states", () =
 
   const empty = buildWorkbenchWidgetsViewModel({ widgets: {}, contextPayload: null });
   const emptyNodes = createWorkbenchWidgetsElements(createElement, empty);
-  assert.equal(emptyNodes.length, 6);
-  assert.match(bodyHtmlFor(emptyNodes[0]), /No user-submitted turns found/);
-  assert.match(bodyHtmlFor(emptyNodes[1]), /No recent pane output/);
-  assert.match(bodyHtmlFor(emptyNodes[4]), /No Mermaid or plan artifact found/);
-  assert.match(bodyHtmlFor(emptyNodes[5]), /Skillbox skills have not loaded/);
+  assert.equal(emptyNodes.length, 7);
+  assert.match(bodyHtmlFor(emptyNodes[0]), /Live terminal detached/);
+  assert.match(bodyHtmlFor(emptyNodes[1]), /No user-submitted turns found/);
+  assert.match(bodyHtmlFor(emptyNodes[2]), /No recent pane output/);
+  assert.match(bodyHtmlFor(emptyNodes[5]), /No Mermaid or plan artifact found/);
+  assert.match(bodyHtmlFor(emptyNodes[6]), /Skillbox skills have not loaded/);
 
   const errorNodes = createWorkbenchWidgetsElements(createElement, {
     statusText: "timeline: unavailable",

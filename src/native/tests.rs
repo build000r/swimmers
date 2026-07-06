@@ -265,7 +265,11 @@ fn validate_tmux_binary_rejects_relative_override() {
 
 #[test]
 fn build_iterm_attach_command_uses_simple_attach_exec() {
-    let command = build_iterm_attach_command("main", Path::new("/opt/homebrew/bin/tmux"));
+    let command = build_iterm_attach_command(
+        "main",
+        &crate::tmux_target::TmuxTarget::Default,
+        Path::new("/opt/homebrew/bin/tmux"),
+    );
 
     assert_eq!(
         command,
@@ -275,7 +279,11 @@ fn build_iterm_attach_command_uses_simple_attach_exec() {
 
 #[test]
 fn build_iterm_attach_command_preserves_whitelisted_tokens() {
-    let command = build_iterm_attach_command("team-session", Path::new("/tmp/tmux/tmux"));
+    let command = build_iterm_attach_command(
+        "team-session",
+        &crate::tmux_target::TmuxTarget::Default,
+        Path::new("/tmp/tmux/tmux"),
+    );
     assert_eq!(
         command,
         "exec /tmp/tmux/tmux attach-session -t '=team-session'"
@@ -284,7 +292,11 @@ fn build_iterm_attach_command_preserves_whitelisted_tokens() {
 
 #[test]
 fn build_ghostty_attach_command_preserves_whitelisted_tokens() {
-    let command = build_ghostty_attach_command("team-session", Path::new("/tmp/tmux/tmux"));
+    let command = build_ghostty_attach_command(
+        "team-session",
+        &crate::tmux_target::TmuxTarget::Default,
+        Path::new("/tmp/tmux/tmux"),
+    );
     assert_eq!(
         command,
         "exec /tmp/tmux/tmux attach-session -t '=team-session'"
@@ -293,7 +305,11 @@ fn build_ghostty_attach_command_preserves_whitelisted_tokens() {
 
 #[test]
 fn build_iterm_attach_command_quotes_words_with_spaces() {
-    let command = build_iterm_attach_command("team session", Path::new("/tmp/tmux builds/tmux"));
+    let command = build_iterm_attach_command(
+        "team session",
+        &crate::tmux_target::TmuxTarget::Default,
+        Path::new("/tmp/tmux builds/tmux"),
+    );
     assert_eq!(
         command,
         "exec '/tmp/tmux builds/tmux' attach-session -t '=team session'"
@@ -302,7 +318,11 @@ fn build_iterm_attach_command_quotes_words_with_spaces() {
 
 #[test]
 fn build_ghostty_attach_command_quotes_words_with_spaces() {
-    let command = build_ghostty_attach_command("team session", Path::new("/tmp/tmux builds/tmux"));
+    let command = build_ghostty_attach_command(
+        "team session",
+        &crate::tmux_target::TmuxTarget::Default,
+        Path::new("/tmp/tmux builds/tmux"),
+    );
     assert_eq!(
         command,
         "exec '/tmp/tmux builds/tmux' attach-session -t '=team session'"
@@ -311,8 +331,16 @@ fn build_ghostty_attach_command_quotes_words_with_spaces() {
 
 #[test]
 fn native_attach_commands_accept_tmux_names_with_colons() {
-    let iterm = build_iterm_attach_command("team:api", Path::new("/tmp/tmux"));
-    let ghostty = build_ghostty_attach_command("team:api", Path::new("/tmp/tmux"));
+    let iterm = build_iterm_attach_command(
+        "team:api",
+        &crate::tmux_target::TmuxTarget::Default,
+        Path::new("/tmp/tmux"),
+    );
+    let ghostty = build_ghostty_attach_command(
+        "team:api",
+        &crate::tmux_target::TmuxTarget::Default,
+        Path::new("/tmp/tmux"),
+    );
 
     assert_eq!(iterm, "exec /tmp/tmux attach-session -t '=team:api'");
     assert_eq!(ghostty, "exec /tmp/tmux attach-session -t '=team:api'");
@@ -341,7 +369,10 @@ async fn query_tmux_pane_metadata_uses_exact_pane_target_for_numeric_names() {
     perms.set_mode(0o755);
     std::fs::set_permissions(&fake_tmux, perms).unwrap();
 
-    let (pane_id, cwd) = query_tmux_pane_metadata(&fake_tmux, "7").await.unwrap();
+    let (pane_id, cwd) =
+        query_tmux_pane_metadata(&fake_tmux, "7", &crate::tmux_target::TmuxTarget::Default)
+            .await
+            .unwrap();
 
     assert_eq!(pane_id.as_deref(), Some("7"));
     assert_eq!(cwd.as_deref(), Some("/tmp/project"));
@@ -363,6 +394,7 @@ fn attention_group_summary(session_id: &str, tmux_name: &str) -> SessionSummary 
     SessionSummary {
         session_id: session_id.to_string(),
         tmux_name: tmux_name.to_string(),
+        tmux_target: crate::tmux_target::TmuxTarget::Default,
         state: crate::types::SessionState::Idle,
         current_command: None,
         state_evidence: crate::types::StateEvidence::new("test"),
@@ -399,8 +431,14 @@ async fn no_focus_attention_group_refresh_reuses_existing_tmux_session() {
     let temp = tempdir().unwrap();
     let fake_tmux = temp.path().join("tmux");
     let log_path = temp.path().join("tmux.log");
-    let first_command = build_attention_group_attach_command("new one", &fake_tmux);
-    let second_command = build_attention_group_attach_command("next one", &fake_tmux);
+    let first_command = build_attention_group_attach_command(
+        &attention_group_summary("sess", "new one"),
+        &fake_tmux,
+    );
+    let second_command = build_attention_group_attach_command(
+        &attention_group_summary("sess", "next one"),
+        &fake_tmux,
+    );
     std::fs::write(
             &fake_tmux,
             format!(
@@ -481,12 +519,30 @@ async fn no_focus_attention_group_refresh_replaces_only_one_stale_pane() {
     let temp = tempdir().unwrap();
     let fake_tmux = temp.path().join("tmux");
     let log_path = temp.path().join("tmux.log");
-    let old_command = build_attention_group_attach_command("old one", &fake_tmux);
-    let keep_1 = build_attention_group_attach_command("keep 1", &fake_tmux);
-    let keep_2 = build_attention_group_attach_command("keep 2", &fake_tmux);
-    let keep_3 = build_attention_group_attach_command("keep 3", &fake_tmux);
-    let keep_4 = build_attention_group_attach_command("keep 4", &fake_tmux);
-    let keep_5 = build_attention_group_attach_command("keep 5", &fake_tmux);
+    let old_command = build_attention_group_attach_command(
+        &attention_group_summary("sess", "old one"),
+        &fake_tmux,
+    );
+    let keep_1 = build_attention_group_attach_command(
+        &attention_group_summary("sess", "keep 1"),
+        &fake_tmux,
+    );
+    let keep_2 = build_attention_group_attach_command(
+        &attention_group_summary("sess", "keep 2"),
+        &fake_tmux,
+    );
+    let keep_3 = build_attention_group_attach_command(
+        &attention_group_summary("sess", "keep 3"),
+        &fake_tmux,
+    );
+    let keep_4 = build_attention_group_attach_command(
+        &attention_group_summary("sess", "keep 4"),
+        &fake_tmux,
+    );
+    let keep_5 = build_attention_group_attach_command(
+        &attention_group_summary("sess", "keep 5"),
+        &fake_tmux,
+    );
     std::fs::write(
             &fake_tmux,
             format!(
@@ -628,8 +684,14 @@ async fn focused_attention_group_reuses_tmux_session_and_opens_ghostty_window() 
     let temp = tempdir().unwrap();
     let fake_tmux = temp.path().join("tmux");
     let tmux_log_path = temp.path().join("tmux.log");
-    let first_command = build_attention_group_attach_command("new one", &fake_tmux);
-    let second_command = build_attention_group_attach_command("next one", &fake_tmux);
+    let first_command = build_attention_group_attach_command(
+        &attention_group_summary("sess", "new one"),
+        &fake_tmux,
+    );
+    let second_command = build_attention_group_attach_command(
+        &attention_group_summary("sess", "next one"),
+        &fake_tmux,
+    );
     std::fs::write(
             &fake_tmux,
             format!(

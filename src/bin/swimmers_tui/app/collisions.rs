@@ -207,6 +207,7 @@ mod tests {
         SessionSummary {
             session_id: session_id.to_string(),
             tmux_name: session_id.to_string(),
+            tmux_target: swimmers::tmux_target::TmuxTarget::Default,
             state: SessionState::Idle,
             current_command: None,
             state_evidence: StateEvidence::new("test"),

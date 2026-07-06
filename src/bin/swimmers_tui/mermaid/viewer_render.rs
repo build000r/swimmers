@@ -1,8 +1,8 @@
 use super::*;
 
 fn render_wrapped_lines(renderer: &mut Renderer, rect: Rect, text: &str, color: Color) {
-    let mut y = rect.y;
-    for line in wrap_text(text, rect.width as usize) {
+    for (offset, line) in wrap_text(text, rect.width as usize).into_iter().enumerate() {
+        let y = rect.y.saturating_add(offset as u16);
         if y >= rect.bottom() {
             break;
         }
@@ -12,7 +12,6 @@ fn render_wrapped_lines(renderer: &mut Renderer, rect: Rect, text: &str, color: 
             &truncate_label(&line, rect.width as usize),
             color,
         );
-        y += 1;
     }
 }
 
@@ -189,7 +188,13 @@ fn render_mermaid_header_plan_tabs(
         &mut viewer.tab_rects,
         after_back,
     );
-    render_mermaid_header_plan_tab_tmux_suffix(renderer, field, &viewer.tmux_name, tab_x);
+    render_mermaid_header_plan_tab_tmux_suffix(
+        renderer,
+        field,
+        &viewer.tmux_name,
+        &viewer.tmux_target,
+        tab_x,
+    );
     true
 }
 
@@ -239,9 +244,14 @@ fn render_mermaid_header_plan_tab_tmux_suffix(
     renderer: &mut Renderer,
     field: Rect,
     tmux_name: &str,
+    tmux_target: &swimmers::tmux_target::TmuxTarget,
     tab_x: u16,
 ) {
-    let name_label = format!("| {tmux_name}");
+    let name_label = if tmux_target.is_default() {
+        format!("| {tmux_name}")
+    } else {
+        format!("| {} {tmux_name}", tmux_target.display_label())
+    };
     if tab_x + display_width(&name_label) < field.right() {
         renderer.draw_text(tab_x, field.y, &name_label, Color::DarkGrey);
     }

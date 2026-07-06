@@ -5,6 +5,7 @@ fn thought_snapshot_for_summary_matches_active_tmux_pane() {
     let summary = SessionSummary {
         session_id: "sess_1".to_string(),
         tmux_name: "work".to_string(),
+        tmux_target: crate::tmux_target::TmuxTarget::Default,
         state: SessionState::Idle,
         current_command: None,
         state_evidence: Default::default(),
@@ -92,6 +93,7 @@ fn thought_snapshot_for_summary_does_not_fall_back_to_latest_tmux_pane_without_a
     let summary = SessionSummary {
         session_id: "sess_1".to_string(),
         tmux_name: "work".to_string(),
+        tmux_target: crate::tmux_target::TmuxTarget::Default,
         state: SessionState::Idle,
         current_command: None,
         state_evidence: Default::default(),

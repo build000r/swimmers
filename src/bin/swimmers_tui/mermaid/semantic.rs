@@ -1,3 +1,5 @@
+#![allow(clippy::too_many_arguments)]
+
 use super::*;
 
 pub(crate) fn mermaid_kind_supports_semantic_overlay(kind: DiagramKind) -> bool {

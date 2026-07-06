@@ -319,6 +319,8 @@ In `AUTH_MODE=token`, browser HTTP requests use an `Authorization: Bearer ...` h
 | `SWIMMERS_ATTENTION_GROUP_SIZE` | `6` | Number of panes to place in the managed attention group; values are clamped to `1`-`6`. |
 | `SWIMMERS_ATTENTION_GROUP_LAYOUT` | `tiled` | tmux pane layout for the managed attention group: `tiled`, `even-horizontal`, `even-vertical`, `main-horizontal`, or `main-vertical`. Aliases such as `columns`, `stacked`, and `main-left` are accepted. |
 | `SWIMMERS_ATTENTION_GROUP_INCLUDE_UNNUMBERED` | `(unset)` | Set to `1` to let managed attention groups include ready tmux sessions whose names are not only digits. |
+| `SWIMMERS_TMUX_SOCKET_NAME` | `(unset)` | Route tmux operations through `tmux -L <name>` for an isolated tmux server. Mutually exclusive with `SWIMMERS_TMUX_SOCKET_PATH`. |
+| `SWIMMERS_TMUX_SOCKET_PATH` | `(unset)` | Route tmux operations through `tmux -S <path>` for an explicit tmux socket. Mutually exclusive with `SWIMMERS_TMUX_SOCKET_NAME`. |
 | `SWIMMERS_THOUGHT_BACKEND` | `daemon` | Thought subsystem backend: `daemon` or `inproc` |
 | `CLAWGS_BIN` | `(auto)` | Override path to the `clawgs` binary used by the thought rail |
 | `SWIMMERS_THOUGHT_TICK_MS` | `15000` | Thought polling tick in milliseconds. Values below `250` or invalid values fall back to the default; values above `300000` are clamped. |
@@ -345,6 +347,12 @@ While the TUI is running, press `n` or click the top-right native-open label to 
 When a selected session is stale because its tmux session disappeared, press `A` after recreating that exact tmux session to reattach the stale swimmers identity instead of creating a duplicate.
 
 Click `[attention group]` in the TUI header to build or refresh a managed `swimmers-attention` tmux session from local numbered tmux sessions that are ready for operator input. Set `SWIMMERS_ATTENTION_GROUP_SIZE` to choose how many panes you want in the group and `SWIMMERS_ATTENTION_GROUP_LAYOUT` to control their tmux placement. Set `SWIMMERS_ATTENTION_GROUP_INCLUDE_UNNUMBERED=1` to also include ready sessions that use other naming conventions. When Ghostty is the native target on macOS, that explicit action opens the attention group in its own managed Ghostty window. On Linux or other non-native hosts, the same click refreshes the tmux group and reports `tmux attach -t swimmers-attention` for manual attach. The group prefers related project work over raw recency, preserves the managed tmux session, and refreshes the configured pane count in place as visible panes stop waiting or new ready panes can fit.
+
+For critical sessions that should survive a default tmux-server crash, start a
+separate tmux namespace such as `tmux -L tiktok new-session -d -s tiktok` and
+launch Swimmers with `SWIMMERS_TMUX_SOCKET_NAME=tiktok`. See
+[`docs/tmux-crash-evidence.md`](docs/tmux-crash-evidence.md) for the incident
+collector and isolated-socket runbook.
 
 The optional browser terminal renderer reads FrankenTerm assets from `SWIMMERS_FRANKENTUI_PKG_DIR` (or `FRANKENTUI_PKG_DIR`). The source-checkout wrappers can discover and export that path for local browser workflows; standalone `swimmers` runs need one of those env vars when the package assets are outside the bundled candidate paths.
 

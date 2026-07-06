@@ -385,6 +385,32 @@ fn claude_user_text_block_text(block: &Value) -> Option<&str> {
     block.get("text").and_then(Value::as_str)
 }
 
+fn claude_assistant_thinking_text<'a>(entry_type: &str, msg: Option<&'a Value>) -> Option<&'a str> {
+    if entry_type != "assistant" {
+        return None;
+    }
+    let msg = msg?;
+    if msg.get("role").and_then(Value::as_str) != Some("assistant") {
+        return None;
+    }
+
+    msg.get("content")?
+        .as_array()?
+        .iter()
+        .find_map(claude_thinking_block_text)
+}
+
+fn claude_thinking_block_text(block: &Value) -> Option<&str> {
+    if block.get("type").and_then(Value::as_str) != Some("thinking") {
+        return None;
+    }
+
+    block
+        .get("thinking")
+        .and_then(Value::as_str)
+        .filter(|text| !text.trim().is_empty())
+}
+
 fn content_text(content: &Value) -> Option<String> {
     if let Some(text) = content.as_str() {
         return Some(text.to_string());
@@ -649,6 +675,18 @@ impl ClaudeCodeReader {
                     }
                 }
             }
+            "thinking" => {
+                if let Some(text) = claude_thinking_block_text(block) {
+                    let trimmed = text.trim();
+                    self.record_reader_action(
+                        AgentAction {
+                            tool: "thinking".to_string(),
+                            detail: Some(truncate(trimmed, 100)),
+                        },
+                        true,
+                    );
+                }
+            }
             _ => {}
         }
     }
@@ -689,12 +727,21 @@ impl ClaudeCodeReader {
         entry: &JsonlEntry,
     ) {
         let (raw, truncated) = truncate_with_flag(&entry.raw, TRANSCRIPT_RAW_MAX_CHARS);
+        let mut kind = transcript_record_kind(entry_type, None, msg);
+        let mut summary = transcript_record_summary(entry_type, None, msg, &entry.raw);
+
+        if let Some(thinking_text) = claude_assistant_thinking_text(entry_type, msg) {
+            kind = "thinking".to_string();
+            let normalized = thinking_text.replace('\r', "").replace('\n', " ");
+            summary = truncate(normalized.trim(), TRANSCRIPT_SUMMARY_MAX_CHARS);
+        }
+
         self.transcript_records.push(AgentTranscriptRecord {
             id: make_record_id("claude", entry.byte_start),
             source: "Claude Code".to_string(),
-            kind: transcript_record_kind(entry_type, None, msg),
+            kind,
             role: transcript_record_role(None, msg),
-            summary: transcript_record_summary(entry_type, None, msg, &entry.raw),
+            summary,
             raw,
             byte_start: entry.byte_start,
             byte_end: entry.byte_end,

@@ -848,6 +848,7 @@ impl TuiApi for MockApi {
     fn adopt_session(
         &self,
         tmux_name: &str,
+        _tmux_target: Option<swimmers::tmux_target::TmuxTarget>,
         session_id: Option<&str>,
     ) -> BoxFuture<'_, Result<AdoptSessionResponse, String>> {
         let state = self.state.clone();

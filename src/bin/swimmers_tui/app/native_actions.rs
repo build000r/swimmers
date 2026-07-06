@@ -342,6 +342,7 @@ mod tests {
         let mut session = SessionSummary {
             session_id: "skillbox::sess-7".to_string(),
             tmux_name: "[Skillbox devbox] 7".to_string(),
+            tmux_target: swimmers::tmux_target::TmuxTarget::Default,
             state: SessionState::Idle,
             current_command: None,
             state_evidence: swimmers::types::StateEvidence::new("osc133_prompt"),

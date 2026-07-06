@@ -894,3 +894,160 @@ fn codex_reader_rediscover_after_claimed_file_is_deleted() {
         std::env::remove_var("HOME");
     }
 }
+
+#[test]
+fn claude_reader_captures_thinking_block_as_current_tool() {
+    let mut reader = ClaudeCodeReader::new("/tmp", &[]);
+    let entries = test_entries(vec![serde_json::json!({
+        "type": "assistant",
+        "message": {
+            "role": "assistant",
+            "content": [
+                { "type": "thinking", "thinking": "I should check the database schema first" },
+                { "type": "text", "text": "Let me look at the schema." }
+            ]
+        }
+    })]);
+
+    reader.parse_entries(&entries);
+
+    let current_tool = reader
+        .current_tool
+        .as_ref()
+        .expect("thinking block should set current_tool");
+    assert_eq!(current_tool.tool, "thinking");
+    assert_eq!(
+        current_tool.detail.as_deref(),
+        Some("I should check the database schema first")
+    );
+    assert!(
+        reader
+            .recent_actions
+            .iter()
+            .any(|action| action.tool == "thinking"),
+        "thinking block should be recent action evidence"
+    );
+}
+
+#[test]
+fn claude_reader_thinking_transcript_record_has_kind_and_summary() {
+    let mut reader = ClaudeCodeReader::new("/tmp", &[]);
+    let entries = test_entries(vec![serde_json::json!({
+        "type": "assistant",
+        "message": {
+            "role": "assistant",
+            "content": [
+                { "type": "thinking", "thinking": "Analyzing\nthe error trace" },
+                { "type": "tool_use", "name": "exec", "input": { "cmd": "ls" } }
+            ]
+        }
+    })]);
+
+    reader.parse_entries(&entries);
+
+    let thinking_record = reader
+        .transcript_records
+        .iter()
+        .find(|r| r.kind == "thinking")
+        .expect("should have a thinking transcript record");
+    assert_eq!(thinking_record.summary, "Analyzing the error trace");
+    assert_eq!(thinking_record.role.as_deref(), Some("assistant"));
+    assert_eq!(thinking_record.source, "Claude Code");
+}
+
+#[test]
+fn claude_reader_thinking_block_truncates_long_detail() {
+    let mut reader = ClaudeCodeReader::new("/tmp", &[]);
+    let long_thinking = "x".repeat(200);
+    let entries = test_entries(vec![serde_json::json!({
+        "type": "assistant",
+        "message": {
+            "role": "assistant",
+            "content": [
+                { "type": "thinking", "thinking": long_thinking }
+            ]
+        }
+    })]);
+
+    reader.parse_entries(&entries);
+
+    let current_tool = reader
+        .current_tool
+        .expect("thinking should set current_tool");
+    assert_eq!(current_tool.tool, "thinking");
+    let expected = "x".repeat(100);
+    assert_eq!(current_tool.detail.as_deref(), Some(expected.as_str()));
+}
+
+#[test]
+fn claude_reader_ignores_empty_thinking_block() {
+    let mut reader = ClaudeCodeReader::new("/tmp", &[]);
+    let entries = test_entries(vec![serde_json::json!({
+        "type": "assistant",
+        "message": {
+            "role": "assistant",
+            "content": [
+                { "type": "thinking", "thinking": "  " },
+                { "type": "text", "text": "some visible output here" }
+            ]
+        }
+    })]);
+
+    reader.parse_entries(&entries);
+
+    assert!(reader.current_tool.is_none());
+    assert!(
+        reader.recent_actions.iter().any(|a| a.tool == "said"),
+        "non-empty text blocks should still be captured as recent actions"
+    );
+    assert!(
+        !reader
+            .transcript_records
+            .iter()
+            .any(|r| r.kind == "thinking"),
+        "empty thinking should not produce thinking-kind record"
+    );
+    assert!(
+        reader
+            .transcript_records
+            .iter()
+            .any(|r| r.kind == "assistant_message"),
+        "empty thinking should preserve the generic assistant transcript record"
+    );
+}
+
+#[test]
+fn claude_reader_thinking_does_not_regress_text_and_tool_use_capture() {
+    let mut reader = ClaudeCodeReader::new("/tmp", &[]);
+    let entries = test_entries(vec![
+        serde_json::json!({
+            "type": "assistant",
+            "message": {
+                "role": "assistant",
+                "content": [
+                    { "type": "tool_use", "name": "Read", "input": { "file_path": "/src/main.rs" } }
+                ]
+            }
+        }),
+        serde_json::json!({
+            "type": "assistant",
+            "message": {
+                "role": "assistant",
+                "content": [
+                    { "type": "text", "text": "The file looks correct." }
+                ]
+            }
+        }),
+    ]);
+
+    reader.parse_entries(&entries);
+
+    assert!(
+        reader.recent_actions.iter().any(|a| a.tool == "Read"),
+        "tool_use should still be captured"
+    );
+    assert!(
+        reader.recent_actions.iter().any(|a| a.tool == "said"),
+        "text blocks should still be captured"
+    );
+}

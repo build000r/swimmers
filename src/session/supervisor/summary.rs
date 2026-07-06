@@ -52,6 +52,7 @@ pub(super) fn persisted_session_from_summary(
     PersistedSession {
         session_id: summary.session_id.clone(),
         tmux_name: summary.tmux_name.clone(),
+        tmux_target: summary.tmux_target.clone(),
         state: summary.state,
         tool: summary.tool.clone(),
         token_count: summary.token_count,

@@ -31,6 +31,7 @@ use crate::session::overlay::{OverlayDirConfig, OverlayServiceEntry};
 use crate::thought::probe::{run_thought_config_probe, ThoughtConfigProbeResult};
 use crate::thought::runtime_config::ThoughtConfig;
 use crate::thought_ui::thought_config_ui_metadata;
+use crate::tmux_target::TmuxTarget;
 use crate::types::{
     CreateSessionResponse, CreateSessionsBatchResponse, CreateSessionsBatchResult, DirEntry,
     DirGroupMemberships, DirListResponse, DirRepoActionResponse, DirRestartResponse, ErrorResponse,
@@ -368,11 +369,19 @@ pub async fn create_local_session(
     name: Option<String>,
     cwd: Option<String>,
     spawn_tool: Option<SpawnTool>,
+    tmux_target: Option<TmuxTarget>,
     initial_request: Option<String>,
 ) -> Result<CreateSessionResponse, ApiServiceError> {
     state
         .supervisor
-        .create_session(name, cwd, spawn_tool, initial_request)
+        .create_session_with_target_and_batch(
+            name,
+            cwd,
+            spawn_tool,
+            initial_request,
+            tmux_target,
+            None,
+        )
         .await
         .map(|(session, repo_theme)| {
             let launch_receipt =
@@ -391,7 +400,7 @@ fn create_local_session_error(error: anyhow::Error) -> ApiServiceError {
     if message.contains("already exists") || message.contains("duplicate session") {
         return ApiServiceError::new(StatusCode::CONFLICT, "SESSION_ALREADY_EXISTS", message);
     }
-    if message.contains("cwd does not exist") {
+    if is_create_session_validation_error(&message) {
         return ApiServiceError::new(StatusCode::BAD_REQUEST, "VALIDATION_FAILED", message);
     }
 
@@ -399,10 +408,15 @@ fn create_local_session_error(error: anyhow::Error) -> ApiServiceError {
     ApiServiceError::new(StatusCode::INTERNAL_SERVER_ERROR, "INTERNAL_ERROR", message)
 }
 
+fn is_create_session_validation_error(message: &str) -> bool {
+    message.contains("cwd does not exist") || message.contains("tmux socket")
+}
+
 pub async fn create_local_sessions_batch(
     state: Arc<AppState>,
     dirs: Vec<String>,
     spawn_tool: Option<SpawnTool>,
+    tmux_target: Option<TmuxTarget>,
     initial_request: Option<String>,
 ) -> Result<CreateSessionsBatchResponse, ApiServiceError> {
     validate_sessions_batch_dirs(&dirs)?;
@@ -412,6 +426,7 @@ pub async fn create_local_sessions_batch(
     let tasks = dirs.into_iter().enumerate().map(|(index, cwd)| {
         let supervisor = state.supervisor.clone();
         let initial_request = initial_request.clone();
+        let tmux_target = tmux_target.clone();
         let batch = session_batch_membership(
             batch_id.clone(),
             batch_label.clone(),
@@ -422,11 +437,12 @@ pub async fn create_local_sessions_batch(
         );
         async move {
             let created = supervisor
-                .create_session_with_batch(
+                .create_session_with_target_and_batch(
                     None,
                     Some(cwd.clone()),
                     spawn_tool,
                     initial_request,
+                    tmux_target,
                     Some(batch),
                 )
                 .await;
@@ -542,7 +558,7 @@ pub fn create_sessions_batch_result(
 fn create_session_error(msg: &str) -> ErrorResponse {
     let code = if msg.contains("already exists") || msg.contains("duplicate session") {
         "SESSION_ALREADY_EXISTS"
-    } else if msg.contains("cwd does not exist") {
+    } else if is_create_session_validation_error(msg) {
         "VALIDATION_FAILED"
     } else {
         "INTERNAL_ERROR"
@@ -1576,6 +1592,7 @@ pub async fn open_native_session_for_host(
         ghostty_mode,
         &summary.session_id,
         &summary.tmux_name,
+        &summary.tmux_target,
         &summary.cwd,
     )
     .await

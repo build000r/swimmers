@@ -1,3 +1,5 @@
+#![allow(clippy::too_many_arguments)]
+
 use super::*;
 
 pub(crate) fn mermaid_outline_subgraph_key(index: usize) -> String {

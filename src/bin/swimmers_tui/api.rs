@@ -684,6 +684,7 @@ pub(crate) trait TuiApi: Send + Sync + 'static {
     fn adopt_session(
         &self,
         tmux_name: &str,
+        tmux_target: Option<swimmers::tmux_target::TmuxTarget>,
         session_id: Option<&str>,
     ) -> BoxFuture<'_, Result<AdoptSessionResponse, String>>;
     fn create_sessions_batch(
@@ -1239,6 +1240,7 @@ impl TuiApi for ApiClient {
                     name: None,
                     cwd: Some(cwd),
                     spawn_tool: Some(spawn_tool),
+                    tmux_target: None,
                     launch_target,
                     initial_request,
                 })
@@ -1272,6 +1274,7 @@ impl TuiApi for ApiClient {
                 .json(&CreateSessionsBatchRequest {
                     dirs,
                     spawn_tool: Some(spawn_tool),
+                    tmux_target: None,
                     launch_target,
                     initial_request,
                 })
@@ -1293,6 +1296,7 @@ impl TuiApi for ApiClient {
     fn adopt_session(
         &self,
         tmux_name: &str,
+        tmux_target: Option<swimmers::tmux_target::TmuxTarget>,
         session_id: Option<&str>,
     ) -> BoxFuture<'_, Result<AdoptSessionResponse, String>> {
         let tmux_name = tmux_name.to_string();
@@ -1304,6 +1308,7 @@ impl TuiApi for ApiClient {
                 .timeout(API_CREATE_SESSION_TIMEOUT)
                 .json(&AdoptSessionRequest {
                     tmux_name,
+                    tmux_target,
                     session_id,
                 })
                 .send()

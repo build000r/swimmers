@@ -950,6 +950,7 @@ mod tests {
         SessionSummary {
             session_id: "sess-1".to_string(),
             tmux_name: "7".to_string(),
+            tmux_target: crate::tmux_target::TmuxTarget::Default,
             state: SessionState::Busy,
             current_command: None,
             state_evidence: Default::default(),

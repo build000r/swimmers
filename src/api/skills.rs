@@ -786,6 +786,7 @@ mod tests {
         crate::types::SessionSummary {
             session_id: session_id.to_string(),
             tmux_name: format!("tmux-{session_id}"),
+            tmux_target: crate::tmux_target::TmuxTarget::Default,
             state: SessionState::Idle,
             current_command: None,
             state_evidence: StateEvidence::new("osc133_prompt"),

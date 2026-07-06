@@ -3,6 +3,7 @@ use super::*;
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) struct MermaidCacheContext {
     tmux_name: String,
+    tmux_target: swimmers::tmux_target::TmuxTarget,
     cwd: String,
 }
 
@@ -10,6 +11,7 @@ impl MermaidCacheContext {
     fn from_session(session: &SessionSummary) -> Self {
         Self {
             tmux_name: session.tmux_name.clone(),
+            tmux_target: session.tmux_target.clone(),
             cwd: normalize_path(&session.cwd),
         }
     }
@@ -430,9 +432,11 @@ impl<C: TuiApi> App<C> {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn mermaid_viewer_state(
         session_id: String,
         tmux_name: String,
+        tmux_target: swimmers::tmux_target::TmuxTarget,
         cwd: String,
         path: Option<String>,
         source: Option<String>,
@@ -444,6 +448,7 @@ impl<C: TuiApi> App<C> {
         MermaidViewerState {
             session_id,
             tmux_name,
+            tmux_target,
             cwd,
             path,
             source,
@@ -509,6 +514,7 @@ impl<C: TuiApi> App<C> {
         self.fish_bowl_mode = FishBowlMode::Mermaid(Box::new(Self::mermaid_viewer_state(
             session.session_id.clone(),
             session.tmux_name.clone(),
+            session.tmux_target.clone(),
             session.cwd.clone(),
             artifact.path,
             artifact.source,
@@ -543,6 +549,7 @@ impl<C: TuiApi> App<C> {
         self.fish_bowl_mode = FishBowlMode::Mermaid(Box::new(Self::mermaid_viewer_state(
             session_id,
             slug,
+            swimmers::tmux_target::TmuxTarget::Default,
             cwd,
             Some(schema_path),
             source,
@@ -566,6 +573,7 @@ impl<C: TuiApi> App<C> {
         self.fish_bowl_mode = FishBowlMode::Mermaid(Box::new(Self::mermaid_viewer_state(
             format!("skill-atlas::{title}"),
             format!("skill atlas: {title}"),
+            swimmers::tmux_target::TmuxTarget::Default,
             cwd,
             skill_atlas_focus_path(&action),
             Some(source),
@@ -1041,6 +1049,7 @@ mod tests {
         MermaidViewerState {
             session_id: "sess-1".to_string(),
             tmux_name: "tmux-1".to_string(),
+            tmux_target: swimmers::tmux_target::TmuxTarget::Default,
             cwd: "/repo".to_string(),
             path: Some("/repo/schema.mmd".to_string()),
             source: Some("flowchart TD\nA-->B".to_string()),

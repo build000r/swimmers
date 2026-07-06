@@ -634,6 +634,7 @@ fn should_apply_delivery_state(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn apply_update<P: SessionProvider>(
     provider: &P,
     event_tx: &broadcast::Sender<ControlEvent>,

@@ -386,6 +386,7 @@ struct MermaidPackedDetailLayout {
 pub(crate) struct MermaidViewerState {
     pub(crate) session_id: String,
     pub(crate) tmux_name: String,
+    pub(crate) tmux_target: swimmers::tmux_target::TmuxTarget,
     pub(crate) cwd: String,
     pub(crate) path: Option<String>,
     pub(crate) source: Option<String>,
