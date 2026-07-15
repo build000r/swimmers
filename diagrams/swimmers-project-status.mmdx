@@ -6,6 +6,10 @@
     { "from": "main", "label": "Open proof status", "to": "proof-status", "title": "Open swimmers proof status" },
     { "from": "main", "label": "Open primary flows", "to": "primary-flows", "title": "Open swimmers primary flows" },
     { "from": "main", "label": "Open epic status", "to": "epic-gantt", "title": "Open swimmers epic status" },
+    { "from": "main", "label": "Open lifecycle", "to": "lifecycle", "title": "Open swimmers lifecycle" },
+    { "from": "main", "label": "Open architecture", "to": "architecture-boundary", "title": "Open swimmers architecture boundary" },
+    { "from": "main", "label": "Open drift map", "to": "drift", "title": "Open swimmers drift map" },
+    { "from": "main", "label": "Open ERD", "to": "erd", "title": "Open swimmers persisted-data ERD" },
     { "from": "main", "label": "Open next move", "to": "next-move", "title": "Open swimmers next move" }
   ]
 }
@@ -14,13 +18,37 @@
 ## chart main Swimmers Project Status Crux
 ```mermaid
 flowchart LR
-  vision["swimmers: visual tmux aquarium and thought rail"]:::gray
-  suite["GREEN cargo test green 677 lib 3 main 358 tui 9 metamorphic"]:::green
-  install["GREEN cargo install proven swimmers and swimmers-tui 0.3.0"]:::green
-  smoke["GREEN fresh-server health and live tmux discovery smoke 0by.8"]:::green
-  perf["GREEN fleet list_sessions p95 375ms to 844us 0by.9"]:::green
-  publish["GREEN this status stack published 0by.6"]:::green
-  vision --> suite --> install --> smoke --> perf --> publish
+  vision["Vision: glanceable tmux aquarium, thought rail, and explicit remote cockpit"]:::gray
+  runtime["GREEN core runtime proof-backed: lib 1327, metamorphic 9, web 552, tui-check"]:::green
+  beads["YELLOW Beads graph now has 9 open no-ragrets issues; 4 ready, 5 blocked, no cycles"]:::yellow
+  release["GREEN Cargo version 0.3.0 and local v0.3.0 tag exist"]:::green
+  remote["GREEN remote Rust cache dry-run path validates disposable and persistent modes"]:::green
+  publishBlocked["YELLOW updated stack not live-published: auth/publish covered by swimmers-buildooor-mmdx-auth-refresh-e7jy and swimmers-buildooor-status-link-republish-ygjl"]:::yellow
+  token["YELLOW authenticated multi-SSH live proof still expands bearer token into curl argv; covered by swimmers-token-safe-live-proof-auth-vc4k and swimmers-token-leak-regression-proof-z5rh"]:::yellow
+  drift["YELLOW release boundary doc is stale against current tag and darwin plus linux assets; covered by swimmers-release-boundary-doc-truth-kajv"]:::yellow
+  proofLink["Open proof status"]:::gray
+  flowsLink["Open primary flows"]:::gray
+  epicLink["Open epic status"]:::gray
+  lifecycleLink["Open lifecycle"]:::gray
+  archLink["Open architecture"]:::gray
+  driftLink["Open drift map"]:::gray
+  erdLink["Open ERD"]:::gray
+  nextLink["Open next move"]:::gray
+
+  vision --> runtime --> beads --> release --> remote --> publishBlocked
+  remote --> token
+  release --> drift
+  publishBlocked --> nextLink
+  token --> nextLink
+  drift --> nextLink
+  runtime --> proofLink
+  vision --> flowsLink
+  vision --> epicLink
+  runtime --> lifecycleLink
+  runtime --> archLink
+  drift --> driftLink
+  runtime --> erdLink
+
   classDef green fill:#dff7df,stroke:#20833a,stroke-width:2px,color:#0f2f18
   classDef yellow fill:#fff3bf,stroke:#b7791f,stroke-width:2px,color:#3a2a00
   classDef red fill:#ffd6d6,stroke:#c53030,stroke-width:2px,color:#3a0505
@@ -30,60 +58,190 @@ flowchart LR
 ## chart epic-gantt Swimmers Epic Status
 ```mermaid
 gantt
-  title swimmers status as of 2026-05-29
+  title swimmers status as of 2026-06-20
   dateFormat YYYY-MM-DD
   section GREEN Proven
-  GREEN full cargo test suite green :done, 2026-05-29, 1d
-  GREEN restricted PATH prompt cleanup fix 0by.7 :done, 2026-05-28, 1d
-  GREEN install and TUI API smoke 0by.8 :done, 2026-05-29, 1d
-  GREEN fleet-scale profiling 0by.9 :done, 2026-05-29, 1d
-  GREEN spawn prompt-file refactor 0by.10 :done, 2026-05-29, 1d
-  GREEN publish status stack 0by.6 :done, 2026-05-29, 1d
+  GREEN core Rust lib suite 1327 passed :done, 2026-06-20, 1d
+  GREEN metamorphic replay suite 9 passed :done, 2026-06-20, 1d
+  GREEN web behavior suite 552 passed :done, 2026-06-20, 1d
+  GREEN TUI type-check passed :done, 2026-06-20, 1d
+  GREEN remote validation cache dry-runs passed :done, 2026-06-20, 1d
+  section YELLOW Bead-Covered Gaps
+  YELLOW fix live proof bearer token argv exposure swimmers-token-safe-live-proof-auth-vc4k :active, 2026-06-20, 1d
+  YELLOW add token leak regression swimmers-token-leak-regression-proof-z5rh :active, 2026-06-20, 1d
+  YELLOW reconcile stale release boundary doc swimmers-release-boundary-doc-truth-kajv :active, 2026-06-20, 1d
+  YELLOW restore Buildooor status publish auth swimmers-buildooor-mmdx-auth-refresh-e7jy :active, 2026-06-20, 1d
+  section GRAY Not Reproved This Pass
+  GRAY full live cockpit probe not run :active, 2026-06-20, 1d
+  GRAY full cargo test all targets not run :active, 2026-06-20, 1d
 ```
 
 ## chart epic-map Swimmers Dependency Map
 ```mermaid
 flowchart TD
-  api["GREEN API TUI thought bridge suite green"]:::green
-  fix["GREEN DONE prompt cleanup test repair 0by.7"]:::green
-  smoke["GREEN DONE install and local smoke 0by.8"]:::green
-  perf["GREEN DONE list_sessions tmux thought profiling 0by.9"]:::green
-  refactor["GREEN DONE spawn prompt-file refactor 0by.10"]:::green
-  publish["GREEN DONE publish status stack 0by.6"]:::green
-  api --> fix --> smoke --> perf --> refactor --> publish
+  core["GREEN DONE API server, SessionSupervisor, SessionActor, state detection, persistence"]:::green
+  tui["GREEN DONE embedded TUI and external HTTP client paths"]:::green
+  web["GREEN DONE Trogdor web cockpit and workbench API panels"]:::green
+  env["GREEN DONE multi-env and multi-SSH fixture contracts"]:::green
+  release["GREEN DONE v0.3.0 package and local tag boundary exists"]:::green
+  remote["GREEN DONE remote Rust validation helper supports persistent cache dry-run"]:::green
+  token["YELLOW GAP live proof token argv exposure covered by swimmers-token-safe-live-proof-auth-vc4k"]:::yellow
+  docdrift["YELLOW GAP release doc says tag absent and Linux-only assets; covered by swimmers-release-boundary-doc-truth-kajv"]:::yellow
+  future["GRAY FUTURE new product work should start from fresh Beads or idea-wizard"]:::gray
+
+  core --> tui --> web --> env
+  core --> release --> remote
+  env --> token
+  release --> docdrift
+  token --> future
+  docdrift --> future
+
   classDef green fill:#dff7df,stroke:#20833a,stroke-width:2px,color:#0f2f18
   classDef yellow fill:#fff3bf,stroke:#b7791f,stroke-width:2px,color:#3a2a00
   classDef red fill:#ffd6d6,stroke:#c53030,stroke-width:2px,color:#3a0505
+  classDef gray fill:#eef2f7,stroke:#64748b,stroke-width:1px,color:#111827
 ```
 
 ## chart primary-flows Swimmers Primary Flows
 ```mermaid
 flowchart TD
   operator["Parallel-agent operator"]:::gray
-  discover["GREEN discover tmux sessions"]:::green
-  aquarium["GREEN TUI aquarium state model"]:::green
-  thought["GREEN thought bridge"]:::green
-  launch["GREEN install and launch smoke 0by.8"]:::green
-  fleet["GREEN fleet-scale list p95 844us 0by.9"]:::green
-  operator --> discover --> aquarium --> thought --> launch --> fleet
+  start["GREEN start swimmers-tui embedded or point TUI at an external API"]:::green
+  discover["GREEN discover tmux sessions and external adoptions"]:::green
+  classify["GREEN classify busy, idle, attention, error, exited, and rest state"]:::green
+  glance["GREEN render fish aquarium and Glance Test fixture states"]:::green
+  thought["GREEN surface thought rail, action cues, and operator pressure"]:::green
+  cockpit["GREEN use web Trogdor terminal cockpit, diffs, logs, artifacts, and passive skills"]:::green
+  remote["GREEN configured swimmers_api and ssh_only targets are fixture-backed"]:::green
+  live["YELLOW token-auth live proof path violates token-not-in-argv boundary; covered by swimmers-token-safe-live-proof-auth-vc4k"]:::yellow
+  install["GRAY one-line installer syntax exists; live GitHub download not rerun in this pass"]:::gray
+
+  operator --> start --> discover --> classify --> glance --> thought --> cockpit --> remote --> live
+  operator --> install --> start
+
   classDef green fill:#dff7df,stroke:#20833a,stroke-width:2px,color:#0f2f18
   classDef yellow fill:#fff3bf,stroke:#b7791f,stroke-width:2px,color:#3a2a00
+  classDef red fill:#ffd6d6,stroke:#c53030,stroke-width:2px,color:#3a0505
+  classDef gray fill:#eef2f7,stroke:#64748b,stroke-width:1px,color:#111827
+```
+
+## chart lifecycle Swimmers Runtime Lifecycle
+```mermaid
+flowchart TD
+  cfg["GREEN load env config and reject unsafe bind or auth combinations"]:::green
+  boot["GREEN start embedded TUI API or standalone Axum server"]:::green
+  supervise["GREEN SessionSupervisor discovers tmux and reconciles stale sessions"]:::green
+  actor["GREEN SessionActor owns PTY IO, replay ring, resize, input, liveness, and state events"]:::green
+  detect["GREEN StateDetector maps terminal activity to busy, idle, attention, and error"]:::green
+  persist["GREEN FileStore persists sessions, thoughts, config, and dir groups with atomic writes"]:::green
+  clients["GREEN TUI and web consume the same API truth"]:::green
+  remote["GREEN remote targets are explicit config only: local, swimmers_api, ssh_only"]:::green
+  live["YELLOW live authenticated proof wrapper needs token-safe curl transport; covered by swimmers-token-safe-live-proof-auth-vc4k"]:::yellow
+
+  cfg --> boot --> supervise --> actor --> detect --> persist --> clients --> remote --> live
+
+  classDef green fill:#dff7df,stroke:#20833a,stroke-width:2px,color:#0f2f18
+  classDef yellow fill:#fff3bf,stroke:#b7791f,stroke-width:2px,color:#3a2a00
+  classDef red fill:#ffd6d6,stroke:#c53030,stroke-width:2px,color:#3a0505
+  classDef gray fill:#eef2f7,stroke:#64748b,stroke-width:1px,color:#111827
+```
+
+## chart architecture-boundary Swimmers Architecture Boundary
+```mermaid
+flowchart LR
+  subgraph operator["Operator surfaces"]
+    tui["GREEN native TUI"]:::green
+    web["GREEN browser Trogdor cockpit"]:::green
+    cli["GREEN swimmers CLI and config doctor"]:::green
+  end
+
+  subgraph api["Swimmers API truth"]
+    axum["GREEN Axum routes and auth middleware"]:::green
+    supervisor["GREEN SessionSupervisor"]:::green
+    thought["GREEN thought bridge runtime"]:::green
+    store["GREEN flat-file FileStore"]:::green
+  end
+
+  subgraph substrate["Local substrate"]
+    tmux["GREEN tmux server and PTY"]:::green
+    files["GREEN JSON files under SWIMMERS_DATA_DIR"]:::green
+  end
+
+  subgraph external["Explicit external edges"]
+    remote["GREEN overlay-declared swimmers_api targets"]:::green
+    ssh["GREEN ssh_only handoff rows, not live aggregation"]:::green
+    advisory["GRAY c0, NTM, FrankenTerm are passive or renderer metadata"]:::gray
+    live["YELLOW live proof script auth header is not argv-safe; covered by swimmers-token-safe-live-proof-auth-vc4k"]:::yellow
+  end
+
+  tui --> axum
+  web --> axum
+  cli --> axum
+  axum --> supervisor --> tmux
+  supervisor --> thought
+  supervisor --> store --> files
+  axum --> remote
+  axum --> ssh
+  axum --> advisory
+  remote --> live
+
+  classDef green fill:#dff7df,stroke:#20833a,stroke-width:2px,color:#0f2f18
+  classDef yellow fill:#fff3bf,stroke:#b7791f,stroke-width:2px,color:#3a2a00
+  classDef red fill:#ffd6d6,stroke:#c53030,stroke-width:2px,color:#3a0505
   classDef gray fill:#eef2f7,stroke:#64748b,stroke-width:1px,color:#111827
 ```
 
 ## chart proof-status Swimmers Proof Status
 ```mermaid
 flowchart TD
-  read["GREEN README and VISION read"]:::green
-  cargo["GREEN cargo test exit 0 zero failures"]:::green
-  detail["GREEN grok cleanup unknown-target and concurrency tests pass"]:::green
-  install["GREEN cargo install --path . both bins run 0.3.0"]:::green
-  health["GREEN fresh server health and version ok no stale state"]:::green
-  discovery["GREEN GET v1 sessions discovered live tmux session"]:::green
-  perf["GREEN profiling artifacts 20260529T015943Z-xso"]:::green
-  caveat["GRAY interactive TUI not auto-driven needs PTY covered by run-tui.sh shim"]:::gray
-  read --> cargo --> detail --> install --> health --> discovery --> perf
-  discovery --> caveat
+  docs["GREEN read AGENTS, README, VISION, proof docs, release doc, and existing stack"]:::green
+  beads["YELLOW br now tracks no-ragrets graph: 9 open, 4 ready, 5 blocked, 0 cycles"]:::yellow
+  lib["GREEN cargo test --lib passed 1327 tests"]:::green
+  meta["GREEN cargo test --test metamorphic passed 9 tests"]:::green
+  js["GREEN node --test src/web/*.test.mjs passed 552 tests"]:::green
+  tui["GREEN make tui-check passed"]:::green
+  shell["GREEN bash -n passed for install, remote validate, and multi-SSH live scripts"]:::green
+  remote["GREEN remote Rust validate dry-run passed; persistent cache accepted; relative cache rejected"]:::green
+  liveDry["GREEN make multi-ssh-env-live-dry-run passed without live network"]:::green
+  publishDry["GREEN publish-link dry-run resolved buildooor swimmers-project-status endpoint"]:::green
+  publishLive["YELLOW publish-link live update failed 401 invalid or expired token; covered by swimmers-buildooor-mmdx-auth-refresh-e7jy"]:::yellow
+  token["YELLOW scripts/test-multi-ssh-env-live.sh line 160 puts bearer token in curl argv; covered by swimmers-token-safe-live-proof-auth-vc4k"]:::yellow
+  releaseDrift["YELLOW docs/RELEASE_V0_3_0.md stale: says v0.3.0 absent and Linux-only assets; covered by swimmers-release-boundary-doc-truth-kajv"]:::yellow
+  notRun["GRAY not run: full cargo test all targets, live cockpit probe, GitHub release download/install"]:::gray
+  yellow["GREEN no-ragrets Beads created: swimmers-no-ragrets-release-status-proof-pavs"]:::green
+
+  docs --> beads --> lib --> meta --> js --> tui --> shell --> remote --> liveDry --> publishDry --> publishLive
+  liveDry --> token
+  publishLive --> notRun
+  remote --> releaseDrift
+  token --> notRun
+  releaseDrift --> notRun
+  beads --> yellow
+
+  classDef green fill:#dff7df,stroke:#20833a,stroke-width:2px,color:#0f2f18
+  classDef yellow fill:#fff3bf,stroke:#b7791f,stroke-width:2px,color:#3a2a00
+  classDef red fill:#ffd6d6,stroke:#c53030,stroke-width:2px,color:#3a0505
+  classDef gray fill:#eef2f7,stroke:#64748b,stroke-width:1px,color:#111827
+```
+
+## chart drift Docs Code Beads Drift
+```mermaid
+flowchart TD
+  code["GREEN code and tests support current core runtime, web cockpit, multi-env, and auth boundaries"]:::green
+  beads["YELLOW Beads now track the release/status hardening graph; 9 open no-ragrets issues"]:::yellow
+  readme["GREEN README matches remote Rust persistent-cache helper in dirty worktree"]:::green
+  releaseDoc["YELLOW release boundary doc is stale against local v0.3.0 tag and darwin-arm64 workflow; covered by swimmers-release-boundary-doc-truth-kajv"]:::yellow
+  liveDoc["YELLOW live proof docs promise token values are not printed, but script still exposes token in process argv; covered by swimmers-token-safe-live-proof-auth-vc4k"]:::yellow
+  stack["GREEN this status stack is refreshed from 2026-06-20 evidence"]:::green
+  dirty["GRAY working tree has uncommitted README and remote-rust-validate.sh edits"]:::gray
+  noBead["GREEN open Beads now cover release doc drift and live token argv exposure"]:::green
+
+  code --> beads
+  code --> readme --> dirty
+  code --> releaseDoc --> noBead
+  code --> liveDoc --> noBead
+  noBead --> stack
+
   classDef green fill:#dff7df,stroke:#20833a,stroke-width:2px,color:#0f2f18
   classDef yellow fill:#fff3bf,stroke:#b7791f,stroke-width:2px,color:#3a2a00
   classDef red fill:#ffd6d6,stroke:#c53030,stroke-width:2px,color:#3a0505
@@ -93,12 +251,64 @@ flowchart TD
 ## chart next-move Swimmers Next Move
 ```mermaid
 flowchart TD
-  rank["Power-map customer is operator managing many tmux agents at a glance"]:::gray
-  done["GREEN portfolio wave-3 follow-ups 0by.7 through 0by.10 all landed"]:::green
-  noopen["GREEN no open implementation beads remain after 0by.6"]:::green
-  next["GRAY next move mint fresh ideas via idea-wizard or cut a tagged 0.3.x release"]:::gray
-  rank --> done --> noopen --> next
+  now["Crux: project is operationally green, but status is not release-clean until tracked YELLOW gaps are closed"]:::gray
+  fixToken["YELLOW first ready fix: pass live proof Authorization header through curl config or stdin, not argv; swimmers-token-safe-live-proof-auth-vc4k"]:::yellow
+  proveToken["YELLOW then add proof that process argv never contains bearer token during live auth; swimmers-token-leak-regression-proof-z5rh"]:::yellow
+  docRelease["YELLOW update docs/RELEASE_V0_3_0.md for current v0.3.0 tag and linux plus darwin release assets; swimmers-release-boundary-doc-truth-kajv"]:::yellow
+  bead["GREEN no-ragrets Beads created and dependency graph is acyclic; swimmers-no-ragrets-release-status-proof-pavs"]:::green
+  auth["YELLOW refresh Buildooor MMDX auth before publish-link can edit the short link; swimmers-buildooor-mmdx-auth-refresh-e7jy"]:::yellow
+  republish["YELLOW after fixes and auth refresh, rerun MMDX preflight and publish-link to buildooor/swimmers-project-status; swimmers-buildooor-status-link-republish-ygjl"]:::yellow
+
+  now --> fixToken --> proveToken --> docRelease --> bead --> auth --> republish
+
   classDef green fill:#dff7df,stroke:#20833a,stroke-width:2px,color:#0f2f18
   classDef yellow fill:#fff3bf,stroke:#b7791f,stroke-width:2px,color:#3a2a00
+  classDef red fill:#ffd6d6,stroke:#c53030,stroke-width:2px,color:#3a0505
   classDef gray fill:#eef2f7,stroke:#64748b,stroke-width:1px,color:#111827
+```
+
+## chart erd Swimmers Persisted Data ERD
+```mermaid
+erDiagram
+  GREEN_SESSION_REGISTRY ||--o| GREEN_THOUGHTS : "session_id key"
+  GREEN_SESSION_REGISTRY }o--o{ GREEN_DIR_GROUPS : "cwd membership"
+  GREEN_THOUGHT_CONFIG ||--o{ GREEN_THOUGHTS : "runtime defaults"
+
+  GREEN_SESSION_REGISTRY {
+    string session_id PK
+    string tmux_name
+    string state
+    string cwd
+    string tool
+    string rest_state
+    boolean commit_candidate
+    datetime last_activity_at
+  }
+
+  GREEN_THOUGHTS {
+    string session_id PK
+    string thought
+    string thought_state
+    string thought_source
+    string rest_state
+    int token_count
+    int context_limit
+    datetime updated_at
+  }
+
+  GREEN_THOUGHT_CONFIG {
+    string backend
+    string model
+    int hot_cadence_ms
+    int warm_cadence_ms
+    int cold_cadence_ms
+    int version
+  }
+
+  GREEN_DIR_GROUPS {
+    string group_name
+    string included_path
+    string excluded_path
+    datetime updated_at
+  }
 ```
