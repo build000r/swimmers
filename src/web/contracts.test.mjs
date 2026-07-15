@@ -536,6 +536,7 @@ test("normalizeDirListResponse preserves directory entries and launch target fie
       path_mappings: [{ local_prefix: "/srv", remote_prefix: "/home" }],
     }],
     default_launch_target: "remote",
+    inventory_source: { kind: "remote_swimmers_api", target_id: "remote" },
     entries: [{
       name: "app",
       has_children: true,
@@ -556,6 +557,11 @@ test("normalizeDirListResponse preserves directory entries and launch target fie
     "ssh remote 'AUTH_TOKEN=$AUTH_TOKEN swimmers serve'",
   );
   assert.equal(payload.launch_targets[0].path_mappings[0].remote_prefix, "/home");
+  assert.deepEqual(payload.inventory_source, {
+    kind: "remote_swimmers_api",
+    target_id: "remote",
+  });
+  assert.deepEqual(normalizeDirListResponse({}).inventory_source, { kind: "local" });
 });
 
 test("normalizeMermaidArtifactResponse keeps optional fields browser-tolerant", () => {

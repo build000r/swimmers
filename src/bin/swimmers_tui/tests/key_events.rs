@@ -222,6 +222,7 @@ fn handle_key_event_routes_plain_picker_chars_to_search_before_hotkeys() {
         DirListResponse {
             path: TEST_REPOS_ROOT.to_string(),
             entries: vec![repo_dir_entry("codex", true, Some(true), None)],
+            inventory_source: DirInventorySource::local(),
             overlay_label: None,
             groups: Vec::new(),
             launch_targets: Vec::new(),

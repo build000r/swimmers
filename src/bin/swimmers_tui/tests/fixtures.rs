@@ -286,6 +286,7 @@ fn dir_response(path: &str, names: &[(&str, bool)]) -> DirListResponse {
                 open_url: None,
             })
             .collect(),
+        inventory_source: DirInventorySource::local(),
         overlay_label: None,
         groups: Vec::new(),
         launch_targets: Vec::new(),

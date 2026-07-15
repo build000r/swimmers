@@ -181,7 +181,7 @@ test("directory browser controller delegates dynamic view rendering while preser
   assert.equal(storage.get("dirs.path"), "/srv/repos");
   assert.equal(storage.get("dirs.managed"), "true");
   assert.deepEqual(statuses, [{
-    message: "1 entries at /srv/repos (managed only) · group core · 1/2 search matches",
+    message: "1 entries at /srv/repos (managed only) · group core · 1/2 search matches · inventory local",
     isError: false,
   }]);
   assert.equal(syncCount(), 1);
@@ -582,6 +582,7 @@ test("directory browser controller reloads inventory when launch target changes"
       responseJson: async (_response, normalize) => normalize({
         path: "/workspace",
         entries: [],
+        inventory_source: { kind: "remote_swimmers_api", target_id: "devbox" },
         launch_targets: [{ id: "local", label: "Local machine", kind: "local" }, devboxTarget()],
         default_launch_target: "devbox",
       }),
@@ -608,7 +609,7 @@ test("directory browser controller reloads inventory when launch target changes"
   }
 });
 
-test("directory browser controller keeps ssh-only target on local inventory reload", async () => {
+test("directory browser controller keeps ssh-only handoff intent with explicit local inventory", async () => {
   const previousDocument = globalThis.document;
   globalThis.document = {
     createElement(tagName) {
@@ -644,6 +645,7 @@ test("directory browser controller keeps ssh-only target on local inventory relo
     await controller.handleCreateLaunchTargetChange();
 
     assert.equal(state.dirBrowser.launchTarget, "skillbox-devbox");
+    assert.equal(el.createLaunchTarget.value, "skillbox-devbox");
     assert.equal(calls.length, 1);
     assert.equal(calls[0], "/v1/dirs?path=%2Fworkspace&managed_only=false");
   } finally {
@@ -671,6 +673,7 @@ test("directory browser controller preserves batch selection when launch target 
           { name: "swimmers", full_path: "/workspace/swimmers" },
           { name: "docs", full_path: "/workspace/docs" },
         ],
+        inventory_source: { kind: "remote_swimmers_api", target_id: "devbox" },
         launch_targets: [{ id: "local", label: "Local machine", kind: "local" }, devboxTarget()],
         default_launch_target: "devbox",
       }),

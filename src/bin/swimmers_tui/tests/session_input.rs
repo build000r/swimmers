@@ -1073,14 +1073,14 @@ fn toggle_launch_target_persists_across_picker_reopen() {
         TEST_REPOS_ROOT,
         &[("swimmers", false)],
     )));
-    api.push_list_dirs(Ok(dir_response_with_launch_targets(
-        TEST_REPOS_ROOT,
-        &[("remote-swimmers", false)],
-    )));
-    api.push_list_dirs(Ok(dir_response_with_launch_targets(
-        TEST_REPOS_ROOT,
-        &[("swimmers", false)],
-    )));
+    let mut remote_response =
+        dir_response_with_launch_targets(TEST_REPOS_ROOT, &[("remote-swimmers", false)]);
+    remote_response.inventory_source = DirInventorySource::remote("jeremy-skillbox");
+    api.push_list_dirs(Ok(remote_response));
+    let mut reopened_remote_response =
+        dir_response_with_launch_targets(TEST_REPOS_ROOT, &[("remote-swimmers", false)]);
+    reopened_remote_response.inventory_source = DirInventorySource::remote("jeremy-skillbox");
+    api.push_list_dirs(Ok(reopened_remote_response));
     let field = test_field();
     let mut app = make_app(api.clone());
 
@@ -1115,7 +1115,7 @@ fn toggle_launch_target_persists_across_picker_reopen() {
 }
 
 #[test]
-fn ssh_only_launch_target_persists_across_picker_reopen_without_remote_inventory() {
+fn ssh_only_launch_target_keeps_explicit_local_inventory_handoff() {
     fn ssh_only_response(path: &str, names: &[(&str, bool)]) -> DirListResponse {
         let mut response = dir_response(path, names);
         response.launch_targets = vec![
@@ -1141,10 +1141,6 @@ fn ssh_only_launch_target_persists_across_picker_reopen_without_remote_inventory
         TEST_REPOS_ROOT,
         &[("initial-local", false)],
     )));
-    api.push_list_dirs(Ok(ssh_only_response(
-        TEST_REPOS_ROOT,
-        &[("reopened-local", false)],
-    )));
     let field = test_field();
     let mut app = make_app(api.clone());
 
@@ -1155,15 +1151,15 @@ fn ssh_only_launch_target_persists_across_picker_reopen_without_remote_inventory
     app.handle_picker_action(PickerAction::ToggleLaunchTarget, field);
     assert_eq!(app.launch_target.as_deref(), Some("skillbox-devbox"));
 
-    app.close_picker();
-    app.handle_field_click(10, 10, field);
-    poll_until_interaction(&mut app);
-
-    let picker = app.picker.as_ref().expect("picker should reopen");
+    let picker = app
+        .picker
+        .as_ref()
+        .expect("local picker should remain open");
     assert_eq!(picker.launch_target.as_deref(), Some("skillbox-devbox"));
+    assert_eq!(picker.inventory_source, DirInventorySource::local());
     assert_eq!(picker.entries.len(), 1);
-    assert_eq!(picker.entries[0].name, "reopened-local");
-    assert_eq!(api.list_targets(), vec![None, None]);
+    assert_eq!(picker.entries[0].name, "initial-local");
+    assert_eq!(api.list_targets(), vec![None]);
 }
 
 #[test]
@@ -1186,6 +1182,54 @@ fn failed_remote_picker_open_resets_launch_target_to_local() {
         app.message.as_ref().map(|(message, _)| message.as_str()),
         Some("jeremy-skillbox unavailable: remote down; switched picker to local")
     );
+}
+
+#[test]
+fn remote_picker_open_rejects_local_inventory_masquerading_as_remote() {
+    let api = MockApi::new();
+    api.push_list_dirs(Ok(dir_response(
+        TEST_REPOS_ROOT,
+        &[
+            ("voice-to-text", false),
+            ("buildooor", false),
+            ("htma", false),
+        ],
+    )));
+    let mut app = make_app(api.clone());
+    app.launch_target = Some("conference1-ssh".to_string());
+
+    app.open_picker(10, 10);
+    poll_until_interaction(&mut app);
+
+    assert!(app.picker.is_none());
+    assert_eq!(app.launch_target.as_deref(), Some("local"));
+    assert_eq!(
+        api.list_targets(),
+        vec![Some("conference1-ssh".to_string())]
+    );
+    assert!(app.visible_message().is_some_and(|message| {
+        message.contains("inventory source mismatch") && message.contains("received local")
+    }));
+}
+
+#[test]
+fn remote_picker_does_not_merge_local_repository_search_inventory() {
+    let api = MockApi::new();
+    let mut response =
+        dir_response_with_launch_targets(TEST_REPOS_ROOT, &[("conference1-observed", false)]);
+    response.inventory_source = DirInventorySource::remote("jeremy-skillbox");
+    response.default_launch_target = Some("jeremy-skillbox".to_string());
+    api.push_list_dirs(Ok(response));
+    let mut app = make_app(api.clone());
+    app.launch_target = Some("jeremy-skillbox".to_string());
+
+    app.open_picker(10, 10);
+    poll_until_interaction(&mut app);
+
+    let picker = app.picker.as_ref().expect("remote picker");
+    assert_eq!(picker.inventory_source.label(), "jeremy-skillbox");
+    assert_eq!(picker.entries[0].name, "conference1-observed");
+    assert_eq!(api.list_repo_dirs_calls(), 0);
 }
 
 #[test]
@@ -1215,6 +1259,7 @@ fn picker_action_at_prefers_repo_action_badges() {
         DirListResponse {
             path: TEST_REPOS_ROOT.to_string(),
             entries: vec![repo_dir_entry("swimmers", true, Some(true), None)],
+            inventory_source: DirInventorySource::local(),
             overlay_label: None,
             groups: Vec::new(),
             launch_targets: Vec::new(),
@@ -1294,6 +1339,7 @@ fn picker_commit_action_calls_api_and_preserves_selection() {
                 detail: None,
             }),
         )],
+        inventory_source: DirInventorySource::local(),
         overlay_label: None,
         groups: Vec::new(),
         launch_targets: Vec::new(),
@@ -1307,6 +1353,7 @@ fn picker_commit_action_calls_api_and_preserves_selection() {
         DirListResponse {
             path: TEST_REPOS_ROOT.to_string(),
             entries: vec![repo_dir_entry("swimmers", true, Some(true), None)],
+            inventory_source: DirInventorySource::local(),
             overlay_label: None,
             groups: Vec::new(),
             launch_targets: Vec::new(),
@@ -1355,6 +1402,7 @@ fn picker_commit_action_blocks_remote_target_before_local_write() {
         DirListResponse {
             path: TEST_REPOS_ROOT.to_string(),
             entries: vec![repo_dir_entry("swimmers", true, Some(true), None)],
+            inventory_source: DirInventorySource::local(),
             overlay_label: None,
             groups: Vec::new(),
             launch_targets: vec![

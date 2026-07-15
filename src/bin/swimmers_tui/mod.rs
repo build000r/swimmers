@@ -40,16 +40,17 @@ use swimmers::thought::runtime_config::{DaemonDefaults, ThoughtConfig};
 use swimmers::types::{
     AdoptSessionRequest, AdoptSessionResponse, AttentionGroupLayout, CreateSessionRequest,
     CreateSessionResponse, CreateSessionsBatchRequest, CreateSessionsBatchResponse, DirEntry,
-    DirGroupMembershipUpdateRequest, DirGroupMembershipUpdateResponse, DirListResponse,
-    DirRepoActionRequest, DirRepoActionResponse, DirRepoSearchResponse, EnvironmentListResponse,
-    EnvironmentSummary, ErrorResponse, FleetLensPreset, FleetLensPresetMatcher, GhosttyOpenMode,
-    LaunchReceipt, LaunchTargetSummary, MermaidArtifactResponse, NativeAttentionGroupOpenRequest,
-    NativeAttentionGroupOpenResponse, NativeDesktopApp, NativeDesktopConfigRequest,
-    NativeDesktopModeRequest, NativeDesktopOpenRequest, NativeDesktopOpenResponse,
-    NativeDesktopStatusResponse, PlanFileResponse, PublishSelectionRequest, RepoActionKind,
-    RepoActionState, RepoTheme, RestState, SessionBatchMembership, SessionGroupInputRequest,
-    SessionGroupInputResponse, SessionListResponse, SessionSkillListResponse, SessionSkillSummary,
-    SessionState, SessionSummary, SpawnTool, StateConfidence, TransportHealth,
+    DirGroupMembershipUpdateRequest, DirGroupMembershipUpdateResponse, DirInventorySource,
+    DirListResponse, DirRepoActionRequest, DirRepoActionResponse, DirRepoSearchResponse,
+    EnvironmentListResponse, EnvironmentSummary, ErrorResponse, FleetLensPreset,
+    FleetLensPresetMatcher, GhosttyOpenMode, LaunchReceipt, LaunchTargetSummary,
+    MermaidArtifactResponse, NativeAttentionGroupOpenRequest, NativeAttentionGroupOpenResponse,
+    NativeDesktopApp, NativeDesktopConfigRequest, NativeDesktopModeRequest,
+    NativeDesktopOpenRequest, NativeDesktopOpenResponse, NativeDesktopStatusResponse,
+    PlanFileResponse, PublishSelectionRequest, RepoActionKind, RepoActionState, RepoTheme,
+    RestState, SessionBatchMembership, SessionGroupInputRequest, SessionGroupInputResponse,
+    SessionListResponse, SessionSkillListResponse, SessionSkillSummary, SessionState,
+    SessionSummary, SpawnTool, StateConfidence, TransportHealth,
 };
 
 const MIN_WIDTH: u16 = 70;

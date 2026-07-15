@@ -159,23 +159,8 @@ fn remote_inventory_target(target: Option<&str>) -> Option<String> {
         .map(str::to_string)
 }
 
-fn target_supports_remote_inventory(target: &LaunchTargetSummary) -> bool {
-    target.kind.trim().eq_ignore_ascii_case("swimmers_api") && !target.path_mappings.is_empty()
-}
-
-fn environment_remote_inventory_target(
-    environments: &[EnvironmentSummary],
-    target_id: Option<&str>,
-) -> Option<String> {
-    let target_id = target_id
-        .map(str::trim)
-        .filter(|target| !target.is_empty())?;
-    environments
-        .iter()
-        .find(|environment| {
-            environment.id == target_id && environment.capabilities.remote_dir_inventory
-        })
-        .map(|environment| environment.id.clone())
+fn target_kind_supports_remote_inventory(kind: &str) -> bool {
+    kind.trim().eq_ignore_ascii_case("swimmers_api")
 }
 
 fn selected_remote_inventory_target(
@@ -186,25 +171,34 @@ fn selected_remote_inventory_target(
 ) -> Option<String> {
     if let Some(picker) = picker {
         let target = picker.selected_launch_target();
-        return target_supports_remote_inventory(&target).then_some(target.id);
+        return target_kind_supports_remote_inventory(&target.kind).then_some(target.id);
     }
-
-    let target_id = fallback_target
-        .map(str::trim)
-        .filter(|target| !target.is_empty() && *target != "local")?;
-
+    let target_id = remote_inventory_target(fallback_target)?;
     if let Some(target) = launch_targets.iter().find(|target| target.id == target_id) {
-        return target_supports_remote_inventory(target).then(|| target.id.clone());
+        return target_kind_supports_remote_inventory(&target.kind).then(|| target.id.clone());
     }
-
-    if environments
+    if let Some(environment) = environments
         .iter()
-        .any(|environment| environment.id == target_id)
+        .find(|environment| environment.id == target_id)
     {
-        return environment_remote_inventory_target(environments, Some(target_id));
+        return target_kind_supports_remote_inventory(&environment.kind)
+            .then(|| environment.id.clone());
     }
+    Some(target_id)
+}
 
-    remote_inventory_target(Some(target_id))
+fn validate_dir_inventory_response(
+    response: DirListResponse,
+    requested_target: Option<&str>,
+) -> Result<DirListResponse, String> {
+    if response.inventory_source.matches_target(requested_target) {
+        return Ok(response);
+    }
+    let requested = requested_target.unwrap_or("local");
+    Err(format!(
+        "directory inventory source mismatch: requested {requested}, received {}",
+        response.inventory_source.label()
+    ))
 }
 
 fn remote_inventory_read_only_message(target: &str) -> String {
@@ -229,6 +223,7 @@ pub(crate) enum PendingInteractionResult {
         managed_only: bool,
         group: Option<String>,
         preserve_selection: bool,
+        requested_target: Option<String>,
         response: Result<DirListResponse, String>,
     },
     StartRepoAction {
@@ -1061,7 +1056,12 @@ impl<C: TuiApi> App<C> {
     }
 
     fn start_picker_repo_search(&mut self) {
-        if self.picker.is_none() || self.pending_picker_repo_search.is_some() {
+        if self
+            .picker
+            .as_ref()
+            .is_none_or(|picker| !picker.inventory_source.is_local())
+            || self.pending_picker_repo_search.is_some()
+        {
             return;
         }
 
@@ -1116,8 +1116,15 @@ impl<C: TuiApi> App<C> {
                 managed_only,
                 group,
                 preserve_selection,
+                requested_target,
                 response,
-            } => self.apply_reload_picker_result(managed_only, group, preserve_selection, response),
+            } => self.apply_reload_picker_result(
+                managed_only,
+                group,
+                preserve_selection,
+                requested_target,
+                response,
+            ),
             PendingInteractionResult::StartRepoAction {
                 repo_label,
                 kind,
@@ -1177,6 +1184,9 @@ impl<C: TuiApi> App<C> {
         requested_target: Option<String>,
         response: Result<DirListResponse, String>,
     ) {
+        let response = response.and_then(|response| {
+            validate_dir_inventory_response(response, requested_target.as_deref())
+        });
         match response {
             Ok(response) => {
                 let mut picker = PickerState::new(
@@ -1214,21 +1224,57 @@ impl<C: TuiApi> App<C> {
         managed_only: bool,
         group: Option<String>,
         preserve_selection: bool,
+        requested_target: Option<String>,
         response: Result<DirListResponse, String>,
     ) {
+        let response = response.and_then(|response| {
+            validate_dir_inventory_response(response, requested_target.as_deref())
+        });
         match response {
             Ok(response) => {
                 if let Some(picker) = &mut self.picker {
+                    let local_handoff_target = response
+                        .inventory_source
+                        .is_local()
+                        .then(|| {
+                            let target = picker.selected_launch_target();
+                            matches!(
+                                target.kind.trim().to_ascii_lowercase().as_str(),
+                                "ssh_only" | "ssh"
+                            )
+                            .then_some(target.id)
+                        })
+                        .flatten();
                     picker.managed_only = managed_only;
                     picker.current_group = group;
                     picker.apply_response(response, preserve_selection);
+                    if local_handoff_target.as_ref().is_some_and(|target_id| {
+                        picker
+                            .launch_targets
+                            .iter()
+                            .any(|target| &target.id == target_id)
+                    }) {
+                        picker.launch_target = local_handoff_target;
+                    }
                     self.launch_target = picker.launch_target.clone();
                     self.launch_targets = picker.launch_targets.clone();
                     picker.sync_theme_colors(&mut self.repo_themes);
                     self.last_picker_refresh = Some(Instant::now());
                 }
             }
-            Err(err) => self.set_message(err),
+            Err(err) => {
+                if let Some(target) = requested_target {
+                    self.launch_target = Some("local".to_string());
+                    if let Some(picker) = &mut self.picker {
+                        picker.launch_target = Some("local".to_string());
+                    }
+                    self.set_message(format!(
+                        "{target} unavailable: {err}; kept picker on local inventory"
+                    ));
+                } else {
+                    self.set_message(err);
+                }
+            }
         }
     }
 
@@ -1677,6 +1723,7 @@ impl<C: TuiApi> App<C> {
             &self.launch_targets,
             &self.environments,
         );
+        let requested_target = target.clone();
         let client = Arc::clone(&self.client);
         if show_message {
             self.set_message("loading directories...");
@@ -1694,6 +1741,7 @@ impl<C: TuiApi> App<C> {
                 managed_only,
                 group,
                 preserve_selection,
+                requested_target,
                 response,
             });
         });
@@ -1782,6 +1830,7 @@ impl<C: TuiApi> App<C> {
                 managed_only,
                 group,
                 preserve_selection: true,
+                requested_target: target,
                 response,
             });
         });

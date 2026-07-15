@@ -21,6 +21,7 @@ pub(crate) struct PickerState {
     pub(crate) base_path: String,
     pub(crate) current_path: String,
     pub(crate) entries: Vec<DirEntry>,
+    pub(crate) inventory_source: DirInventorySource,
     pub(crate) repo_search_entries: Vec<DirEntry>,
     pub(crate) current_theme_color: Option<Color>,
     pub(crate) entry_theme_colors: Vec<Option<Color>>,
@@ -276,6 +277,7 @@ impl PickerState {
             base_path: response.path.clone(),
             current_path: response.path,
             entries: response.entries,
+            inventory_source: response.inventory_source,
             repo_search_entries: Vec::new(),
             current_theme_color: None,
             entry_theme_colors: Vec::new(),
@@ -495,6 +497,7 @@ impl PickerState {
     ) {
         self.current_path = response.path;
         self.entries = response.entries;
+        self.inventory_source = response.inventory_source;
         self.overlay_label = response.overlay_label;
         self.launch_targets = normalized_launch_targets(response.launch_targets);
         self.launch_target = select_launch_target(

@@ -525,6 +525,9 @@ export interface DirEntry {
 export interface DirListResponse {
   path: string;
   entries: DirEntry[];
+  inventory_source:
+    | { kind: "local" }
+    | { kind: "remote_swimmers_api"; target_id: string };
   overlay_label: Nullable<string>;
   groups: string[];
   launch_targets: LaunchTargetSummary[];

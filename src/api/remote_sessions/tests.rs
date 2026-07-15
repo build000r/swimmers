@@ -2761,6 +2761,7 @@ fn remote_dir_response_maps_remote_paths_back_to_local_cockpit() {
                 open_url: None,
             },
         ],
+        inventory_source: crate::types::DirInventorySource::local(),
         overlay_label: Some("Remote".to_string()),
         groups: vec!["core".to_string()],
         launch_targets: Vec::new(),
@@ -2785,6 +2786,10 @@ fn remote_dir_response_maps_remote_paths_back_to_local_cockpit() {
     assert_eq!(
         mapped.default_launch_target.as_deref(),
         Some("jeremy-skillbox")
+    );
+    assert_eq!(
+        mapped.inventory_source,
+        crate::types::DirInventorySource::remote("jeremy-skillbox")
     );
     assert!(!mapped.launch_targets.is_empty());
 }

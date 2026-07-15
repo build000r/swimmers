@@ -1576,10 +1576,53 @@ pub struct DirEntry {
     pub open_url: Option<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum DirInventorySource {
+    Local,
+    RemoteSwimmersApi { target_id: String },
+}
+
+impl DirInventorySource {
+    pub fn local() -> Self {
+        Self::Local
+    }
+
+    pub fn remote(target_id: impl Into<String>) -> Self {
+        Self::RemoteSwimmersApi {
+            target_id: target_id.into(),
+        }
+    }
+
+    pub fn is_local(&self) -> bool {
+        matches!(self, Self::Local)
+    }
+
+    pub fn matches_target(&self, target: Option<&str>) -> bool {
+        let target = target
+            .map(str::trim)
+            .filter(|target| !target.is_empty() && *target != "local");
+        match (self, target) {
+            (Self::Local, None) => true,
+            (Self::RemoteSwimmersApi { target_id }, Some(target)) => target_id == target,
+            _ => false,
+        }
+    }
+
+    pub fn label(&self) -> String {
+        match self {
+            Self::Local => "local".to_string(),
+            Self::RemoteSwimmersApi { target_id } => target_id.clone(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DirListResponse {
     pub path: String,
     pub entries: Vec<DirEntry>,
+    #[serde(default = "DirInventorySource::local")]
+    pub inventory_source: DirInventorySource,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub overlay_label: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]

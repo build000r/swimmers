@@ -1357,7 +1357,7 @@ fn remote_picker_activation_blocks_unmapped_entry_before_composer() {
 }
 
 #[test]
-fn ssh_only_picker_reload_keeps_local_directory_inventory() {
+fn ssh_only_picker_reload_keeps_explicit_local_inventory_handoff() {
     let api = MockApi::new();
     let mut reload_response = dir_response(TEST_REPOS_ROOT, &[("swimmers", false)]);
     reload_response.launch_targets = vec![LaunchTargetSummary::local(), ssh_only_target()];
@@ -1384,7 +1384,13 @@ fn ssh_only_picker_reload_keeps_local_directory_inventory() {
         app.picker
             .as_ref()
             .and_then(|picker| picker.launch_target.as_deref()),
-        Some("local")
+        Some("skillbox-devbox")
+    );
+    assert_eq!(
+        app.picker
+            .as_ref()
+            .map(|picker| picker.inventory_source.clone()),
+        Some(DirInventorySource::local())
     );
 }
 

@@ -1940,6 +1940,7 @@ fn remote_dir_response_for_local_cockpit(
     mut response: DirListResponse,
     fallback_local_path: Option<&str>,
 ) -> DirListResponse {
+    response.inventory_source = crate::types::DirInventorySource::remote(target.id.clone());
     response.path = map_remote_cwd_to_local(target, &response.path)
         .or_else(|| fallback_local_path.map(str::to_string))
         .unwrap_or(response.path);

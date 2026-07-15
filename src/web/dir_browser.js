@@ -713,6 +713,7 @@ export function renderDirEntries(
 
   dirBrowser.entries = rawEntries;
   dirBrowser.groups = groups;
+  dirBrowser.inventorySource = response?.inventory_source || { kind: "local" };
   dirBrowser.overlayLabel = String(response?.overlay_label || "");
   const path = String(response?.path || el.createCwd.value || "").trim();
   dirBrowser.path = path;
@@ -765,8 +766,10 @@ export function renderDirEntries(
   const totalCount = rawEntries.length;
   const searchSuffix = view.search ? ` · ${shownCount}/${totalCount} search matches` : "";
   const targetSuffix = selectedLaunchTarget(el, dirBrowser) !== "local" ? ` · target ${selectedLaunchTarget(el, dirBrowser)}` : "";
+  const inventorySource = dirBrowser.inventorySource?.target_id || dirBrowser.inventorySource?.kind || "unknown";
+  const inventorySuffix = ` · inventory ${inventorySource}`;
   const summary = response?.path
-    ? `${shownCount} entries at ${response.path}${managed ? " (managed only)" : ""}${activeGroup ? ` · group ${activeGroup}` : ""}${searchSuffix}${targetSuffix}`
+    ? `${shownCount} entries at ${response.path}${managed ? " (managed only)" : ""}${activeGroup ? ` · group ${activeGroup}` : ""}${searchSuffix}${targetSuffix}${inventorySuffix}`
     : "Select a directory to continue.";
   setDirStatus(summary);
   renderCreateBatchBar({ el, dirBrowser });

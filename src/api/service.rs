@@ -1091,6 +1091,7 @@ async fn list_group_dir_response(
     Ok(DirListResponse {
         path: canonical_base.to_string_lossy().into_owned(),
         entries,
+        inventory_source: crate::types::DirInventorySource::local(),
         overlay_label: dir_config.as_ref().map(|c| c.label.clone()),
         groups: dir_groups(dir_config.as_ref()),
         launch_targets: launch_targets_for(dir_config.as_ref()),
@@ -1181,6 +1182,7 @@ async fn list_managed_root_response(
     Some(DirListResponse {
         path: canonical.to_string_lossy().into_owned(),
         entries,
+        inventory_source: crate::types::DirInventorySource::local(),
         overlay_label: Some(config.label.clone()),
         groups: dir_groups(Some(config)),
         launch_targets: launch_targets_for(Some(config)),
@@ -1264,6 +1266,7 @@ async fn list_regular_dir_response(
     Ok(DirListResponse {
         path: canonical.to_string_lossy().into_owned(),
         entries,
+        inventory_source: crate::types::DirInventorySource::local(),
         overlay_label: dir_config.map(|c| c.label.clone()),
         groups,
         launch_targets: launch_targets_for(dir_config),

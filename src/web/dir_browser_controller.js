@@ -118,13 +118,18 @@ export function createDirBrowserController(runtime) {
 
   function remoteInventoryTargetPayload() {
     const target = selectedLaunchTargetSummary();
-    if (String(target?.kind || "").trim().toLowerCase() !== "swimmers_api") {
-      return null;
+    return String(target?.kind || "").trim().toLowerCase() === "swimmers_api"
+      ? launchTargetPayload()
+      : null;
+  }
+
+  function inventorySourceMatchesTarget(source, target) {
+    const kind = String(source?.kind || "").trim().toLowerCase();
+    if (target === null) {
+      return kind === "local";
     }
-    if (!Array.isArray(target?.path_mappings) || target.path_mappings.length === 0) {
-      return null;
-    }
-    return launchTargetPayload();
+    return kind === "remote_swimmers_api"
+      && String(source?.target_id || "").trim() === target;
   }
 
   function remoteDirectoryWritesReadOnly() {
@@ -189,6 +194,7 @@ export function createDirBrowserController(runtime) {
       overlay_label: state.dirBrowser.overlayLabel || undefined,
       launch_targets: state.dirBrowser.launchTargets,
       default_launch_target: state.dirBrowser.launchTarget,
+      inventory_source: state.dirBrowser.inventorySource,
     };
   }
 
@@ -294,6 +300,10 @@ export function createDirBrowserController(runtime) {
       }
       const response = await apiFetch(url.pathname + url.search);
       const payload = await responseJson(response, normalizeDirListResponse);
+      if (!inventorySourceMatchesTarget(payload.inventory_source, target)) {
+        const received = payload.inventory_source?.target_id || payload.inventory_source?.kind || "unknown";
+        throw new Error(`directory inventory source mismatch: requested ${target || "local"}, received ${received}`);
+      }
       // A newer navigation started while this request was in flight: drop this
       // stale payload before it renders or mutates path/persisted state.
       if (state.dirBrowser.listingSeq !== listingSeq) {

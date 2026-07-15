@@ -367,6 +367,7 @@ mod tests {
             DirListResponse {
                 path: ROOT.to_string(),
                 entries,
+                inventory_source: DirInventorySource::local(),
                 overlay_label: None,
                 groups,
                 launch_targets: Vec::new(),

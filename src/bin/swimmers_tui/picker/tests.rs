@@ -75,6 +75,7 @@ mod picker {
             DirListResponse {
                 path: "/tmp".to_string(),
                 entries: Vec::new(),
+                inventory_source: DirInventorySource::local(),
                 overlay_label: None,
                 groups: vec!["alpha".to_string(), "beta".to_string()],
                 launch_targets: Vec::new(),
@@ -112,6 +113,7 @@ mod picker {
             DirListResponse {
                 path: "/tmp".to_string(),
                 entries: vec![entry],
+                inventory_source: DirInventorySource::local(),
                 overlay_label: None,
                 groups: Vec::new(),
                 launch_targets: Vec::new(),
@@ -188,6 +190,7 @@ mod picker {
             DirListResponse {
                 path: "/tmp".to_string(),
                 entries,
+                inventory_source: DirInventorySource::local(),
                 overlay_label: Some("old overlay".to_string()),
                 groups: vec!["alpha".to_string(), "beta".to_string()],
                 launch_targets: vec![apply_response_target("remote-a")],
@@ -216,6 +219,7 @@ mod picker {
         DirListResponse {
             path: "/tmp/next".to_string(),
             entries,
+            inventory_source: DirInventorySource::local(),
             overlay_label: Some("new overlay".to_string()),
             groups: Vec::new(),
             launch_targets: Vec::new(),
@@ -381,6 +385,7 @@ mod picker {
                     apply_response_entry("swimmers", "/Users/tester/repos/opensource/swimmers"),
                     apply_response_entry("outside", "/tmp/outside"),
                 ],
+                inventory_source: DirInventorySource::local(),
                 overlay_label: None,
                 groups: Vec::new(),
                 launch_targets: vec![mapped_response_target("devbox")],

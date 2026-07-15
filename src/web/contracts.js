@@ -612,10 +612,19 @@ export function normalizeLaunchTargetSummary(value) {
 
 export function normalizeDirListResponse(value) {
   const payload = objectRecord(value) || {};
+  const inventorySource = objectRecord(payload.inventory_source) || {};
+  const inventoryKind = stringValue(inventorySource.kind).trim().toLowerCase();
+  const inventory_source = inventoryKind === "remote_swimmers_api"
+    ? {
+        kind: "remote_swimmers_api",
+        target_id: stringValue(inventorySource.target_id).trim(),
+      }
+    : { kind: "local" };
   return {
     ...payload,
     path: stringValue(payload.path),
     entries: objectArray(payload.entries).map(normalizeDirEntry),
+    inventory_source,
     overlay_label: optionalString(payload.overlay_label),
     groups: stringArray(payload.groups),
     launch_targets: objectArray(payload.launch_targets).map(normalizeLaunchTargetSummary),

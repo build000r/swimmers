@@ -324,3 +324,41 @@ fn session_created_payload_serializes_repo_theme() {
     assert_eq!(parsed_theme.body, "#B89875");
     assert_eq!(parsed_theme.sprite.as_deref(), Some("balls"));
 }
+
+#[test]
+fn dir_inventory_source_matches_only_its_inventory_authority() {
+    let local = DirInventorySource::local();
+    assert!(local.matches_target(None));
+    assert!(local.matches_target(Some("local")));
+    assert!(!local.matches_target(Some("conference1-ssh")));
+
+    let remote = DirInventorySource::remote("conference1-ssh");
+    assert!(remote.matches_target(Some("conference1-ssh")));
+    assert!(!remote.matches_target(None));
+    assert!(!remote.matches_target(Some("portfolio-devbox")));
+}
+
+#[test]
+fn dir_inventory_source_serializes_as_a_typed_wire_contract() {
+    assert_eq!(
+        serde_json::to_value(DirInventorySource::local()).unwrap(),
+        serde_json::json!({ "kind": "local" })
+    );
+    assert_eq!(
+        serde_json::to_value(DirInventorySource::remote("conference1-ssh")).unwrap(),
+        serde_json::json!({
+            "kind": "remote_swimmers_api",
+            "target_id": "conference1-ssh"
+        })
+    );
+}
+
+#[test]
+fn legacy_dir_response_decodes_as_local_only_at_the_wire_edge() {
+    let response: DirListResponse = serde_json::from_value(serde_json::json!({
+        "path": "/tmp",
+        "entries": []
+    }))
+    .unwrap();
+    assert_eq!(response.inventory_source, DirInventorySource::local());
+}

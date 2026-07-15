@@ -111,7 +111,11 @@ fn render_picker_path_row(
 }
 
 fn picker_path_row_label(picker: &PickerState) -> String {
-    let base = picker.relative_label();
+    let base = format!(
+        "{} | inventory:{}",
+        picker.relative_label(),
+        picker.inventory_source.label()
+    );
     picker_launch_preview_suffix(
         &picker.launch_target_preview_for_path(&picker.current_path),
         36,
