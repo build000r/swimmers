@@ -41,7 +41,7 @@ pub(super) async fn get_pane_tail(
 
 enum PaneTailRoute<'a> {
     Remote {
-        target: LaunchTargetSummary,
+        target: Box<LaunchTargetSummary>,
         remote_session_id: &'a str,
     },
     Local,
@@ -52,7 +52,7 @@ fn pane_tail_route(
 ) -> Result<PaneTailRoute<'_>, remote_sessions::RemoteSessionError> {
     Ok(match remote_sessions::denamespace_for_target(session_id)? {
         Some((target, remote_session_id)) => PaneTailRoute::Remote {
-            target,
+            target: Box::new(target),
             remote_session_id,
         },
         None => PaneTailRoute::Local,

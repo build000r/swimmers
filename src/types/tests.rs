@@ -221,6 +221,7 @@ fn create_session_response_serializes_repo_theme() {
         session: Some(SessionSummary {
             session_id: "s1".into(),
             tmux_name: "1".into(),
+            tmux_target: crate::tmux_target::TmuxTarget::Default,
             state: SessionState::Idle,
             current_command: None,
             state_evidence: Default::default(),
@@ -286,6 +287,7 @@ fn session_created_payload_serializes_repo_theme() {
         session: SessionSummary {
             session_id: "s1".into(),
             tmux_name: "1".into(),
+            tmux_target: crate::tmux_target::TmuxTarget::Default,
             state: SessionState::Idle,
             current_command: None,
             state_evidence: Default::default(),

@@ -34,7 +34,7 @@ test("web test TypeScript config pins every Node web behavior test", async () =>
 test("package scripts keep web behavior tests and TypeScript guard wired", async () => {
   const packageJson = await readRepoJson("package.json");
 
-  assert.equal(packageJson.scripts.test, "node --test src/web/*.test.mjs");
+  assert.equal(packageJson.scripts.test, "node --test --test-concurrency=2 src/web/*.test.mjs");
   assert.match(packageJson.scripts.typecheck, /tsc -p tsconfig\.web-tests\.json/);
 });
 

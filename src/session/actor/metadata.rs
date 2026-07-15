@@ -2,20 +2,64 @@ use std::collections::BTreeSet;
 use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
-use chrono::Utc;
+use chrono::{TimeZone, Utc};
 use tracing::debug;
 
 use crate::state::detector::StateDetector;
-use crate::tmux_target::exact_pane_target;
+use crate::tmux_target::{exact_pane_target, TmuxTarget};
 use crate::types::{ControlEvent, SessionState, SessionTitlePayload};
 
 use super::percent_decode::percent_decode;
-use super::process_tree::{current_command_tool_update, query_tool_from_tmux_process_tree};
-use super::{run_bounded_tmux_command, SessionActor};
+use super::process_tree::{current_command_tool_update, detect_tool_from_tmux_pane_metadata};
+use super::{run_bounded_tmux_probe_for_target, SessionActor};
 
 pub(super) const CWD_REFRESH_MIN_INTERVAL: Duration = Duration::from_millis(750);
 pub(super) const TOOL_REFRESH_MIN_INTERVAL: Duration = Duration::from_millis(1_000);
 const TMUX_DISPLAY_MESSAGE_TIMEOUT: Duration = Duration::from_millis(500);
+const TMUX_PANE_METADATA_SEPARATOR: char = '\x1f';
+const TMUX_PANE_METADATA_FORMAT: &str =
+    "#{pane_current_path}\x1f#{pane_current_command}\x1f#{pane_pid}\x1f#{session_created}";
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct TmuxPaneMetadata {
+    current_path: String,
+    current_command: String,
+    pane_pid: String,
+    session_created: String,
+}
+
+impl TmuxPaneMetadata {
+    pub(super) fn current_path(&self) -> anyhow::Result<&str> {
+        nonempty_tmux_field(&self.current_path, "pane_current_path")
+    }
+
+    pub(super) fn current_command(&self) -> anyhow::Result<&str> {
+        nonempty_tmux_field(&self.current_command, "pane_current_command")
+    }
+
+    pub(super) fn pane_pid(&self) -> anyhow::Result<u32> {
+        self.pane_pid
+            .parse::<u32>()
+            .map_err(|e| anyhow::anyhow!("invalid pane_pid from tmux: {}", e))
+    }
+
+    pub(super) fn session_created(&self) -> anyhow::Result<chrono::DateTime<Utc>> {
+        let epoch = self
+            .session_created
+            .parse::<i64>()
+            .map_err(|e| anyhow::anyhow!("invalid tmux session_created value: {}", e))?;
+        Utc.timestamp_opt(epoch, 0)
+            .single()
+            .ok_or_else(|| anyhow::anyhow!("tmux returned invalid session_created timestamp"))
+    }
+}
+
+fn nonempty_tmux_field<'a>(value: &'a str, field: &str) -> anyhow::Result<&'a str> {
+    if value.is_empty() {
+        return Err(anyhow::anyhow!("tmux returned empty {field}"));
+    }
+    Ok(value)
+}
 
 impl SessionActor {
     /// Detect OSC title and CWD sequences in raw PTY output.
@@ -67,7 +111,11 @@ impl SessionActor {
         self.last_cwd_refresh_at = Instant::now();
 
         let tmux_name = self.tmux_name.clone();
-        match query_tmux_cwd(&tmux_name).await {
+        match self
+            .query_tmux_pane_metadata_cached()
+            .await
+            .and_then(|metadata| metadata.current_path().map(str::to_string))
+        {
             Ok(cwd) => self.update_cwd_and_emit(cwd),
             Err(e) => {
                 debug!(
@@ -101,7 +149,10 @@ impl SessionActor {
         self.last_tool_refresh_at = now;
 
         let tmux_name = self.tmux_name.clone();
-        let result = query_tool_from_tmux_process_tree(&tmux_name).await;
+        let result = match self.query_tmux_pane_metadata_cached().await {
+            Ok(metadata) => detect_tool_from_tmux_pane_metadata(&metadata).await,
+            Err(error) => Err(error),
+        };
         self.apply_tmux_tool_refresh_result(&tmux_name, result);
     }
 
@@ -288,11 +339,13 @@ pub(super) fn tool_refresh_changes_tool(current_tool: Option<&str>, detected_too
 
 pub(super) async fn query_tmux_display_message(
     tmux_name: &str,
+    tmux_target: &TmuxTarget,
     format: &str,
 ) -> anyhow::Result<String> {
     let target = exact_pane_target(tmux_name);
-    let output = run_bounded_tmux_command(
+    let output = run_bounded_tmux_probe_for_target(
         "tmux",
+        tmux_target,
         &["display-message", "-p", "-t", &target, format],
         TMUX_DISPLAY_MESSAGE_TIMEOUT,
         "display-message",
@@ -310,12 +363,31 @@ pub(super) async fn query_tmux_display_message(
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
 
-async fn query_tmux_cwd(tmux_name: &str) -> anyhow::Result<String> {
-    let cwd = query_tmux_display_message(tmux_name, "#{pane_current_path}").await?;
-    if cwd.is_empty() {
-        return Err(anyhow::anyhow!("tmux returned empty pane_current_path"));
-    }
-    Ok(cwd)
+pub(super) async fn query_tmux_pane_metadata(
+    tmux_name: &str,
+    tmux_target: &TmuxTarget,
+) -> anyhow::Result<TmuxPaneMetadata> {
+    parse_tmux_pane_metadata(
+        &query_tmux_display_message(tmux_name, tmux_target, TMUX_PANE_METADATA_FORMAT).await?,
+    )
+}
+
+fn parse_tmux_pane_metadata(output: &str) -> anyhow::Result<TmuxPaneMetadata> {
+    let fields = output
+        .split(TMUX_PANE_METADATA_SEPARATOR)
+        .collect::<Vec<_>>();
+    let [current_path, current_command, pane_pid, session_created] = fields.as_slice() else {
+        return Err(anyhow::anyhow!(
+            "tmux pane metadata returned {} fields, expected 4",
+            fields.len()
+        ));
+    };
+    Ok(TmuxPaneMetadata {
+        current_path: (*current_path).to_string(),
+        current_command: (*current_command).to_string(),
+        pane_pid: (*pane_pid).to_string(),
+        session_created: (*session_created).to_string(),
+    })
 }
 
 pub(super) fn osc_payloads<'a>(text: &'a str, prefix: &str) -> Vec<&'a str> {

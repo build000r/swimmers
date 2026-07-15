@@ -37,6 +37,7 @@ async fn init_persistence_keeps_persisted_session_id_progression() {
         .save_sessions(&[PersistedSession {
             session_id: "sess_7".to_string(),
             tmux_name: "7".to_string(),
+            tmux_target: crate::tmux_target::TmuxTarget::Default,
             state: SessionState::Idle,
             tool: Some("Codex".to_string()),
             token_count: 0,
@@ -72,6 +73,7 @@ async fn init_persistence_preserves_batch_membership_on_stale_sessions() {
         .save_sessions(&[PersistedSession {
             session_id: "sess_7".to_string(),
             tmux_name: "7".to_string(),
+            tmux_target: crate::tmux_target::TmuxTarget::Default,
             state: SessionState::Idle,
             tool: Some("Codex".to_string()),
             token_count: 0,
@@ -138,6 +140,7 @@ async fn init_persistence_hydrates_stale_session_from_thought_snapshot() {
         .save_sessions(&[PersistedSession {
             session_id: "sess_7".to_string(),
             tmux_name: "7".to_string(),
+            tmux_target: crate::tmux_target::TmuxTarget::Default,
             state: SessionState::Idle,
             tool: Some("Codex".to_string()),
             token_count: 12,

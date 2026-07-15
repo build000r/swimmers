@@ -1236,6 +1236,7 @@ pub async fn create_remote_session(
             name: body.name,
             cwd: Some(remote_cwd.clone()),
             spawn_tool: body.spawn_tool,
+            tmux_target: body.tmux_target,
             launch_target: None,
             initial_request: body.initial_request,
         },
@@ -1355,6 +1356,7 @@ where
         remote_body: CreateSessionsBatchRequest {
             dirs: remote_dirs,
             spawn_tool: body.spawn_tool,
+            tmux_target: body.tmux_target,
             launch_target: None,
             initial_request: body.initial_request,
         },

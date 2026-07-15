@@ -61,6 +61,7 @@ export function createAppEventHandlers(runtime = {}) {
     handleTerminalFallbackPasteEvent,
     handleTerminalFallbackScroll,
     handleTerminalInlineInputFocus,
+    handleTerminalTrogdorBackNavigation = null,
     handleTerminalStageClick,
     handleTerminalStageFocusEvent,
     handleTerminalStageKeydown,
@@ -338,6 +339,10 @@ export function createAppEventHandlers(runtime = {}) {
     handleTerminalStageWheel,
     handleTerminalTrogdorBackClick: (event) => {
       event.preventDefault();
+      if (typeof handleTerminalTrogdorBackNavigation === "function") {
+        handleTerminalTrogdorBackNavigation();
+        return;
+      }
       openTrogdorAtlas();
     },
     handleTerminalWorkbenchRefreshClick,

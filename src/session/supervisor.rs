@@ -20,7 +20,7 @@ use crate::config::Config;
 use crate::launcher::SpawnToolLauncher;
 use crate::persistence::file_store::{FileStore, PersistedSession, ThoughtSnapshot};
 use crate::repo_theme::discover_repo_theme;
-use crate::session::actor::{run_bounded_tmux_command, ActorHandle, SessionCommand};
+use crate::session::actor::{run_bounded_tmux_command_for_target, ActorHandle, SessionCommand};
 #[cfg(test)]
 use crate::session::spawn_command::{
     build_initial_request_input, build_spawn_tool_command, build_spawn_tool_command_with_launcher,
@@ -37,7 +37,7 @@ use crate::thought::loop_runner::SessionInfo;
 use crate::thought::loop_runner::SessionProvider;
 #[cfg(test)]
 use crate::thought::protocol::ThoughtDeliveryState;
-use crate::tmux_target::exact_session_target;
+use crate::tmux_target::{exact_session_target, TmuxTarget};
 #[cfg(test)]
 use crate::types::SUMMARY_CAUSE_TMUX_RECONCILE_MISSING;
 use crate::types::{
@@ -63,7 +63,7 @@ use self::summary::{
     active_pane_session_id_for_summary, merge_summary_with_thought_snapshot,
     merge_thought_snapshots_into_summaries, persisted_session_from_summary,
     session_info_from_summary, thought_snapshot_for_summary,
-    tmux_names_requiring_active_pane_lookup,
+    tmux_names_requiring_active_pane_lookup, ActivePaneSessionIdMap,
 };
 pub use self::thought_persistence::SupervisorProvider;
 use self::thought_persistence::THOUGHT_PERSIST_QUEUE_CAP;
@@ -169,6 +169,9 @@ pub enum TmuxAdoptError {
         tmux_name: String,
         message: String,
     },
+    InvalidTarget {
+        message: String,
+    },
 }
 
 impl fmt::Display for TmuxAdoptError {
@@ -206,6 +209,7 @@ impl fmt::Display for TmuxAdoptError {
             Self::SpawnFailed { tmux_name, message } => {
                 write!(f, "failed to adopt tmux session `{tmux_name}`: {message}")
             }
+            Self::InvalidTarget { message } => write!(f, "invalid tmux target: {message}"),
         }
     }
 }
@@ -295,7 +299,11 @@ pub struct SessionSupervisor {
 
 #[derive(Default)]
 struct ActivePaneCache {
-    fetched_at: Option<Instant>,
+    by_target: HashMap<TmuxTarget, ActivePaneCacheEntry>,
+}
+
+struct ActivePaneCacheEntry {
+    fetched_at: Instant,
     panes: HashMap<String, String>,
 }
 
@@ -388,6 +396,7 @@ impl SessionSupervisor {
     /// reusing a recent `tmux list-panes -a` result when it is within TTL.
     async fn active_pane_session_ids_cached(
         &self,
+        tmux_target: &TmuxTarget,
         tmux_names: &HashSet<String>,
         reason: &'static str,
     ) -> HashMap<String, String> {
@@ -397,14 +406,14 @@ impl SessionSupervisor {
 
         {
             let cache = self.active_pane_cache.lock().await;
-            if let Some(at) = cache.fetched_at {
-                if at.elapsed() < ACTIVE_PANE_CACHE_TTL {
-                    return filter_active_panes_to_requested(&cache.panes, tmux_names);
+            if let Some(entry) = cache.by_target.get(tmux_target) {
+                if entry.fetched_at.elapsed() < ACTIVE_PANE_CACHE_TTL {
+                    return filter_active_panes_to_requested(&entry.panes, tmux_names);
                 }
             }
         }
 
-        let fresh = match query_all_active_pane_session_ids().await {
+        let fresh = match query_all_active_pane_session_ids(tmux_target).await {
             Ok(panes) => {
                 self.record_tmux_capture_success(reason, panes.len());
                 panes
@@ -424,8 +433,13 @@ impl SessionSupervisor {
 
         {
             let mut cache = self.active_pane_cache.lock().await;
-            cache.fetched_at = Some(Instant::now());
-            cache.panes = fresh;
+            cache.by_target.insert(
+                tmux_target.clone(),
+                ActivePaneCacheEntry {
+                    fetched_at: Instant::now(),
+                    panes: fresh,
+                },
+            );
         }
 
         filtered
@@ -436,13 +450,24 @@ impl SessionSupervisor {
         summaries: I,
         thought_snapshots: &HashMap<String, ThoughtSnapshot>,
         reason: &'static str,
-    ) -> HashMap<String, String>
+    ) -> ActivePaneSessionIdMap
     where
         I: IntoIterator<Item = &'a SessionSummary>,
     {
-        let tmux_names = tmux_names_requiring_active_pane_lookup(summaries, thought_snapshots);
-        self.active_pane_session_ids_cached(&tmux_names, reason)
-            .await
+        let tmux_names_by_target =
+            tmux_names_requiring_active_pane_lookup(summaries, thought_snapshots);
+        let mut active_panes = ActivePaneSessionIdMap::new();
+        for (tmux_target, tmux_names) in tmux_names_by_target {
+            let target_panes = self
+                .active_pane_session_ids_cached(&tmux_target, &tmux_names, reason)
+                .await;
+            active_panes.extend(
+                target_panes
+                    .into_iter()
+                    .map(|(tmux_name, pane_id)| ((tmux_target.clone(), tmux_name), pane_id)),
+            );
+        }
+        active_panes
     }
 
     fn resolve_repo_theme_for_summary(&self, summary: &mut SessionSummary) -> Option<RepoTheme> {
@@ -532,6 +557,7 @@ impl SessionSupervisor {
             .unwrap_or_else(|| fallback_rest_state(SessionState::Exited, ps.thought_state));
         let mut summary =
             SessionSummary::placeholder(&ps.session_id, &ps.tmux_name, ps.last_activity_at);
+        summary.tmux_target = ps.tmux_target.clone();
         summary.cwd = ps.cwd.clone();
         summary.tool = ps.tool.clone();
         summary.context_limit = thought_data
@@ -604,8 +630,30 @@ impl SessionSupervisor {
         initial_request: Option<String>,
         batch: Option<SessionBatchMembership>,
     ) -> anyhow::Result<(SessionSummary, Option<RepoTheme>)> {
+        self.create_session_with_target_and_batch(
+            name,
+            cwd,
+            spawn_tool,
+            initial_request,
+            None,
+            batch,
+        )
+        .await
+    }
+
+    pub async fn create_session_with_target_and_batch(
+        self: &Arc<Self>,
+        name: Option<String>,
+        cwd: Option<String>,
+        spawn_tool: Option<crate::types::SpawnTool>,
+        initial_request: Option<String>,
+        tmux_target: Option<TmuxTarget>,
+        batch: Option<SessionBatchMembership>,
+    ) -> anyhow::Result<(SessionSummary, Option<RepoTheme>)> {
         let start_cwd = cwd.or_else(current_working_dir);
         let mut initial_request = normalize_initial_request(initial_request);
+        let tmux_target = tmux_target.unwrap_or_else(|| self.config.tmux_target.clone());
+        tmux_target.validate()?;
         let tmux_name = self.allocate_tmux_name(name);
         let session_id = self.allocate_unique_session_id().await;
 
@@ -617,7 +665,12 @@ impl SessionSupervisor {
             }
         }
 
-        info!(session_id = %session_id, tmux_name = %tmux_name, "creating new session");
+        info!(
+            session_id = %session_id,
+            tmux_name = %tmux_name,
+            tmux_target = %tmux_target.display_label(),
+            "creating new session"
+        );
 
         let initial_tool = initial_tool_name(spawn_tool.as_ref());
         let mut prelaunch_cleanup_paths = Vec::new();
@@ -642,6 +695,7 @@ impl SessionSupervisor {
         let handle = match crate::session::actor::SessionActor::spawn(
             session_id.clone(),
             tmux_name.clone(),
+            tmux_target.clone(),
             false, // create new
             start_cwd.clone(),
             initial_tool.clone(),
@@ -666,6 +720,7 @@ impl SessionSupervisor {
             .build_created_summary(
                 &session_id,
                 &tmux_name,
+                &tmux_target,
                 start_cwd.as_deref(),
                 initial_tool.as_deref(),
                 batch,
@@ -703,11 +758,13 @@ impl SessionSupervisor {
         &self,
         session_id: &str,
         tmux_name: &str,
+        tmux_target: &TmuxTarget,
         start_cwd: Option<&str>,
         initial_tool: Option<&str>,
         batch: Option<SessionBatchMembership>,
     ) -> SessionSummary {
         let mut summary = self.build_placeholder_summary(session_id, tmux_name);
+        summary.tmux_target = tmux_target.clone();
         if let Some(cwd) = start_cwd {
             summary.cwd = cwd.to_string();
         }
@@ -772,7 +829,7 @@ impl SessionSupervisor {
         let mut tmux_session_alive = true;
 
         if matches!(delete_mode, crate::config::SessionDeleteMode::KillTmux) {
-            if let Err(e) = kill_tmux_session(&handle.tmux_name).await {
+            if let Err(e) = kill_tmux_session(&handle.tmux_name, &handle.tmux_target).await {
                 let mut sessions = self.sessions.write().await;
                 sessions.insert(session_id.to_string(), handle.clone());
                 crate::metrics::set_active_sessions(sessions.len());
@@ -1222,10 +1279,11 @@ impl SessionSupervisor {
     }
 }
 
-async fn kill_tmux_session(tmux_name: &str) -> anyhow::Result<()> {
+async fn kill_tmux_session(tmux_name: &str, tmux_target: &TmuxTarget) -> anyhow::Result<()> {
     let target = exact_session_target(tmux_name);
-    let output = run_bounded_tmux_command(
+    let output = run_bounded_tmux_command_for_target(
         "tmux",
+        tmux_target,
         &["kill-session", "-t", &target],
         TMUX_KILL_SESSION_TIMEOUT,
         "kill-session",

@@ -5,6 +5,7 @@ const WORKBENCH_LOG_KIND_LABELS = {
   status: "Status",
   diff: "Diff",
   output: "Output",
+  thinking: "Thinking",
   truncation: "Trimmed",
 };
 
@@ -139,6 +140,16 @@ function payloadToolResultBlock(payload) {
   return content.find((block) => block && typeof block === "object" && block.type === "tool_result") || null;
 }
 
+function payloadThinkingText(payload) {
+  const content = Array.isArray(payload?.content) ? payload.content : [];
+  return content
+    .filter((block) => block && typeof block === "object" && /thinking|reasoning/.test(String(block.type || "")))
+    .map((block) => block.thinking || block.text || payloadTextContent(block.content))
+    .map((part) => String(part || "").trim())
+    .filter(Boolean)
+    .join("\n");
+}
+
 function readableRecordSummary(record, raw) {
   const summary = String(record?.summary || "").trim();
   if (!summary || summary === raw || /^[\[{]/.test(summary)) {
@@ -179,6 +190,9 @@ function transcriptRecordIsCallOutput(kind) {
 
 function transcriptRecordDisplayKind(record, payload) {
   const kind = String(record?.kind || payload?.type || "record");
+  if (/thinking|reasoning/.test(kind)) {
+    return "thinking";
+  }
   if (payloadToolResultBlock(payload)) {
     return "output";
   }
@@ -238,7 +252,12 @@ export function transcriptRecordDisplay(record) {
   const fields = [];
   let body = "";
 
-  if (toolUse || transcriptRecordIsCall(kind)) {
+  if (/thinking|reasoning/.test(kind)) {
+    body = payloadThinkingText(payload) || payloadTextContent(payload?.content) || payloadMessageText(payload) || summary || "Thinking";
+    if (role) {
+      fields.push(["role", role]);
+    }
+  } else if (toolUse || transcriptRecordIsCall(kind)) {
     const name = payload?.name || toolUse?.name || summary.split(":")[0] || "tool";
     const args = parseNestedJsonObject(payload?.arguments || payload?.input || toolUse?.input);
     const command = args?.cmd || args?.command || "";

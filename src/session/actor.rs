@@ -1,10 +1,10 @@
 use std::collections::HashMap;
 use std::ffi::OsStr;
 use std::process::Output;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
-use chrono::{TimeZone, Utc};
+use chrono::Utc;
 use portable_pty::{native_pty_system, MasterPty, PtySize};
 use tokio::process::Command;
 use tokio::sync::{broadcast, mpsc, oneshot};
@@ -18,7 +18,7 @@ use crate::session::artifact_responses::{
 use crate::session::replay_ring::ReplayRing;
 use crate::session::skill_detection::{detect_skill_from_input_line, drain_completed_input_lines};
 use crate::state::detector::StateDetector;
-use crate::tmux_target::exact_pane_target;
+use crate::tmux_target::{exact_pane_target, TmuxTarget};
 use crate::types::{
     clamp_terminal_resize, ControlEvent, MermaidArtifactResponse, PlanFileResponse,
     SessionBatchMembership, SessionSkillPayload, SessionState, SessionStatePayload, SessionSummary,
@@ -43,8 +43,8 @@ use self::metadata::{
     title_tool_update, tool_refresh_changes_tool, CWD_REFRESH_MIN_INTERVAL,
     TOOL_REFRESH_MIN_INTERVAL,
 };
-use self::metadata::{query_tmux_display_message, state_detector_for_initial_tool};
-use self::process_tree::query_pane_liveness;
+use self::metadata::{query_tmux_pane_metadata, state_detector_for_initial_tool, TmuxPaneMetadata};
+use self::process_tree::query_pane_liveness_for_pid;
 use self::process_tree::{PaneLiveness, ProcessEntry, ProcessTreeIndex};
 use self::spawn::{
     build_spawned_session_actor, build_tmux_spawn_command, initial_spawn_pty_size,
@@ -72,14 +72,157 @@ use self::tmux_input::{
     write_input_counts_as_activity, TmuxInputSendError,
 };
 
-const LIVENESS_CHECK_INTERVAL: Duration = Duration::from_millis(2_000);
+const LIVENESS_CHECK_INTERVAL: Duration = Duration::from_millis(5_000);
+const TMUX_PANE_METADATA_CACHE_TTL: Duration = Duration::from_millis(250);
 const TMUX_CAPTURE_PANE_TIMEOUT: Duration = Duration::from_secs(1);
 const MAX_OUTPUT_SUBSCRIBERS_PER_SESSION: usize = 16;
+const TMUX_PROBE_COOLDOWN_BASE: Duration = Duration::from_secs(30);
+const TMUX_PROBE_COOLDOWN_MAX: Duration = Duration::from_secs(120);
 
-fn tmux_command(program: impl AsRef<OsStr>, args: &[&str]) -> Command {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TmuxCommandRole {
+    Essential,
+    NonessentialProbe,
+}
+
+#[derive(Debug, Clone)]
+struct TmuxTargetHealth {
+    cooldown_until: Option<Instant>,
+    consecutive_timeouts: u32,
+    skipped_probes: u64,
+}
+
+#[derive(Debug, Clone)]
+struct CachedTmuxPaneMetadata {
+    fetched_at: Instant,
+    metadata: TmuxPaneMetadata,
+}
+
+impl TmuxTargetHealth {
+    fn new() -> Self {
+        Self {
+            cooldown_until: None,
+            consecutive_timeouts: 0,
+            skipped_probes: 0,
+        }
+    }
+
+    fn cooldown_remaining_at(&self, now: Instant) -> Option<Duration> {
+        self.cooldown_until
+            .and_then(|until| until.checked_duration_since(now))
+            .filter(|remaining| !remaining.is_zero())
+    }
+}
+
+impl Default for TmuxTargetHealth {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+static TMUX_HEALTH: OnceLock<Mutex<HashMap<TmuxTarget, TmuxTargetHealth>>> = OnceLock::new();
+
+fn tmux_health() -> &'static Mutex<HashMap<TmuxTarget, TmuxTargetHealth>> {
+    TMUX_HEALTH.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn tmux_probe_cooldown_duration(consecutive_timeouts: u32) -> Duration {
+    let multiplier = consecutive_timeouts.clamp(1, 4);
+    TMUX_PROBE_COOLDOWN_BASE
+        .saturating_mul(multiplier)
+        .min(TMUX_PROBE_COOLDOWN_MAX)
+}
+
+fn should_skip_tmux_command(
+    target: &TmuxTarget,
+    role: TmuxCommandRole,
+    operation: &'static str,
+) -> anyhow::Result<()> {
+    if role == TmuxCommandRole::Essential {
+        return Ok(());
+    }
+
+    let now = Instant::now();
+    let mut health = tmux_health()
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
+    let Some(state) = health.get_mut(target) else {
+        return Ok(());
+    };
+    let Some(remaining) = state.cooldown_remaining_at(now) else {
+        return Ok(());
+    };
+
+    state.skipped_probes = state.skipped_probes.saturating_add(1);
+    let skipped_probe_count = state.skipped_probes;
+    warn!(
+        operation,
+        tmux_target = %target.display_label(),
+        cooldown_remaining_ms = remaining.as_millis() as u64,
+        skipped_probe_count,
+        "tmux nonessential probe skipped during circuit-breaker cooldown"
+    );
+    Err(anyhow::anyhow!(
+        "tmux {operation} skipped while tmux target {} is cooling down for {}ms",
+        target.display_label(),
+        remaining.as_millis()
+    ))
+}
+
+fn record_tmux_command_timeout(target: &TmuxTarget, operation: &'static str) {
+    let now = Instant::now();
+    let mut health = tmux_health()
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
+    let state = health.entry(target.clone()).or_default();
+    state.consecutive_timeouts = state.consecutive_timeouts.saturating_add(1);
+    let cooldown = tmux_probe_cooldown_duration(state.consecutive_timeouts);
+    state.cooldown_until = Some(now + cooldown);
+    warn!(
+        operation,
+        tmux_target = %target.display_label(),
+        timeout_count = state.consecutive_timeouts,
+        cooldown_ms = cooldown.as_millis() as u64,
+        skipped_probe_count = state.skipped_probes,
+        "tmux circuit breaker opened after command timeout"
+    );
+}
+
+fn record_tmux_command_success(target: &TmuxTarget, operation: &'static str) {
+    let mut health = tmux_health()
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
+    let Some(state) = health.get(target) else {
+        return;
+    };
+    if state.cooldown_until.is_none()
+        && state.consecutive_timeouts == 0
+        && state.skipped_probes == 0
+    {
+        return;
+    }
+    let skipped_probe_count = state.skipped_probes;
+    health.remove(target);
+    info!(
+        operation,
+        tmux_target = %target.display_label(),
+        skipped_probe_count,
+        "tmux circuit breaker recovered after successful command"
+    );
+}
+
+#[cfg(test)]
+pub(crate) fn reset_tmux_health_for_tests() {
+    let mut health = tmux_health()
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
+    health.clear();
+}
+
+fn tmux_command(program: impl AsRef<OsStr>, args: &[String]) -> Command {
     let mut command = Command::new(program);
     command
-        .args(args)
+        .args(args.iter().map(String::as_str))
         .env_remove("TMUX")
         .env_remove("TMUX_PANE")
         .kill_on_drop(true);
@@ -92,8 +235,64 @@ pub(crate) async fn run_bounded_tmux_command(
     timeout_duration: Duration,
     operation: &'static str,
 ) -> anyhow::Result<Output> {
+    run_bounded_tmux_command_for_target(
+        program,
+        &TmuxTarget::Default,
+        args,
+        timeout_duration,
+        operation,
+    )
+    .await
+}
+
+pub(crate) async fn run_bounded_tmux_command_for_target(
+    program: impl AsRef<OsStr>,
+    target: &TmuxTarget,
+    args: &[&str],
+    timeout_duration: Duration,
+    operation: &'static str,
+) -> anyhow::Result<Output> {
+    run_bounded_tmux_command_for_target_with_role(
+        program,
+        target,
+        args,
+        timeout_duration,
+        operation,
+        TmuxCommandRole::Essential,
+    )
+    .await
+}
+
+pub(crate) async fn run_bounded_tmux_probe_for_target(
+    program: impl AsRef<OsStr>,
+    target: &TmuxTarget,
+    args: &[&str],
+    timeout_duration: Duration,
+    operation: &'static str,
+) -> anyhow::Result<Output> {
+    run_bounded_tmux_command_for_target_with_role(
+        program,
+        target,
+        args,
+        timeout_duration,
+        operation,
+        TmuxCommandRole::NonessentialProbe,
+    )
+    .await
+}
+
+async fn run_bounded_tmux_command_for_target_with_role(
+    program: impl AsRef<OsStr>,
+    target: &TmuxTarget,
+    args: &[&str],
+    timeout_duration: Duration,
+    operation: &'static str,
+    role: TmuxCommandRole,
+) -> anyhow::Result<Output> {
+    should_skip_tmux_command(target, role, operation)?;
     let started = Instant::now();
-    let mut command = tmux_command(program, args);
+    let args = target.command_args(args);
+    let mut command = tmux_command(program, &args);
     match tokio::time::timeout(timeout_duration, command.output()).await {
         Ok(Ok(output)) => {
             log_bounded_tmux_command_elapsed(
@@ -102,6 +301,7 @@ pub(crate) async fn run_bounded_tmux_command(
                 timeout_duration,
                 Some(output.status.success()),
             );
+            record_tmux_command_success(target, operation);
             Ok(output)
         }
         Ok(Err(err)) => {
@@ -116,6 +316,7 @@ pub(crate) async fn run_bounded_tmux_command(
         }
         Err(_) => {
             let elapsed = started.elapsed();
+            record_tmux_command_timeout(target, operation);
             warn!(
                 operation,
                 elapsed_ms = elapsed.as_millis() as u64,
@@ -331,6 +532,7 @@ struct SubscribeRejection {
 pub struct ActorHandle {
     pub session_id: String,
     pub tmux_name: String,
+    pub tmux_target: TmuxTarget,
     pub cmd_tx: mpsc::Sender<SessionCommand>,
     /// Per-session broadcast channel for ControlEvents (session_state, session_title).
     /// Multiple WS clients can subscribe to the same session's events.
@@ -360,6 +562,7 @@ impl ActorHandle {
         Self {
             session_id: session_id.into(),
             tmux_name: tmux_name.into(),
+            tmux_target: TmuxTarget::Default,
             cmd_tx,
             event_tx,
         }
@@ -373,6 +576,7 @@ impl ActorHandle {
 pub struct SessionActor {
     session_id: String,
     tmux_name: String,
+    tmux_target: TmuxTarget,
     #[allow(dead_code)]
     config: Arc<Config>,
 
@@ -409,6 +613,9 @@ pub struct SessionActor {
 
     // Last time we ran a process-tree liveness check.
     last_liveness_check_at: Instant,
+
+    // Short-lived tmux pane metadata snapshot for refreshes in the same actor tick.
+    tmux_pane_metadata_cache: Option<CachedTmuxPaneMetadata>,
 
     // Detected coding tool name
     tool: Option<String>,
@@ -498,10 +705,11 @@ fn compare_session_state_change(
 
 async fn try_tmux_write_input(
     tmux_name: String,
+    tmux_target: TmuxTarget,
     data: &[u8],
 ) -> Option<Result<(), TmuxInputSendError>> {
     let chunks = tmux_input_chunks(data)?;
-    Some(send_tmux_input_chunks(&tmux_name, &chunks).await)
+    Some(send_tmux_input_chunks(&tmux_name, &tmux_target, &chunks).await)
 }
 
 fn tmux_write_input_result(
@@ -543,6 +751,7 @@ impl SessionActor {
     pub fn spawn(
         session_id: String,
         tmux_name: String,
+        tmux_target: TmuxTarget,
         attach: bool,
         start_cwd: Option<String>,
         initial_tool: Option<String>,
@@ -553,6 +762,7 @@ impl SessionActor {
     ) -> anyhow::Result<ActorHandle> {
         let spawn_mode = TmuxSpawnMode::from_attach(attach);
         validate_spawn_start_cwd(spawn_mode, start_cwd.as_deref())?;
+        tmux_target.validate()?;
 
         let pty_system = native_pty_system();
         let pair = pty_system
@@ -561,6 +771,7 @@ impl SessionActor {
 
         let cmd = build_tmux_spawn_command(
             spawn_mode,
+            &tmux_target,
             &session_id,
             &tmux_name,
             start_cwd.as_deref(),
@@ -587,6 +798,7 @@ impl SessionActor {
         let actor = build_spawned_session_actor(SpawnedSessionActorInit {
             session_id: session_id.clone(),
             tmux_name: tmux_name.clone(),
+            tmux_target: tmux_target.clone(),
             config,
             master: pair.master,
             writer,
@@ -605,6 +817,7 @@ impl SessionActor {
         let handle = ActorHandle {
             session_id,
             tmux_name,
+            tmux_target,
             cmd_tx,
             event_tx,
         };
@@ -776,6 +989,7 @@ impl SessionActor {
                 let text = capture_pane_tail_or_empty(
                     self.session_id.clone(),
                     self.tmux_name.clone(),
+                    self.tmux_target.clone(),
                     lines,
                 )
                 .await;
@@ -850,7 +1064,8 @@ impl SessionActor {
     async fn deliver_write_input(&mut self, data: &[u8]) -> InputDeliveryResult {
         let session_id = self.session_id.clone();
         let tmux_name = self.tmux_name.clone();
-        if let Some(result) = try_tmux_write_input(tmux_name.clone(), data).await {
+        let tmux_target = self.tmux_target.clone();
+        if let Some(result) = try_tmux_write_input(tmux_name.clone(), tmux_target, data).await {
             if let Some(delivery) = tmux_write_input_result(&session_id, &tmux_name, result) {
                 return delivery;
             }
@@ -889,7 +1104,7 @@ impl SessionActor {
         }
         self.update_last_skill_from_input(&fallback_input);
 
-        match send_tmux_submit_line(&self.tmux_name, &text).await {
+        match send_tmux_submit_line(&self.tmux_name, &self.tmux_target, &text).await {
             Ok(()) => return InputDeliveryResult::delivered("tmux_submit_line"),
             Err(err) => {
                 warn!(
@@ -942,8 +1157,13 @@ impl SessionActor {
     }
 }
 
-async fn capture_pane_tail_or_empty(session_id: String, tmux_name: String, lines: usize) -> String {
-    match capture_pane_tail(&tmux_name, lines).await {
+async fn capture_pane_tail_or_empty(
+    session_id: String,
+    tmux_name: String,
+    tmux_target: TmuxTarget,
+    lines: usize,
+) -> String {
+    match capture_pane_tail(&tmux_name, &tmux_target, lines).await {
         Ok(text) => text,
         Err(e) => {
             debug!(
@@ -1120,8 +1340,28 @@ impl SessionActor {
         }
     }
 
+    async fn query_tmux_pane_metadata_cached(&mut self) -> anyhow::Result<TmuxPaneMetadata> {
+        let now = Instant::now();
+        if let Some(cache) = self.tmux_pane_metadata_cache.as_ref() {
+            if now.duration_since(cache.fetched_at) <= TMUX_PANE_METADATA_CACHE_TTL {
+                return Ok(cache.metadata.clone());
+            }
+        }
+
+        let metadata = query_tmux_pane_metadata(&self.tmux_name, &self.tmux_target).await?;
+        self.tmux_pane_metadata_cache = Some(CachedTmuxPaneMetadata {
+            fetched_at: Instant::now(),
+            metadata: metadata.clone(),
+        });
+        Ok(metadata)
+    }
+
     async fn maybe_refresh_session_started_at(&mut self) {
-        match query_tmux_session_created(&self.tmux_name).await {
+        match self
+            .query_tmux_pane_metadata_cached()
+            .await
+            .and_then(|metadata| metadata.session_created())
+        {
             Ok(session_started_at) => {
                 self.session_started_at = session_started_at;
             }
@@ -1137,7 +1377,7 @@ impl SessionActor {
     }
 
     /// Periodically query the pane's process tree to reconcile state.
-    /// Runs every LIVENESS_CHECK_INTERVAL (~2s). Skips if the session has exited.
+    /// Runs every LIVENESS_CHECK_INTERVAL. Skips if the session has exited.
     async fn maybe_check_liveness(&mut self) {
         let now = Instant::now();
         if !self.should_check_liveness(now) {
@@ -1156,8 +1396,16 @@ impl SessionActor {
     }
 
     async fn query_and_reconcile_liveness(&mut self) {
-        let tmux_name = self.tmux_name.clone();
-        let outcome = self.reconcile_liveness_query(query_pane_liveness(&tmux_name).await);
+        let outcome = match self.query_tmux_pane_metadata_cached().await {
+            Ok(metadata) => {
+                let query_result = match metadata.pane_pid() {
+                    Ok(pane_pid) => query_pane_liveness_for_pid(pane_pid).await,
+                    Err(error) => Err(error),
+                };
+                self.reconcile_liveness_query(query_result)
+            }
+            Err(error) => self.reconcile_liveness_query(Err(error)),
+        };
         for refresh in outcome.refresh_actions() {
             self.apply_liveness_refresh(refresh).await;
         }
@@ -1395,7 +1643,8 @@ impl SessionActor {
         let fallback_text = self.replay_ring.snapshot();
         let latest_seq = self.replay_ring.latest_seq();
 
-        let screen_text = match capture_pane_tail(&tmux_name, 300).await {
+        let tmux_target = self.tmux_target.clone();
+        let screen_text = match capture_pane_tail(&tmux_name, &tmux_target, 300).await {
             Ok(text) => text,
             Err(e) => {
                 warn!(
@@ -1467,6 +1716,7 @@ impl SessionActor {
             stale_subscribers as u32,
             self.last_activity_at,
         );
+        summary.tmux_target = self.tmux_target.clone();
         summary.last_skill = self.last_skill.clone();
         summary.batch = self.batch.clone();
         summary
@@ -1474,21 +1724,27 @@ impl SessionActor {
 }
 
 /// Capture visible pane text directly from tmux.
-async fn capture_pane_tail(tmux_name: &str, lines: usize) -> anyhow::Result<String> {
-    capture_pane_tail_with_command("tmux", tmux_name, lines).await
+async fn capture_pane_tail(
+    tmux_name: &str,
+    tmux_target: &TmuxTarget,
+    lines: usize,
+) -> anyhow::Result<String> {
+    capture_pane_tail_with_command("tmux", tmux_name, tmux_target, lines).await
 }
 
 async fn capture_pane_tail_with_command(
     tmux_command: impl AsRef<std::ffi::OsStr>,
     tmux_name: &str,
+    tmux_target: &TmuxTarget,
     lines: usize,
 ) -> anyhow::Result<String> {
     let lines = lines.clamp(20, 1000);
     let start = format!("-{lines}");
     let target = exact_pane_target(tmux_name);
 
-    let output = run_bounded_tmux_command(
+    let output = run_bounded_tmux_probe_for_target(
         tmux_command,
+        tmux_target,
         &["capture-pane", "-p", "-J", "-t", &target, "-S", &start],
         TMUX_CAPTURE_PANE_TIMEOUT,
         "capture-pane",
@@ -1510,14 +1766,14 @@ fn should_clear_startup_replay(clear_on_first_idle: bool, state: SessionState) -
     clear_on_first_idle && state == SessionState::Idle
 }
 
-async fn query_tmux_session_created(tmux_name: &str) -> anyhow::Result<chrono::DateTime<Utc>> {
-    let epoch = query_tmux_display_message(tmux_name, "#{session_created}")
+#[cfg(test)]
+async fn query_tmux_session_created(
+    tmux_name: &str,
+    tmux_target: &TmuxTarget,
+) -> anyhow::Result<chrono::DateTime<Utc>> {
+    query_tmux_pane_metadata(tmux_name, tmux_target)
         .await?
-        .parse::<i64>()
-        .map_err(|e| anyhow::anyhow!("invalid tmux session_created value: {}", e))?;
-    Utc.timestamp_opt(epoch, 0)
-        .single()
-        .ok_or_else(|| anyhow::anyhow!("tmux returned invalid session_created timestamp"))
+        .session_created()
 }
 
 #[derive(Debug, Clone, Copy, Default)]

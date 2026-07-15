@@ -2,7 +2,11 @@ use std::collections::{HashMap, HashSet};
 
 use crate::persistence::file_store::{PersistedSession, ThoughtSnapshot};
 use crate::thought::loop_runner::SessionInfo;
+use crate::tmux_target::TmuxTarget;
 use crate::types::{SessionState, SessionSummary};
+
+pub(super) type ActivePaneLookupKey = (TmuxTarget, String);
+pub(super) type ActivePaneSessionIdMap = HashMap<ActivePaneLookupKey, String>;
 
 pub(super) fn thought_snapshot_for_summary<'a>(
     summary: &SessionSummary,
@@ -52,6 +56,7 @@ pub(super) fn persisted_session_from_summary(
     PersistedSession {
         session_id: summary.session_id.clone(),
         tmux_name: summary.tmux_name.clone(),
+        tmux_target: summary.tmux_target.clone(),
         state: summary.state,
         tool: summary.tool.clone(),
         token_count: summary.token_count,
@@ -78,19 +83,21 @@ pub(super) fn persisted_session_from_summary(
 pub(super) fn active_pane_session_id_for_summary(
     summary: &SessionSummary,
     thought_snapshots: &HashMap<String, ThoughtSnapshot>,
-    active_pane_session_ids: &HashMap<String, String>,
+    active_pane_session_ids: &ActivePaneSessionIdMap,
 ) -> Option<String> {
     if !summary_requires_active_pane_lookup(summary, thought_snapshots) {
         return None;
     }
 
-    active_pane_session_ids.get(&summary.tmux_name).cloned()
+    active_pane_session_ids
+        .get(&(summary.tmux_target.clone(), summary.tmux_name.clone()))
+        .cloned()
 }
 
 pub(super) fn merge_thought_snapshots_into_summaries(
     summaries: &mut [SessionSummary],
     thought_snapshots: &HashMap<String, ThoughtSnapshot>,
-    active_pane_session_ids: &HashMap<String, String>,
+    active_pane_session_ids: &ActivePaneSessionIdMap,
 ) {
     for summary in summaries {
         merge_matching_thought_snapshot_into_summary(
@@ -104,7 +111,7 @@ pub(super) fn merge_thought_snapshots_into_summaries(
 fn merge_matching_thought_snapshot_into_summary(
     summary: &mut SessionSummary,
     thought_snapshots: &HashMap<String, ThoughtSnapshot>,
-    active_pane_session_ids: &HashMap<String, String>,
+    active_pane_session_ids: &ActivePaneSessionIdMap,
 ) {
     let active_pane_session_id =
         active_pane_session_id_for_summary(summary, thought_snapshots, active_pane_session_ids);
@@ -168,17 +175,23 @@ fn apply_thought_snapshot_to_session_info(info: &mut SessionInfo, thought_data: 
 pub(super) fn tmux_names_requiring_active_pane_lookup<'a, I>(
     summaries: I,
     thought_snapshots: &HashMap<String, ThoughtSnapshot>,
-) -> HashSet<String>
+) -> HashMap<TmuxTarget, HashSet<String>>
 where
     I: IntoIterator<Item = &'a SessionSummary>,
 {
     if thought_snapshots.is_empty() {
-        return HashSet::new();
+        return HashMap::new();
     }
 
-    summaries
+    let mut names_by_target: HashMap<TmuxTarget, HashSet<String>> = HashMap::new();
+    for summary in summaries
         .into_iter()
         .filter(|summary| summary_requires_active_pane_lookup(summary, thought_snapshots))
-        .map(|summary| summary.tmux_name.clone())
-        .collect()
+    {
+        names_by_target
+            .entry(summary.tmux_target.clone())
+            .or_default()
+            .insert(summary.tmux_name.clone());
+    }
+    names_by_target
 }

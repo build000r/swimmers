@@ -738,6 +738,7 @@ async fn acquire_ws_slot(sender: &mut WsSender) -> anyhow::Result<Option<ActiveW
     Ok(Some(ws_guard))
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn session_ws_authenticated_inner(
     mut sender: WsSender,
     mut receiver: WsReceiver,

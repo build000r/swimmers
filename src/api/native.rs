@@ -44,10 +44,12 @@ async fn native_status_for_peer(
     native_status_for_host_service(state, &request_peer(connect_info)).await
 }
 
+#[allow(clippy::result_large_err)]
 fn require_native_write_scope(auth: &AuthInfo) -> Result<(), Response> {
     auth.require_scope(AuthScope::SessionsWrite)
 }
 
+#[allow(clippy::result_large_err)]
 fn native_open_session_id(body: &NativeDesktopOpenRequest) -> Result<&str, Response> {
     Ok(&body.session_id)
 }

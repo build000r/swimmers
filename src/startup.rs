@@ -994,6 +994,7 @@ mod tests {
         let summary = SessionSummary {
             session_id: "sess_1".to_string(),
             tmux_name: "work".to_string(),
+            tmux_target: crate::tmux_target::TmuxTarget::Default,
             state: SessionState::Idle,
             current_command: Some("cargo test".to_string()),
             state_evidence: Default::default(),
@@ -1082,6 +1083,7 @@ mod tests {
         let summary = SessionSummary {
             session_id: "sess_1".to_string(),
             tmux_name: "work".to_string(),
+            tmux_target: crate::tmux_target::TmuxTarget::Default,
             state: SessionState::Idle,
             current_command: Some("cargo test".to_string()),
             state_evidence: Default::default(),

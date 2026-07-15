@@ -4,6 +4,10 @@ All notable changes to swimmers are documented here. The format is based on [Kee
 
 ## [Unreleased]
 
+### Build and CI
+
+- Added a Web CI job that runs the locked npm install, TypeScript checks, bounded Node web tests, and Vite build for the browser/Trogdor surface.
+
 ## [0.3.0] — 2026-06-20
 
 ### Trustworthy glance state evidence

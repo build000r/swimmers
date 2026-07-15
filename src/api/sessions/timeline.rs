@@ -50,7 +50,7 @@ async fn fetch_timeline_response(state: &Arc<AppState>, session_id: &str) -> Res
 
 enum TimelineRoute<'a> {
     Remote {
-        target: LaunchTargetSummary,
+        target: Box<LaunchTargetSummary>,
         remote_session_id: &'a str,
     },
     Local,
@@ -61,7 +61,7 @@ fn timeline_route(
 ) -> Result<TimelineRoute<'_>, remote_sessions::RemoteSessionError> {
     Ok(match remote_sessions::denamespace_for_target(session_id)? {
         Some((target, remote_session_id)) => TimelineRoute::Remote {
-            target,
+            target: Box::new(target),
             remote_session_id,
         },
         None => TimelineRoute::Local,

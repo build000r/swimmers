@@ -253,11 +253,12 @@ impl TuiApi for TuiClient {
     fn adopt_session(
         &self,
         tmux_name: &str,
+        tmux_target: Option<swimmers::tmux_target::TmuxTarget>,
         session_id: Option<&str>,
     ) -> BoxFuture<'_, Result<AdoptSessionResponse, String>> {
         match self {
-            Self::Embedded(client) => client.adopt_session(tmux_name, session_id),
-            Self::External(client) => client.adopt_session(tmux_name, session_id),
+            Self::Embedded(client) => client.adopt_session(tmux_name, tmux_target, session_id),
+            Self::External(client) => client.adopt_session(tmux_name, tmux_target, session_id),
         }
     }
 

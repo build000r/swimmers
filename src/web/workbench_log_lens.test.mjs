@@ -8,6 +8,10 @@ import {
   truncateWorkbenchText as publicTruncateWorkbenchText,
 } from "./workbench_render.js";
 import {
+  transcriptRecordDisplay,
+  recordMatchesSearch,
+} from "./workbench_records.js";
+import {
   renderTranscriptBlocks,
   renderWorkbenchLogLens,
   transcriptRecordsToLensText,
@@ -19,7 +23,7 @@ test("workbench log lens public exports remain available from workbench_render",
   assert.equal(publicRenderWorkbenchLogLens, renderWorkbenchLogLens);
   assert.equal(publicTruncateWorkbenchText("  abc\n def  ", 20), "abc def");
   assert.equal(publicTruncateWorkbenchText("abcdefgh", 6), "abc...");
-  assert.deepEqual(WORKBENCH_LOG_FILTERS, ["all", "operator", "command", "status", "diff", "output", "truncation"]);
+  assert.deepEqual(WORKBENCH_LOG_FILTERS, ["all", "operator", "command", "status", "diff", "output", "thinking", "truncation"]);
 });
 
 test("workbench log lens classifies transcript blocks with stable labels and line ranges", () => {
@@ -172,4 +176,156 @@ test("workbench JSONL lens preserves brief, record HTML, raw JSON, and record te
     logState: { mode: "raw", filter: "all", query: "" },
   });
   assert.equal(rawHtml.includes('<pre class="workbench-log-raw">{&quot;content&quot;:&quot;&lt;raw&gt;&quot;}</pre>'), true);
+});
+
+test("transcriptRecordDisplay classifies thinking records with thinking kind and readable body", () => {
+  const thinkingRecord = {
+    id: "t1",
+    kind: "thinking",
+    role: "assistant",
+    summary: "Analyzing the error trace to find root cause",
+    raw: JSON.stringify({
+      type: "assistant",
+      message: {
+        role: "assistant",
+        content: [
+          { type: "thinking", thinking: "The error is in the database connection pool" },
+          { type: "text", text: "Let me check the connection settings." },
+        ],
+      },
+    }),
+    byte_start: 100,
+  };
+
+  const display = transcriptRecordDisplay(thinkingRecord);
+  assert.equal(display.kind, "thinking");
+  assert.equal(display.label, "Thinking");
+  assert.ok(display.body.includes("database connection pool"), `thinking body should contain thinking text, got: ${display.body}`);
+});
+
+test("transcriptRecordDisplay keeps mixed thinking and tool_use records as thinking", () => {
+  const thinkingRecord = {
+    id: "mixed-thinking",
+    kind: "thinking",
+    role: "assistant",
+    summary: "Thinking before tool call",
+    raw: JSON.stringify({
+      type: "assistant",
+      message: {
+        role: "assistant",
+        content: [
+          { type: "thinking", thinking: "Need to inspect the failing test first" },
+          { type: "tool_use", id: "tool-1", name: "bash", input: { cmd: "cargo test" } },
+        ],
+      },
+    }),
+    byte_start: 140,
+  };
+
+  const display = transcriptRecordDisplay(thinkingRecord);
+
+  assert.equal(display.kind, "thinking");
+  assert.equal(display.label, "Thinking");
+  assert.ok(display.body.includes("inspect the failing test"), `thinking body should contain thinking text, got: ${display.body}`);
+  assert.equal(display.body.includes("cargo test"), false, "tool command should not replace thinking body");
+});
+
+test("transcriptRecordDisplay classifies reasoning records as thinking", () => {
+  const reasoningRecord = {
+    id: "r1",
+    kind: "reasoning",
+    summary: "Reasoning about approach",
+    raw: JSON.stringify({
+      type: "response_item",
+      payload: {
+        type: "reasoning",
+        summary: [{ type: "summary_text", text: "Considering the trade-offs" }],
+      },
+    }),
+    byte_start: 200,
+  };
+
+  const display = transcriptRecordDisplay(reasoningRecord);
+  assert.equal(display.kind, "thinking");
+  assert.equal(display.label, "Thinking");
+});
+
+test("workbench JSONL lens renders thinking records with filter chip and proper CSS class", () => {
+  const records = [
+    {
+      id: "t1",
+      kind: "thinking",
+      role: "assistant",
+      summary: "Analyzing error",
+      raw: JSON.stringify({
+        type: "assistant",
+        message: {
+          role: "assistant",
+          content: [{ type: "thinking", thinking: "The bug is in the retry logic" }],
+        },
+      }),
+      byte_start: 100,
+    },
+    {
+      id: "c1",
+      kind: "function_call",
+      summary: "exec: grep -r retry",
+      raw: JSON.stringify({ type: "function_call", name: "exec", arguments: { cmd: "grep -r retry" } }),
+      byte_start: 200,
+    },
+  ];
+
+  const html = renderWorkbenchLogLens("", {
+    records,
+    logState: { mode: "lens", filter: "all", query: "" },
+  });
+
+  assert.ok(html.includes('workbench-log-chip-thinking'), "should have thinking chip");
+  assert.ok(html.includes('workbench-log-block-thinking'), "should have thinking block CSS class");
+  assert.ok(html.includes("2/2 shown"), "should show both records");
+});
+
+test("workbench JSONL lens filters to thinking records only", () => {
+  const records = [
+    {
+      id: "t1",
+      kind: "thinking",
+      role: "assistant",
+      summary: "Deep analysis",
+      raw: JSON.stringify({ type: "assistant", message: { role: "assistant", content: [{ type: "thinking", thinking: "root cause" }] } }),
+      byte_start: 100,
+    },
+    {
+      id: "m1",
+      kind: "message",
+      role: "user",
+      summary: "user prompt",
+      raw: JSON.stringify({ type: "message", role: "user", content: "fix the bug" }),
+      byte_start: 200,
+    },
+  ];
+
+  const html = renderWorkbenchLogLens("", {
+    records,
+    logState: { mode: "lens", filter: "thinking", query: "" },
+  });
+
+  assert.ok(html.includes("1/2 shown"), "only thinking record should be shown");
+  assert.ok(html.includes('workbench-log-block-thinking'), "thinking record should appear");
+});
+
+test("recordMatchesSearch finds text in thinking record body", () => {
+  const record = transcriptRecordDisplay({
+    id: "t1",
+    kind: "thinking",
+    summary: "analyzing",
+    raw: JSON.stringify({
+      type: "assistant",
+      message: { role: "assistant", content: [{ type: "thinking", thinking: "database pool exhaustion" }] },
+    }),
+    byte_start: 0,
+  });
+
+  assert.ok(recordMatchesSearch(record, "pool"), "should find 'pool' in thinking body");
+  assert.ok(!recordMatchesSearch(record, "nonexistent"), "should not match absent text");
 });

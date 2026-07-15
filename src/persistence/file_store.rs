@@ -19,6 +19,7 @@ use uuid::Uuid;
 
 use crate::thought::protocol::ThoughtDeliveryState;
 use crate::thought::runtime_config::{ThoughtConfig, ThoughtConfigValidationError};
+use crate::tmux_target::TmuxTarget;
 use crate::types::{
     ActionCue, DirGroupMemberships, RestState, SessionBatchMembership, SessionState, ThoughtSource,
     ThoughtState,
@@ -38,6 +39,8 @@ const OP_DIR_GROUPS: &str = "dir_groups";
 pub struct PersistedSession {
     pub session_id: String,
     pub tmux_name: String,
+    #[serde(default, skip_serializing_if = "TmuxTarget::is_default")]
+    pub tmux_target: TmuxTarget,
     pub state: SessionState,
     pub tool: Option<String>,
     pub token_count: u64,

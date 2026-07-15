@@ -10,7 +10,7 @@ use tracing::{debug, warn};
 use crate::config::Config;
 use crate::scroll::guard::ScrollGuard;
 use crate::session::replay_ring::ReplayRing;
-use crate::tmux_target::exact_session_target;
+use crate::tmux_target::{exact_session_target, TmuxTarget};
 use crate::types::{ControlEvent, SessionBatchMembership};
 
 use super::{state_detector_for_initial_tool, SessionActor, SessionCommand};
@@ -67,41 +67,49 @@ pub(super) fn validate_spawn_start_cwd(
 
 pub(super) fn build_tmux_spawn_command(
     mode: TmuxSpawnMode,
+    tmux_target: &TmuxTarget,
     session_id: &str,
     tmux_name: &str,
     start_cwd: Option<&str>,
     initial_command: Option<&str>,
 ) -> CommandBuilder {
-    let mut command = build_tmux_spawn_command_args(mode, tmux_name, start_cwd, initial_command);
+    let mut command =
+        build_tmux_spawn_command_args(mode, tmux_target, tmux_name, start_cwd, initial_command);
     configure_tmux_spawn_command_env(&mut command, session_id, tmux_name);
     command
 }
 
 pub(super) fn build_tmux_spawn_command_args(
     mode: TmuxSpawnMode,
+    tmux_target: &TmuxTarget,
     tmux_name: &str,
     start_cwd: Option<&str>,
     initial_command: Option<&str>,
 ) -> CommandBuilder {
     match mode {
-        TmuxSpawnMode::Attach => build_tmux_attach_command(tmux_name),
-        TmuxSpawnMode::New => build_tmux_new_session_command(tmux_name, start_cwd, initial_command),
+        TmuxSpawnMode::Attach => build_tmux_attach_command(tmux_target, tmux_name),
+        TmuxSpawnMode::New => {
+            build_tmux_new_session_command(tmux_target, tmux_name, start_cwd, initial_command)
+        }
     }
 }
 
-fn build_tmux_attach_command(tmux_name: &str) -> CommandBuilder {
+fn build_tmux_attach_command(tmux_target: &TmuxTarget, tmux_name: &str) -> CommandBuilder {
     let mut command = CommandBuilder::new("tmux");
+    tmux_target.apply_to_command_builder(&mut command);
     let target = exact_session_target(tmux_name);
     command.args(["attach-session", "-t", &target]);
     command
 }
 
 fn build_tmux_new_session_command(
+    tmux_target: &TmuxTarget,
     tmux_name: &str,
     start_cwd: Option<&str>,
     initial_command: Option<&str>,
 ) -> CommandBuilder {
     let mut command = CommandBuilder::new("tmux");
+    tmux_target.apply_to_command_builder(&mut command);
     command.args(["new-session", "-s", tmux_name]);
     if let Some(dir) = start_cwd {
         command.args(["-c", dir]);
@@ -224,6 +232,7 @@ pub(super) fn inspect_tmux_child_after_spawn(
 pub(super) struct SpawnedSessionActorInit {
     pub(super) session_id: String,
     pub(super) tmux_name: String,
+    pub(super) tmux_target: TmuxTarget,
     pub(super) config: Arc<Config>,
     pub(super) master: Box<dyn MasterPty + Send>,
     pub(super) writer: Box<dyn std::io::Write + Send>,
@@ -241,6 +250,7 @@ pub(super) fn build_spawned_session_actor(init: SpawnedSessionActorInit) -> Sess
     SessionActor {
         session_id: init.session_id,
         tmux_name: init.tmux_name,
+        tmux_target: init.tmux_target,
         config: init.config.clone(),
         master: init.master,
         writer: init.writer,
@@ -256,6 +266,7 @@ pub(super) fn build_spawned_session_actor(init: SpawnedSessionActorInit) -> Sess
         last_cwd_refresh_at: Instant::now(),
         last_tool_refresh_at: Instant::now(),
         last_liveness_check_at: Instant::now(),
+        tmux_pane_metadata_cache: None,
         tool: init.initial_tool,
         last_skill: None,
         batch: init.batch,

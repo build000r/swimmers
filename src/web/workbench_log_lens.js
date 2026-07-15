@@ -45,10 +45,11 @@ const WORKBENCH_LOG_KIND_LABELS = {
   status: "Status",
   diff: "Diff",
   output: "Output",
+  thinking: "Thinking",
   truncation: "Trimmed",
 };
 
-export const WORKBENCH_LOG_FILTERS = ["all", "operator", "command", "status", "diff", "output", "truncation"];
+export const WORKBENCH_LOG_FILTERS = ["all", "operator", "command", "status", "diff", "output", "thinking", "truncation"];
 
 const WORKBENCH_LOG_COMMAND_RE =
   /^(?:cargo|make|git|node|bun|npm|pnpm|yarn|python3?|pytest|uv|xcodebuild|swift|curl|tmux|cat|sed|rg|grep|ls|cd|cp|mv|mkdir|touch|chmod|ssh|docker|kubectl)\b/;

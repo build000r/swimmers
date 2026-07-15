@@ -67,6 +67,7 @@ fn summary(session_id: &str, state: SessionState) -> crate::types::SessionSummar
     crate::types::SessionSummary {
         session_id: session_id.to_string(),
         tmux_name: format!("tmux-{session_id}"),
+        tmux_target: crate::tmux_target::TmuxTarget::Default,
         state,
         current_command: None,
         state_evidence,
@@ -661,6 +662,7 @@ async fn create_batch(state: Arc<AppState>, dirs: Vec<String>) -> axum::response
         Json(CreateSessionsBatchRequest {
             dirs,
             spawn_tool: None,
+            tmux_target: None,
             launch_target: None,
             initial_request: None,
         }),

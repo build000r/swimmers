@@ -4,6 +4,7 @@ use chrono::{DateTime, Duration, Utc};
 use serde::{Deserialize, Serialize};
 
 use crate::thought::runtime_config::{DaemonDefaults, ThoughtConfig};
+use crate::tmux_target::TmuxTarget;
 
 /// Browser-compatible minimum terminal columns accepted by resize messages.
 pub const TERMINAL_RESIZE_MIN_COLS: u16 = 24;
@@ -989,6 +990,8 @@ pub struct SessionBatchMembership {
 pub struct SessionSummary {
     pub session_id: String,
     pub tmux_name: String,
+    #[serde(default, skip_serializing_if = "TmuxTarget::is_default")]
+    pub tmux_target: TmuxTarget,
     pub state: SessionState,
     pub current_command: Option<String>,
     #[serde(default)]
@@ -1031,6 +1034,7 @@ pub struct SessionSummary {
 }
 
 impl SessionSummary {
+    #[allow(clippy::too_many_arguments)]
     pub fn live(
         session_id: impl Into<String>,
         tmux_name: impl Into<String>,
@@ -1048,6 +1052,7 @@ impl SessionSummary {
         Self {
             session_id: session_id.into(),
             tmux_name: tmux_name.into(),
+            tmux_target: TmuxTarget::Default,
             state,
             current_command,
             state_evidence,
@@ -1480,6 +1485,8 @@ pub struct CreateSessionRequest {
     pub cwd: Option<String>,
     pub spawn_tool: Option<SpawnTool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tmux_target: Option<TmuxTarget>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub launch_target: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub initial_request: Option<String>,
@@ -1488,6 +1495,8 @@ pub struct CreateSessionRequest {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AdoptSessionRequest {
     pub tmux_name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tmux_target: Option<TmuxTarget>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session_id: Option<String>,
 }
@@ -1504,6 +1513,8 @@ pub struct AdoptSessionResponse {
 pub struct CreateSessionsBatchRequest {
     pub dirs: Vec<String>,
     pub spawn_tool: Option<SpawnTool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tmux_target: Option<TmuxTarget>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub launch_target: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

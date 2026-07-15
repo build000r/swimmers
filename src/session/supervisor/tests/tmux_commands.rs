@@ -1,4 +1,9 @@
 use super::*;
+use crate::session::actor::{
+    reset_tmux_health_for_tests, run_bounded_tmux_command_for_target,
+    run_bounded_tmux_probe_for_target,
+};
+use crate::tmux_target::TmuxTarget;
 
 #[test]
 fn kill_tmux_session_result_accepts_success_status() {
@@ -161,8 +166,9 @@ async fn bounded_tmux_command_times_out_non_returning_fake_tmux() {
     );
 
     let started = Instant::now();
-    let err = run_bounded_tmux_command(
+    let err = run_bounded_tmux_command_for_target(
         fake_tmux.as_os_str(),
+        &TmuxTarget::socket_name("bounded-timeout"),
         &["list-sessions", "-F", "#{session_name}"],
         Duration::from_millis(25),
         "test-hanging-list-sessions",
@@ -178,4 +184,137 @@ async fn bounded_tmux_command_times_out_non_returning_fake_tmux() {
         err.to_string().contains("timed out after 25ms"),
         "timeout error should mention the bounded wait: {err:#}"
     );
+}
+
+#[tokio::test]
+async fn tmux_probe_circuit_breaker_skips_probes_until_essential_success() {
+    let _guard = crate::test_support::ENV_LOCK
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
+    reset_tmux_health_for_tests();
+    let dir = tempdir().expect("tempdir");
+    let sleepy_tmux = dir.path().join("sleepy-tmux");
+    let fast_tmux = dir.path().join("fast-tmux");
+    let log = dir.path().join("tmux.log");
+    let target = TmuxTarget::socket_name("breaker");
+    write_executable(
+        &sleepy_tmux,
+        &format!(
+            "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'\nif [ -x /bin/sleep ]; then exec /bin/sleep 10; fi\nexec sleep 10\n",
+            log.display()
+        ),
+    );
+    write_executable(
+        &fast_tmux,
+        &format!(
+            "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'\nprintf 'ok\\n'\n",
+            log.display()
+        ),
+    );
+
+    let timeout = run_bounded_tmux_probe_for_target(
+        sleepy_tmux.as_os_str(),
+        &target,
+        &["display-message"],
+        Duration::from_millis(500),
+        "display-message",
+    )
+    .await
+    .expect_err("first probe should time out");
+    assert!(timeout.to_string().contains("timed out"));
+
+    let skipped = run_bounded_tmux_probe_for_target(
+        fast_tmux.as_os_str(),
+        &target,
+        &["capture-pane"],
+        Duration::from_secs(1),
+        "capture-pane",
+    )
+    .await
+    .expect_err("second nonessential probe should be skipped");
+    assert!(skipped.to_string().contains("skipped"));
+    assert_eq!(
+        std::fs::read_to_string(&log).expect("tmux log"),
+        "-L breaker display-message\n"
+    );
+
+    run_bounded_tmux_command_for_target(
+        fast_tmux.as_os_str(),
+        &target,
+        &["send-keys"],
+        Duration::from_secs(1),
+        "send-keys",
+    )
+    .await
+    .expect("essential success should recover breaker");
+
+    run_bounded_tmux_probe_for_target(
+        fast_tmux.as_os_str(),
+        &target,
+        &["capture-pane"],
+        Duration::from_secs(1),
+        "capture-pane",
+    )
+    .await
+    .expect("probe should run after recovery");
+
+    assert_eq!(
+        std::fs::read_to_string(&log).expect("tmux log"),
+        "-L breaker display-message\n-L breaker send-keys\n-L breaker capture-pane\n"
+    );
+    reset_tmux_health_for_tests();
+}
+
+#[tokio::test]
+async fn tmux_probe_circuit_breaker_is_scoped_by_target() {
+    let _guard = crate::test_support::ENV_LOCK
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
+    reset_tmux_health_for_tests();
+    let dir = tempdir().expect("tempdir");
+    let sleepy_tmux = dir.path().join("sleepy-tmux");
+    let fast_tmux = dir.path().join("fast-tmux");
+    let log = dir.path().join("tmux.log");
+    let isolated = TmuxTarget::socket_name("tiktok");
+    let baseline = TmuxTarget::socket_name("baseline");
+    write_executable(
+        &sleepy_tmux,
+        &format!(
+            "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'\nif [ -x /bin/sleep ]; then exec /bin/sleep 10; fi\nexec sleep 10\n",
+            log.display()
+        ),
+    );
+    write_executable(
+        &fast_tmux,
+        &format!(
+            "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'\nprintf 'ok\\n'\n",
+            log.display()
+        ),
+    );
+
+    run_bounded_tmux_probe_for_target(
+        sleepy_tmux.as_os_str(),
+        &isolated,
+        &["display-message"],
+        Duration::from_millis(500),
+        "display-message",
+    )
+    .await
+    .expect_err("isolated target probe should time out");
+
+    run_bounded_tmux_probe_for_target(
+        fast_tmux.as_os_str(),
+        &baseline,
+        &["capture-pane"],
+        Duration::from_secs(1),
+        "capture-pane",
+    )
+    .await
+    .expect("default target should not inherit isolated target cooldown");
+
+    assert_eq!(
+        std::fs::read_to_string(&log).expect("tmux log"),
+        "-L tiktok display-message\n-L baseline capture-pane\n"
+    );
+    reset_tmux_health_for_tests();
 }

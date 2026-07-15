@@ -217,6 +217,7 @@ pub(crate) struct GroupInputTargets {
     pub(crate) label: String,
 }
 
+#[allow(clippy::large_enum_variant)]
 pub(crate) enum PendingInteractionResult {
     OpenPicker {
         x: u16,
@@ -1959,6 +1960,7 @@ impl<C: TuiApi> App<C> {
     pub(crate) fn adopt_tmux_session(
         &mut self,
         tmux_name: String,
+        tmux_target: Option<swimmers::tmux_target::TmuxTarget>,
         session_id: Option<String>,
         field: Rect,
     ) {
@@ -1976,7 +1978,7 @@ impl<C: TuiApi> App<C> {
         }
         self.runtime.spawn(async move {
             let response = client
-                .adopt_session(&tmux_name, session_id_for_call.as_deref())
+                .adopt_session(&tmux_name, tmux_target, session_id_for_call.as_deref())
                 .await;
             let _ = tx.send(PendingInteractionResult::AdoptSession { field, response });
         });
@@ -1996,7 +1998,12 @@ impl<C: TuiApi> App<C> {
             return;
         }
 
-        self.adopt_tmux_session(session.tmux_name, Some(session.session_id), field);
+        self.adopt_tmux_session(
+            session.tmux_name,
+            Some(session.tmux_target),
+            Some(session.session_id),
+            field,
+        );
     }
 
     pub(crate) fn spawn_sessions_batch(

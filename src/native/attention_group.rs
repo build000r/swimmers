@@ -3,7 +3,7 @@ use std::path::Path;
 
 use anyhow::{anyhow, Result};
 
-use crate::tmux_target::{exact_pane_target, exact_session_target};
+use crate::tmux_target::{exact_pane_target, exact_session_target, TmuxTarget};
 use crate::types::{
     AttentionGroupLayout, GhosttyOpenMode, NativeAttentionGroupOpenResponse, NativeDesktopApp,
     SessionSummary,
@@ -34,6 +34,7 @@ pub async fn open_native_attention_group(
                 attention_group_ghostty_mode(app, ghostty_mode),
                 ATTENTION_GROUP_SESSION_ID,
                 ATTENTION_GROUP_TMUX_NAME,
+                &TmuxTarget::Default,
                 "",
             )
             .await?,
@@ -156,7 +157,7 @@ async fn create_attention_group_tmux_session(
             ATTENTION_GROUP_TMUX_NAME,
             "-n",
             "attention",
-            &build_attention_group_attach_command(&first.tmux_name, tmux_path),
+            &build_attention_group_attach_command(first, tmux_path),
         ],
     )
     .await
@@ -216,7 +217,7 @@ fn desired_attention_group_panes<'a>(
         .iter()
         .map(|session| DesiredAttentionGroupPane {
             session,
-            command: build_attention_group_attach_command(&session.tmux_name, tmux_path),
+            command: build_attention_group_attach_command(session, tmux_path),
         })
         .collect()
 }
@@ -373,7 +374,7 @@ async fn respawn_attention_group_pane(
             "-k",
             "-t",
             pane_id,
-            &build_attention_group_attach_command(&session.tmux_name, tmux_path),
+            &build_attention_group_attach_command(session, tmux_path),
         ],
     )
     .await
@@ -400,7 +401,7 @@ async fn split_attention_group_pane(
             "-P",
             "-F",
             "#{pane_id}",
-            &build_attention_group_attach_command(&session.tmux_name, tmux_path),
+            &build_attention_group_attach_command(session, tmux_path),
         ],
     )
     .await
@@ -493,11 +494,27 @@ pub(super) fn attention_group_pane_target() -> String {
     exact_pane_target(ATTENTION_GROUP_TMUX_NAME)
 }
 
-pub(super) fn build_attention_group_attach_command(tmux_name: &str, tmux_path: &Path) -> String {
+pub(super) fn build_attention_group_attach_command(
+    session: &SessionSummary,
+    tmux_path: &Path,
+) -> String {
+    let target_words = session
+        .tmux_target
+        .shell_words()
+        .into_iter()
+        .map(|word| super::shell_quote_token(&word))
+        .collect::<Vec<_>>()
+        .join(" ");
+    let target_words = if target_words.is_empty() {
+        String::new()
+    } else {
+        format!(" {target_words}")
+    };
     format!(
-        "exec env TMUX= {} attach-session -t {}",
+        "exec env TMUX= {}{} attach-session -t {}",
         super::shell_quote_token(&tmux_path.to_string_lossy()),
-        super::shell_quote_token(&exact_session_target(tmux_name))
+        target_words,
+        super::shell_quote_token(&exact_session_target(&session.tmux_name))
     )
 }
 
@@ -518,10 +535,22 @@ mod tests {
 
     #[test]
     fn build_attention_group_attach_command_unsets_nested_tmux_and_exact_targets() {
-        let command = build_attention_group_attach_command("team session", Path::new("/tmp/tmux"));
+        let session = test_session("sess-1", "team session");
+        let command = build_attention_group_attach_command(&session, Path::new("/tmp/tmux"));
         assert_eq!(
             command,
             "exec env TMUX= /tmp/tmux attach-session -t '=team session'"
+        );
+    }
+
+    #[test]
+    fn build_attention_group_attach_command_includes_isolated_tmux_target() {
+        let mut session = test_session("sess-1", "team session");
+        session.tmux_target = TmuxTarget::socket_name("tiktok");
+        let command = build_attention_group_attach_command(&session, Path::new("/tmp/tmux"));
+        assert_eq!(
+            command,
+            "exec env TMUX= /tmp/tmux -L tiktok attach-session -t '=team session'"
         );
     }
 
@@ -586,11 +615,11 @@ mod tests {
         );
         assert_eq!(
             desired[0].command.as_str(),
-            build_attention_group_attach_command("tmux-a", tmux_path)
+            build_attention_group_attach_command(&sessions[0], tmux_path)
         );
         assert_eq!(
             desired[1].command.as_str(),
-            build_attention_group_attach_command("tmux b", tmux_path)
+            build_attention_group_attach_command(&sessions[1], tmux_path)
         );
     }
 

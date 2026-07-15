@@ -803,6 +803,7 @@ mod tests {
         SessionSummary {
             session_id: "session-1".to_string(),
             tmux_name: "session-1".to_string(),
+            tmux_target: swimmers::tmux_target::TmuxTarget::Default,
             state: SessionState::Idle,
             current_command: None,
             state_evidence: StateEvidence::new("test"),

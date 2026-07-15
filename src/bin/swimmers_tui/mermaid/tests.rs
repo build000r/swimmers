@@ -19,6 +19,7 @@ fn test_viewer(
     MermaidViewerState {
         session_id: "test-session".to_string(),
         tmux_name: "test-tmux".to_string(),
+        tmux_target: swimmers::tmux_target::TmuxTarget::Default,
         cwd: ".".to_string(),
         path: None,
         source: None,

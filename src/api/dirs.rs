@@ -38,6 +38,7 @@ fn remote_dir_write_response(target: Option<&str>) -> Option<Response> {
     })
 }
 
+#[allow(clippy::result_large_err)]
 fn require_local_dir_write(auth: &AuthInfo, target: Option<&str>) -> Result<(), Response> {
     auth.require_scope(AuthScope::SessionsWrite)?;
     if let Some(response) = remote_dir_write_response(target) {

@@ -136,6 +136,10 @@ export function workbenchWidgetClickPlan(target) {
     };
   }
 
+  if (target?.closest?.("[data-workbench-open-terminal]")) {
+    return { type: "open_terminal" };
+  }
+
   return target?.closest?.("[data-workbench-open-mermaid]")
     ? { type: "open_mermaid" }
     : { type: "ignore" };
@@ -492,6 +496,7 @@ export function buildWorkbenchWidgetsViewModel({
   contextPayload = null,
   selectedTurnId = "",
   logState = {},
+  readerState = {},
 } = {}) {
   const timeline = widgets.timeline;
   const timelineEvents = Array.isArray(timeline?.events) ? timeline.events : [];
@@ -598,6 +603,13 @@ export function buildWorkbenchWidgetsViewModel({
   const skillsMeta = skills?.available
     ? `${Array.isArray(skills.skills) ? skills.skills.length : 0} skills`
     : "unavailable";
+  const terminalAttached = Boolean(readerState.terminalAttached);
+  const terminalBody = terminalAttached
+    ? `<div class="workbench-action-detail">Live terminal attached.</div>`
+    : `
+      <div class="workbench-action-detail">Live terminal detached.</div>
+      <button class="workbench-widget-action" type="button" data-workbench-open-terminal="true">Open terminal</button>
+    `;
 
   return {
     statusText: widgets.loading
@@ -606,6 +618,13 @@ export function buildWorkbenchWidgetsViewModel({
         ? String(widgets.error)
         : "",
     items: [
+      {
+        key: "terminal",
+        title: "Terminal",
+        meta: terminalAttached ? "attached" : "reader",
+        bodyHtml: terminalBody,
+        open: !terminalAttached,
+      },
       {
         key: "turns",
         title: "Turns",

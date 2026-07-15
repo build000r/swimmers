@@ -5,6 +5,7 @@ fn thought_snapshot_for_summary_matches_active_tmux_pane() {
     let summary = SessionSummary {
         session_id: "sess_1".to_string(),
         tmux_name: "work".to_string(),
+        tmux_target: crate::tmux_target::TmuxTarget::Default,
         state: SessionState::Idle,
         current_command: None,
         state_evidence: Default::default(),
@@ -92,6 +93,7 @@ fn thought_snapshot_for_summary_does_not_fall_back_to_latest_tmux_pane_without_a
     let summary = SessionSummary {
         session_id: "sess_1".to_string(),
         tmux_name: "work".to_string(),
+        tmux_target: crate::tmux_target::TmuxTarget::Default,
         state: SessionState::Idle,
         current_command: None,
         state_evidence: Default::default(),
@@ -191,4 +193,30 @@ fn active_pane_lookup_not_required_without_thought_snapshots() {
     let tmux_names = tmux_names_requiring_active_pane_lookup(summaries.iter(), &snapshots);
 
     assert!(tmux_names.is_empty());
+}
+
+#[test]
+fn active_pane_lookup_groups_tmux_names_by_target() {
+    let mut default_summary = test_summary("sess-default", SessionState::Idle);
+    default_summary.tmux_name = "work".to_string();
+    let mut isolated_summary = test_summary("sess-isolated", SessionState::Idle);
+    isolated_summary.tmux_name = "work".to_string();
+    isolated_summary.tmux_target = crate::tmux_target::TmuxTarget::socket_name("isolated");
+    let snapshots = HashMap::from([(
+        "tmux:work:1.1:%2".to_string(),
+        test_thought_snapshot("active pane", ThoughtState::Active),
+    )]);
+
+    let tmux_names = tmux_names_requiring_active_pane_lookup(
+        [default_summary, isolated_summary].iter(),
+        &snapshots,
+    );
+
+    assert_eq!(tmux_names.len(), 2);
+    assert!(tmux_names
+        .get(&crate::tmux_target::TmuxTarget::Default)
+        .is_some_and(|names| names.contains("work")));
+    assert!(tmux_names
+        .get(&crate::tmux_target::TmuxTarget::socket_name("isolated"))
+        .is_some_and(|names| names.contains("work")));
 }

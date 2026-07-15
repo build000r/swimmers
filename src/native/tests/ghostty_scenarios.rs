@@ -140,6 +140,7 @@ async fn swap_fallback_tc1_cache_miss_omits_known_preview_id() {
     let result = open_or_focus_ghostty_session(
         "sess-tc1",
         "tmux-tc1",
+        &crate::tmux_target::TmuxTarget::Default,
         "/tmp/fallback",
         GhosttyOpenMode::Swap,
     )
@@ -175,6 +176,7 @@ async fn swap_fallback_tc2_stale_cache_passes_preview_id_arg() {
     let result = open_or_focus_ghostty_session(
         "sess-tc2",
         "tmux-tc2",
+        &crate::tmux_target::TmuxTarget::Default,
         "/tmp/fallback",
         GhosttyOpenMode::Swap,
     )
@@ -211,6 +213,7 @@ async fn swap_fallback_tc3_tc4_stale_create_new_is_reported_and_not_cached() {
     let result = open_or_focus_ghostty_session(
         "sess-tc3",
         "tmux-tc3",
+        &crate::tmux_target::TmuxTarget::Default,
         "/tmp/fallback",
         GhosttyOpenMode::Swap,
     )
@@ -242,6 +245,7 @@ async fn swap_fallback_tc5_golden_path_forwards_cached_id_and_updates_cache() {
     let result = open_or_focus_ghostty_session(
         "sess-tc5",
         "tmux-tc5",
+        &crate::tmux_target::TmuxTarget::Default,
         "/tmp/fallback",
         GhosttyOpenMode::Swap,
     )
@@ -281,6 +285,7 @@ async fn front_tab_empty_tc1_ok_empty_skips_cache_lookup() {
     let result = open_or_focus_ghostty_session(
         "sess-ft1",
         "tmux-ft1",
+        &crate::tmux_target::TmuxTarget::Default,
         "/tmp/fallback",
         GhosttyOpenMode::Swap,
     )
@@ -317,6 +322,7 @@ async fn front_tab_empty_tc2_err_absorbed_swap_proceeds() {
     let result = open_or_focus_ghostty_session(
         "sess-ft2",
         "tmux-ft2",
+        &crate::tmux_target::TmuxTarget::Default,
         "/tmp/fallback",
         GhosttyOpenMode::Swap,
     )
@@ -352,6 +358,7 @@ async fn front_tab_empty_tc3_tc4_no_stale_cache_write_when_tab_id_missing() {
     let result = open_or_focus_ghostty_session(
         "sess-ft3",
         "tmux-ft3",
+        &crate::tmux_target::TmuxTarget::Default,
         "/tmp/fallback",
         GhosttyOpenMode::Swap,
     )
@@ -412,6 +419,7 @@ async fn attach_race_rust_layer_has_no_retry_or_readiness_probe_documents_bug() 
     let result = open_or_focus_ghostty_session(
         "sess-race",
         "tmux-race",
+        &crate::tmux_target::TmuxTarget::Default,
         "/tmp/fallback",
         GhosttyOpenMode::Swap,
     )

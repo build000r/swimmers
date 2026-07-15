@@ -8,6 +8,7 @@ async fn create_sessions_batch_requires_write_scope() {
         Json(CreateSessionsBatchRequest {
             dirs: vec!["/tmp/project".to_string()],
             spawn_tool: None,
+            tmux_target: None,
             launch_target: None,
             initial_request: None,
         }),
@@ -26,6 +27,7 @@ async fn create_sessions_batch_rejects_empty_dirs() {
         Json(CreateSessionsBatchRequest {
             dirs: Vec::new(),
             spawn_tool: None,
+            tmux_target: None,
             launch_target: None,
             initial_request: None,
         }),
@@ -47,6 +49,7 @@ async fn create_remote_sessions_batch_response_maps_validation_errors() {
         Json(CreateSessionsBatchRequest {
             dirs: Vec::new(),
             spawn_tool: None,
+            tmux_target: None,
             launch_target: Some("remote-target".to_string()),
             initial_request: None,
         }),
@@ -68,6 +71,7 @@ async fn create_sessions_batch_rejects_blank_dirs() {
         Json(CreateSessionsBatchRequest {
             dirs: vec!["/tmp/project".to_string(), " \t\n".to_string()],
             spawn_tool: None,
+            tmux_target: None,
             launch_target: None,
             initial_request: None,
         }),
@@ -91,6 +95,7 @@ async fn create_sessions_batch_rejects_oversized_batches() {
                 .map(|idx| format!("/tmp/project-{idx}"))
                 .collect(),
             spawn_tool: None,
+            tmux_target: None,
             launch_target: None,
             initial_request: None,
         }),
@@ -123,6 +128,7 @@ async fn create_sessions_batch_assigns_shared_batch_metadata() {
         Json(CreateSessionsBatchRequest {
             dirs,
             spawn_tool: None,
+            tmux_target: None,
             launch_target: None,
             initial_request: Some("wire jwt refresh + tests".to_string()),
         }),

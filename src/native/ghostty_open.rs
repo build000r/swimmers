@@ -3,6 +3,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{anyhow, Context, Result};
 use tokio::process::Command;
 
+use crate::tmux_target::TmuxTarget;
 use crate::types::{GhosttyOpenMode, NativeDesktopApp, NativeDesktopOpenResponse};
 
 struct GhosttyOpenContext {
@@ -17,11 +18,13 @@ struct GhosttyOpenContext {
 pub(super) async fn open_or_focus_ghostty_session(
     session_id: &str,
     tmux_name: &str,
+    tmux_target: &TmuxTarget,
     cwd: &str,
     mode: GhosttyOpenMode,
 ) -> Result<NativeDesktopOpenResponse> {
     let _guard = super::NATIVE_OPEN_LOCK.lock().await;
-    let context = prepare_ghostty_open_context(session_id, tmux_name, cwd, mode).await?;
+    let context =
+        prepare_ghostty_open_context(session_id, tmux_name, tmux_target, cwd, mode).await?;
     let mut result = run_ghostty_open_script(
         &context.script,
         session_id,
@@ -81,6 +84,7 @@ pub(super) async fn open_or_focus_ghostty_attach_command(
 async fn prepare_ghostty_open_context(
     session_id: &str,
     tmux_name: &str,
+    tmux_target: &TmuxTarget,
     cwd: &str,
     mode: GhosttyOpenMode,
 ) -> Result<GhosttyOpenContext> {
@@ -96,8 +100,8 @@ async fn prepare_ghostty_open_context(
     }
 
     let tmux_path = super::resolve_tmux_binary()?;
-    let attach_command = super::build_ghostty_attach_command(tmux_name, &tmux_path);
-    let (_, tmux_cwd) = super::query_tmux_pane_metadata(&tmux_path, tmux_name)
+    let attach_command = super::build_ghostty_attach_command(tmux_name, tmux_target, &tmux_path);
+    let (_, tmux_cwd) = super::query_tmux_pane_metadata(&tmux_path, tmux_name, tmux_target)
         .await
         .unwrap_or((None, None));
     let resolved_cwd = tmux_cwd.unwrap_or_else(|| cwd.to_string());

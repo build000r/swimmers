@@ -12,8 +12,8 @@ use tokio::process::Command;
 use tokio::sync::Mutex as AsyncMutex;
 use tokio::time::Duration;
 
-use crate::session::actor::run_bounded_tmux_command;
-use crate::tmux_target::{exact_pane_target, exact_session_target};
+use crate::session::actor::{run_bounded_tmux_command, run_bounded_tmux_command_for_target};
+use crate::tmux_target::{exact_pane_target, exact_session_target, TmuxTarget};
 #[cfg(test)]
 use crate::types::{AttentionGroupLayout, SessionSummary};
 use crate::types::{GhosttyOpenMode, NativeDesktopApp, NativeDesktopOpenResponse};
@@ -102,12 +102,16 @@ pub async fn open_native_session(
     ghostty_mode: GhosttyOpenMode,
     session_id: &str,
     tmux_name: &str,
+    tmux_target: &TmuxTarget,
     cwd: &str,
 ) -> Result<NativeDesktopOpenResponse> {
     match app {
-        NativeDesktopApp::Iterm => open_or_focus_iterm_session(session_id, tmux_name, cwd).await,
+        NativeDesktopApp::Iterm => {
+            open_or_focus_iterm_session(session_id, tmux_name, tmux_target, cwd).await
+        }
         NativeDesktopApp::Ghostty => {
-            open_or_focus_ghostty_session(session_id, tmux_name, cwd, ghostty_mode).await
+            open_or_focus_ghostty_session(session_id, tmux_name, tmux_target, cwd, ghostty_mode)
+                .await
         }
     }
 }
@@ -253,10 +257,12 @@ pub(super) async fn run_tmux_output(
 async fn query_tmux_pane_metadata(
     tmux_path: &Path,
     tmux_name: &str,
+    tmux_target: &TmuxTarget,
 ) -> Result<(Option<String>, Option<String>)> {
     let target = exact_pane_target(tmux_name);
-    let output = run_bounded_tmux_command(
+    let output = run_bounded_tmux_command_for_target(
         tmux_path.as_os_str(),
+        tmux_target,
         &[
             "display-message",
             "-p",
@@ -352,10 +358,26 @@ pub(super) fn shell_quote_token(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\"'\"'"))
 }
 
-fn build_ghostty_attach_command(tmux_name: &str, tmux_path: &Path) -> String {
+fn build_ghostty_attach_command(
+    tmux_name: &str,
+    tmux_target: &TmuxTarget,
+    tmux_path: &Path,
+) -> String {
+    let target_words = tmux_target
+        .shell_words()
+        .into_iter()
+        .map(|word| shell_quote_token(&word))
+        .collect::<Vec<_>>()
+        .join(" ");
+    let target_words = if target_words.is_empty() {
+        String::new()
+    } else {
+        format!(" {target_words}")
+    };
     format!(
-        "exec {} attach-session -t {}",
+        "exec {}{} attach-session -t {}",
         shell_quote_token(&tmux_path.to_string_lossy()),
+        target_words,
         shell_quote_token(&exact_session_target(tmux_name))
     )
 }

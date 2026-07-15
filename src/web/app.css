@@ -437,6 +437,20 @@ body.mobile-keyboard-active .terminal-control-strip {
   pointer-events: auto;
 }
 
+body.terminal-reader-mode .terminal-stage {
+  background:
+    linear-gradient(180deg, rgba(8, 13, 16, 0.98), rgba(4, 7, 9, 1)),
+    #070b0d;
+}
+
+body.terminal-reader-mode .terminal-workbench {
+  left: 50%;
+  right: auto;
+  bottom: 24px;
+  width: min(920px, calc(100vw - 32px));
+  transform: translateX(-50%);
+}
+
 .workbench-header {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
@@ -813,6 +827,11 @@ body.mobile-keyboard-active .terminal-control-strip {
 .workbench-log-chip-diff,
 .workbench-log-block-diff .workbench-log-block-header {
   color: #9bf0c4;
+}
+
+.workbench-log-chip-thinking,
+.workbench-log-block-thinking .workbench-log-block-header {
+  color: #c4b5fd;
 }
 
 .workbench-log-chip-truncation,

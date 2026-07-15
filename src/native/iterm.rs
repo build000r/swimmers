@@ -4,7 +4,7 @@ use anyhow::{anyhow, Context, Result};
 use tokio::process::Command;
 use tokio::time::{sleep, Duration};
 
-use crate::tmux_target::exact_session_target;
+use crate::tmux_target::{exact_session_target, TmuxTarget};
 use crate::types::{NativeDesktopApp, NativeDesktopOpenResponse};
 
 const ITERM_OPEN_RETRY_ATTEMPTS: usize = 2;
@@ -27,10 +27,11 @@ struct ItermTmuxMetadata {
 pub async fn open_or_focus_iterm_session(
     session_id: &str,
     tmux_name: &str,
+    tmux_target: &TmuxTarget,
     cwd: &str,
 ) -> Result<NativeDesktopOpenResponse> {
     let _guard = super::NATIVE_OPEN_LOCK.lock().await;
-    let context = prepare_iterm_open_context(session_id, tmux_name, cwd).await?;
+    let context = prepare_iterm_open_context(session_id, tmux_name, tmux_target, cwd).await?;
     open_iterm_with_retries(session_id, tmux_name, &context).await
 }
 
@@ -55,14 +56,15 @@ pub async fn open_or_focus_iterm_attach_command(
 async fn prepare_iterm_open_context(
     session_id: &str,
     tmux_name: &str,
+    tmux_target: &TmuxTarget,
     cwd: &str,
 ) -> Result<ItermOpenContext> {
     let script = super::script_path_for_app(NativeDesktopApp::Iterm)?;
     ensure_iterm_script_exists(&script)?;
 
     let tmux_path = super::resolve_tmux_binary()?;
-    let attach_command = build_iterm_attach_command(tmux_name, &tmux_path);
-    let metadata = load_iterm_tmux_metadata(&tmux_path, tmux_name).await;
+    let attach_command = build_iterm_attach_command(tmux_name, tmux_target, &tmux_path);
+    let metadata = load_iterm_tmux_metadata(&tmux_path, tmux_name, tmux_target).await;
     let display_name = display_name_from_iterm_tmux_metadata(cwd, tmux_name, &metadata);
     let known_pane_id = super::cached_pane_id(session_id);
 
@@ -82,8 +84,12 @@ fn ensure_iterm_script_exists(script: &Path) -> Result<()> {
     }
 }
 
-async fn load_iterm_tmux_metadata(tmux_path: &Path, tmux_name: &str) -> ItermTmuxMetadata {
-    let (pane_id, cwd) = super::query_tmux_pane_metadata(tmux_path, tmux_name)
+async fn load_iterm_tmux_metadata(
+    tmux_path: &Path,
+    tmux_name: &str,
+    tmux_target: &TmuxTarget,
+) -> ItermTmuxMetadata {
+    let (pane_id, cwd) = super::query_tmux_pane_metadata(tmux_path, tmux_name, tmux_target)
         .await
         .unwrap_or((None, None));
     ItermTmuxMetadata { pane_id, cwd }
@@ -238,10 +244,26 @@ pub(super) fn build_iterm_display_name(
     }
 }
 
-pub(super) fn build_iterm_attach_command(tmux_name: &str, tmux_path: &Path) -> String {
+pub(super) fn build_iterm_attach_command(
+    tmux_name: &str,
+    tmux_target: &TmuxTarget,
+    tmux_path: &Path,
+) -> String {
+    let target_words = tmux_target
+        .shell_words()
+        .into_iter()
+        .map(|word| super::shell_quote_token(&word))
+        .collect::<Vec<_>>()
+        .join(" ");
+    let target_words = if target_words.is_empty() {
+        String::new()
+    } else {
+        format!(" {target_words}")
+    };
     format!(
-        "exec {} attach-session -t {}",
+        "exec {}{} attach-session -t {}",
         super::shell_quote_token(&tmux_path.to_string_lossy()),
+        target_words,
         super::shell_quote_token(&exact_session_target(tmux_name))
     )
 }
