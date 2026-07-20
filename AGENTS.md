@@ -226,3 +226,7 @@ git push                # Push to remote
 ```
 
 <!-- end-bv-agent-instructions -->
+
+## Orb bootstrap (AO-018)
+
+On a fresh Amp Orb, bootstrap the Rust toolchain by running `bash .agents/setup` (idempotent). It pins `rustc` to `1.88.0` via `rustup`, then proves the build with `cargo check --locked` / `cargo check`. Setup state is emitted to `.agents/state/setup-status.json` and logs to `.agents/logs/setup.log`.
