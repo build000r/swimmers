@@ -226,3 +226,27 @@ git push                # Push to remote
 ```
 
 <!-- end-bv-agent-instructions -->
+
+## Orb bootstrap (AO-005)
+
+Hardened Amp Orb lane for Rust validation.
+
+- **Setup:** run `.agents/setup`. It is idempotent, checks fixed Orb disk
+  headroom before work, installs rustup if missing, pins Rust to `1.88.0`
+  by default, and runs `cargo check --locked`. This pin tracks the current
+  lockfile requirements; crate MSRV remains `1.82`.
+- **Resume:** run `.agents/resume` on wake. It performs only fast checks
+  (curl/git/Python, disk headroom, and pinned Rust presence) and backgrounds
+  rustup/toolchain repair if needed so it stays inside Amp's 10s non-blocking
+  wake budget. It does not run `cargo check`.
+- **Status/logs:** setup writes `.agents/state/setup-status.json` and
+  `.agents/logs/setup.log`; resume writes `.agents/state/resume-status.json` and
+  `.agents/logs/resume.log`. Final stderr lines are prefixed
+  `AGENT_SETUP_RESULT_JSON` or `AGENT_RESUME_RESULT_JSON`.
+- **Typed failures:** `setup=10`, `dependency=20`, `capacity=30`, `auth=40`,
+  `validation=50`. Capacity failures mean the fixed 40GB Orb disk does not have
+  enough free space for safe Rust setup/resume.
+- **Tests (optional deeper):** `cargo test --locked` is slower; use it after
+  setup snapshot exists.
+- **Do not:** load host `.env` symlinks, push protected branches, or assume
+  tmux/device access on the Orb.
