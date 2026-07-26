@@ -1,9 +1,20 @@
 {
   "proof_version": 1,
   "bead_id": "swimmers-provider-conversation-launch-receipt-smg1",
-  "status": "BLOCKED",
-  "named_blocker": "exact_clippy_gate_foreign_failures",
-  "blocking_repair_bead": "swimmers-exact-clippy-gate-foreign-failures-j81r",
+  "status": "PASS",
+  "contract_commit": "d4061e5",
+  "resolved_gate": {
+    "name": "exact_clippy_gate_foreign_failures",
+    "repair_beads": [
+      "swimmers-exact-clippy-gate-foreign-failures-j81r",
+      "swimmers-swimmers-tui-needless-range-clippy-x9pl"
+    ],
+    "repair_commits": [
+      "9285e18",
+      "565f2db",
+      "3591a9b"
+    ]
+  },
   "contract": {
     "version": 1,
     "authorized_receipt_type": "AuthorizedProviderResumeLaunchReceipt",
@@ -57,6 +68,28 @@
     "unknown_or_unsupported_can_claim_resumable": false,
     "legacy_launch_receipt_upgrades_to": "unknown"
   },
+  "contract_audit": {
+    "default_public_negative_fixture": {
+      "status": "PASS",
+      "forbidden_keys_present": []
+    },
+    "authorized_tier_separation": {
+      "status": "PASS",
+      "authorized_exact_identity_fields": [
+        "session_id",
+        "conversation_id",
+        "resume_argv",
+        "resume_command"
+      ],
+      "public_fields": [
+        "version",
+        "provider",
+        "capability",
+        "capture_source"
+      ],
+      "public_resumable_projection": "unknown"
+    }
+  },
   "validations": [
     {
       "command": "cargo fmt --check",
@@ -70,76 +103,131 @@
     },
     {
       "command": "cargo clippy -- -D warnings",
-      "exit_code": 101,
-      "diagnostic_count": 16,
-      "lint": "clippy::uninlined_format_args",
-      "owned_path_diagnostic_count": 0
+      "exit_code": 0,
+      "diagnostic_count": 0
     }
   ],
-  "exact_clippy_diagnostics": [
+  "resolved_clippy_diagnostic_history": [
     {
-      "path": "src/host_actions.rs",
-      "line": 735
+      "lint": "clippy::uninlined_format_args",
+      "diagnostic_count": 16,
+      "repair_commit": "9285e18",
+      "diagnostics": [
+        {
+          "path": "src/host_actions.rs",
+          "line": 735
+        },
+        {
+          "path": "src/native/mod.rs",
+          "line": 169
+        },
+        {
+          "path": "src/native/mod.rs",
+          "line": 179
+        },
+        {
+          "path": "src/native/mod.rs",
+          "line": 189
+        },
+        {
+          "path": "src/session/actor/metadata.rs",
+          "line": 43
+        },
+        {
+          "path": "src/session/actor/metadata.rs",
+          "line": 50
+        },
+        {
+          "path": "src/session/actor/process_tree.rs",
+          "line": 220
+        },
+        {
+          "path": "src/session/actor/spawn.rs",
+          "line": 222
+        },
+        {
+          "path": "src/session/actor.rs",
+          "line": 770
+        },
+        {
+          "path": "src/session/actor.rs",
+          "line": 784
+        },
+        {
+          "path": "src/session/actor.rs",
+          "line": 793
+        },
+        {
+          "path": "src/session/supervisor/active_panes.rs",
+          "line": 26
+        },
+        {
+          "path": "src/session/supervisor.rs",
+          "line": 827
+        },
+        {
+          "path": "src/session/supervisor.rs",
+          "line": 1241
+        },
+        {
+          "path": "src/thought/runtime_config.rs",
+          "line": 148
+        },
+        {
+          "path": "src/thought/runtime_config.rs",
+          "line": 164
+        }
+      ]
     },
     {
-      "path": "src/native/mod.rs",
-      "line": 169
+      "lint": "clippy::uninlined_format_args",
+      "diagnostic_count": 8,
+      "repair_commit": "565f2db",
+      "diagnostics": [
+        {
+          "path": "src/bin/swimmers_tui/api.rs",
+          "line": 135
+        },
+        {
+          "path": "src/bin/swimmers_tui/api.rs",
+          "line": 139
+        },
+        {
+          "path": "src/bin/swimmers_tui/api.rs",
+          "line": 143
+        },
+        {
+          "path": "src/bin/swimmers_tui/api.rs",
+          "line": 1360
+        },
+        {
+          "path": "src/bin/swimmers_tui/lifecycle.rs",
+          "line": 198
+        },
+        {
+          "path": "src/bin/swimmers_tui/picker/render.rs",
+          "line": 577
+        },
+        {
+          "path": "src/bin/swimmers_tui/render.rs",
+          "line": 564
+        },
+        {
+          "path": "src/bin/swimmers_tui/skill_panel.rs",
+          "line": 673
+        }
+      ]
     },
     {
-      "path": "src/native/mod.rs",
-      "line": 179
-    },
-    {
-      "path": "src/native/mod.rs",
-      "line": 189
-    },
-    {
-      "path": "src/session/actor/metadata.rs",
-      "line": 43
-    },
-    {
-      "path": "src/session/actor/metadata.rs",
-      "line": 50
-    },
-    {
-      "path": "src/session/actor/process_tree.rs",
-      "line": 220
-    },
-    {
-      "path": "src/session/actor/spawn.rs",
-      "line": 222
-    },
-    {
-      "path": "src/session/actor.rs",
-      "line": 770
-    },
-    {
-      "path": "src/session/actor.rs",
-      "line": 784
-    },
-    {
-      "path": "src/session/actor.rs",
-      "line": 793
-    },
-    {
-      "path": "src/session/supervisor/active_panes.rs",
-      "line": 26
-    },
-    {
-      "path": "src/session/supervisor.rs",
-      "line": 827
-    },
-    {
-      "path": "src/session/supervisor.rs",
-      "line": 1241
-    },
-    {
-      "path": "src/thought/runtime_config.rs",
-      "line": 148
-    },
-    {
-      "path": "src/thought/runtime_config.rs",
-      "line": 164
+      "lint": "clippy::needless_range_loop",
+      "diagnostic_count": 1,
+      "repair_commit": "3591a9b",
+      "diagnostics": [
+        {
+          "path": "src/bin/swimmers_tui/mermaid_ascii.rs",
+          "line": 43
+        }
+      ]
     }
   ]
 }
