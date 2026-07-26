@@ -1,0 +1,127 @@
+{
+  "proof_version": 1,
+  "bead_id": "swimmers-grok-preassigned-session-id-56hw",
+  "criterion": "PC-SW-GROK-1",
+  "status": "PASS",
+  "scope": {
+    "product_files": [
+      "src/session/providers/grok_cli.rs",
+      "src/session/providers/tests/grok_cli.rs"
+    ],
+    "shared_wiring_modified": false,
+    "integration_owner": "swimmers-provider-receipt-integration-7lir"
+  },
+  "cli_contract": {
+    "command": "grok --help",
+    "exit_code": 0,
+    "new_conversation": "--session-id <SESSION_ID>",
+    "new_conversation_requirement": "valid UUID that does not already exist under the target session directory",
+    "resume": "--resume <SESSION_ID_OR_TITLE>",
+    "session_id_does_not_resume": true
+  },
+  "adapter_contract": {
+    "identity_generation": "Uuid::new_v4 before process spawn",
+    "launch_argv_prefix": [
+      "grok",
+      "--session-id",
+      "<preassigned_uuid>"
+    ],
+    "resume_argv": [
+      "grok",
+      "--resume",
+      "<same_preassigned_uuid>"
+    ],
+    "capture_source": "preassigned",
+    "provider": "grok",
+    "receipt_requires_success_token": true,
+    "post_tmux_success_token": {
+      "method": "GrokCliProvider::verify_observed_launch",
+      "required_observation": "exact prepared argv, exact cwd, and running process or successful exit",
+      "nonzero_exit": "GrokCliProviderError::Rejected",
+      "argv_mismatch": "GrokCliProviderError::ObservedArgvMismatch",
+      "cwd_mismatch": "GrokCliProviderError::ObservedCwdMismatch",
+      "launches_grok_again": false
+    },
+    "receipt_requires_exact_cwd": true,
+    "fallback_without_tracked_id": false,
+    "rejected_control_arguments": [
+      "--session-id",
+      "-s",
+      "--resume",
+      "-r",
+      "--continue",
+      "-c",
+      "--fork-session",
+      "--cwd"
+    ]
+  },
+  "focused_fixture_results": {
+    "command": "cargo test grok_cli_provider -- --nocapture",
+    "wiring": "temporary test-only providers module outside the working tree; shared integration wiring remains untouched",
+    "exit_code": 0,
+    "tests_passed": 5,
+    "tests_failed": 0,
+    "tests_filtered_out": 1406,
+    "parallel_launches": 64,
+    "fixtures": [
+      {
+        "name": "grok_cli_provider_parallel_launches_preassign_unique_receipt_bound_uuids",
+        "status": "PASS"
+      },
+      {
+        "name": "grok_cli_provider_collision_and_rejection_fail_without_fallback_receipt",
+        "status": "PASS",
+        "collision_exit_code": 73,
+        "rejection_exit_code": 29,
+        "rejection_invocations": 1
+      },
+      {
+        "name": "grok_cli_provider_failed_spawn_and_conflicting_controls_fail_closed",
+        "status": "PASS",
+        "failed_spawn_error": "GrokCliProviderError::Spawn"
+      },
+      {
+        "name": "grok_cli_provider_receipt_requires_exact_cwd_provider_and_cli_id",
+        "status": "PASS",
+        "post_tmux_running_observation": "PASS",
+        "second_launch_required_for_token": false,
+        "observed_argv_mismatch": "PASS",
+        "observed_cwd_mismatch": "PASS"
+      },
+      {
+        "name": "grok_cli_provider_resumes_exact_conversation_after_tmux_cleanup",
+        "status": "PASS"
+      }
+    ]
+  },
+  "named_validations": [
+    {
+      "command": "cargo fmt --check",
+      "cwd": "/srv/skillbox/repos/opensource/swimmers",
+      "exit_code": 0
+    },
+    {
+      "command": "cargo test grok_cli_provider -- --nocapture",
+      "cwd": "/srv/skillbox/repos/opensource/swimmers",
+      "exit_code": 0,
+      "tests_passed": 0,
+      "note": "adapter intentionally remains unwired until integration leaf 7lir"
+    },
+    {
+      "command": "cargo clippy -- -D warnings",
+      "cwd": "/srv/skillbox/repos/opensource/swimmers",
+      "exit_code": 0,
+      "diagnostic_count": 0
+    },
+    {
+      "command": "cargo clippy -- -D warnings",
+      "cwd": "temporary wired harness outside the working tree",
+      "exit_code": 0,
+      "diagnostic_count": 0
+    }
+  ],
+  "source_sha256": {
+    "src/session/providers/grok_cli.rs": "151d6cb77038b4468778a78aaa489cbc7709a1fa4b2d75159d2bda39238acd72",
+    "src/session/providers/tests/grok_cli.rs": "a3a09851b6f666c3c6063e948c1b02483d081db2fbf7de41654242c24c78b3a8"
+  }
+}
