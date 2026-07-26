@@ -1,0 +1,145 @@
+{
+  "proof_version": 1,
+  "bead_id": "swimmers-provider-conversation-launch-receipt-smg1",
+  "status": "BLOCKED",
+  "named_blocker": "exact_clippy_gate_foreign_failures",
+  "blocking_repair_bead": "swimmers-exact-clippy-gate-foreign-failures-j81r",
+  "contract": {
+    "version": 1,
+    "authorized_receipt_type": "AuthorizedProviderResumeLaunchReceipt",
+    "authorized_identity_type": "AuthorizedProviderResumeReceipt",
+    "public_default_type": "ProviderResumePublicProjection",
+    "authorized_fixture": {
+      "session_id": "swimmers-session-41",
+      "provider_resume": {
+        "provider": "codex",
+        "capability": "resumable",
+        "capture_source": "provider_response",
+        "conversation_id": "thread-92",
+        "resume_argv": [
+          "codex",
+          "resume",
+          "thread-92"
+        ],
+        "resume_command": "codex resume thread-92"
+      }
+    },
+    "public_fixture": {
+      "version": 1,
+      "provider": "codex",
+      "capability": "unknown",
+      "capture_source": "provider_response"
+    },
+    "default_fixture": {
+      "version": 1,
+      "provider": "unknown",
+      "capability": "unknown",
+      "capture_source": "unknown"
+    },
+    "public_forbidden_keys": [
+      "conversation_id",
+      "resume_command",
+      "session_id",
+      "swimmers_session_id",
+      "remote_session_id",
+      "resume_argv",
+      "tmux_name",
+      "tmux_session",
+      "pane_id",
+      "pid",
+      "pgid",
+      "generation",
+      "session_generation",
+      "control_handle",
+      "cleanup_argv"
+    ],
+    "public_forbidden_keys_present": [],
+    "unknown_or_unsupported_can_claim_resumable": false,
+    "legacy_launch_receipt_upgrades_to": "unknown"
+  },
+  "validations": [
+    {
+      "command": "cargo fmt --check",
+      "exit_code": 0
+    },
+    {
+      "command": "cargo test provider_resume_contract -- --nocapture",
+      "exit_code": 0,
+      "tests_passed": 5,
+      "tests_failed": 0
+    },
+    {
+      "command": "cargo clippy -- -D warnings",
+      "exit_code": 101,
+      "diagnostic_count": 16,
+      "lint": "clippy::uninlined_format_args",
+      "owned_path_diagnostic_count": 0
+    }
+  ],
+  "exact_clippy_diagnostics": [
+    {
+      "path": "src/host_actions.rs",
+      "line": 735
+    },
+    {
+      "path": "src/native/mod.rs",
+      "line": 169
+    },
+    {
+      "path": "src/native/mod.rs",
+      "line": 179
+    },
+    {
+      "path": "src/native/mod.rs",
+      "line": 189
+    },
+    {
+      "path": "src/session/actor/metadata.rs",
+      "line": 43
+    },
+    {
+      "path": "src/session/actor/metadata.rs",
+      "line": 50
+    },
+    {
+      "path": "src/session/actor/process_tree.rs",
+      "line": 220
+    },
+    {
+      "path": "src/session/actor/spawn.rs",
+      "line": 222
+    },
+    {
+      "path": "src/session/actor.rs",
+      "line": 770
+    },
+    {
+      "path": "src/session/actor.rs",
+      "line": 784
+    },
+    {
+      "path": "src/session/actor.rs",
+      "line": 793
+    },
+    {
+      "path": "src/session/supervisor/active_panes.rs",
+      "line": 26
+    },
+    {
+      "path": "src/session/supervisor.rs",
+      "line": 827
+    },
+    {
+      "path": "src/session/supervisor.rs",
+      "line": 1241
+    },
+    {
+      "path": "src/thought/runtime_config.rs",
+      "line": 148
+    },
+    {
+      "path": "src/thought/runtime_config.rs",
+      "line": 164
+    }
+  ]
+}

@@ -1837,6 +1837,361 @@ impl LaunchReceipt {
     }
 }
 
+pub const PROVIDER_RESUME_LAUNCH_RECEIPT_VERSION: u16 = 1;
+
+const fn provider_resume_launch_receipt_version() -> u16 {
+    PROVIDER_RESUME_LAUNCH_RECEIPT_VERSION
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProviderResumeProvider {
+    Codex,
+    Grok,
+    Claude,
+    #[default]
+    Unknown,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProviderResumeCaptureSource {
+    Preassigned,
+    ProviderResponse,
+    ProviderNotification,
+    #[default]
+    Unknown,
+    Unsupported,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProviderResumeCapability {
+    Resumable,
+    #[default]
+    Unknown,
+    Unsupported,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ProviderResumeContractError {
+    UnsupportedVersion(u16),
+    MissingConversationId,
+    MissingResumeArgv,
+    MissingResumeCommand,
+    UnknownProvider,
+    UnknownCaptureSource,
+    IdentityOnNonResumableCapability,
+}
+
+impl std::fmt::Display for ProviderResumeContractError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::UnsupportedVersion(version) => {
+                write!(
+                    formatter,
+                    "unsupported provider resume receipt version {version}"
+                )
+            }
+            Self::MissingConversationId => {
+                formatter.write_str("resumable provider receipt requires conversation_id")
+            }
+            Self::MissingResumeArgv => {
+                formatter.write_str("resumable provider receipt requires provider-authored argv")
+            }
+            Self::MissingResumeCommand => {
+                formatter.write_str("resumable provider receipt requires display command")
+            }
+            Self::UnknownProvider => {
+                formatter.write_str("unknown provider cannot claim resumable capability")
+            }
+            Self::UnknownCaptureSource => {
+                formatter.write_str("unknown capture source cannot claim resumable capability")
+            }
+            Self::IdentityOnNonResumableCapability => formatter.write_str(
+                "unknown or unsupported provider capability cannot carry resume identity",
+            ),
+        }
+    }
+}
+
+impl std::error::Error for ProviderResumeContractError {}
+
+/// Provider-authored resume identity for trusted server-to-server callers.
+///
+/// Serializing this type exposes the provider conversation ID and executable
+/// argv. Public/default callers must receive [`ProviderResumePublicProjection`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct AuthorizedProviderResumeReceipt {
+    provider: ProviderResumeProvider,
+    capability: ProviderResumeCapability,
+    capture_source: ProviderResumeCaptureSource,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    conversation_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    resume_argv: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    resume_command: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct RawProviderResumeReceipt {
+    #[serde(default)]
+    provider: ProviderResumeProvider,
+    #[serde(default)]
+    capability: ProviderResumeCapability,
+    #[serde(default)]
+    capture_source: ProviderResumeCaptureSource,
+    #[serde(default)]
+    conversation_id: Option<String>,
+    #[serde(default)]
+    resume_argv: Vec<String>,
+    #[serde(default)]
+    resume_command: Option<String>,
+}
+
+impl AuthorizedProviderResumeReceipt {
+    pub fn resumable(
+        provider: ProviderResumeProvider,
+        conversation_id: impl Into<String>,
+        resume_argv: Vec<String>,
+        resume_command: impl Into<String>,
+        capture_source: ProviderResumeCaptureSource,
+    ) -> Result<Self, ProviderResumeContractError> {
+        Self::from_raw(RawProviderResumeReceipt {
+            provider,
+            capability: ProviderResumeCapability::Resumable,
+            capture_source,
+            conversation_id: Some(conversation_id.into()),
+            resume_argv,
+            resume_command: Some(resume_command.into()),
+        })
+    }
+
+    pub fn unknown(
+        provider: ProviderResumeProvider,
+        capture_source: ProviderResumeCaptureSource,
+    ) -> Self {
+        Self {
+            provider,
+            capability: ProviderResumeCapability::Unknown,
+            capture_source,
+            conversation_id: None,
+            resume_argv: Vec::new(),
+            resume_command: None,
+        }
+    }
+
+    pub fn unsupported(provider: ProviderResumeProvider) -> Self {
+        Self {
+            provider,
+            capability: ProviderResumeCapability::Unsupported,
+            capture_source: ProviderResumeCaptureSource::Unsupported,
+            conversation_id: None,
+            resume_argv: Vec::new(),
+            resume_command: None,
+        }
+    }
+
+    pub fn provider(&self) -> ProviderResumeProvider {
+        self.provider
+    }
+
+    pub fn capability(&self) -> ProviderResumeCapability {
+        self.capability
+    }
+
+    pub fn capture_source(&self) -> ProviderResumeCaptureSource {
+        self.capture_source
+    }
+
+    pub fn conversation_id(&self) -> Option<&str> {
+        self.conversation_id.as_deref()
+    }
+
+    pub fn resume_argv(&self) -> Option<&[String]> {
+        self.is_resumable().then_some(self.resume_argv.as_slice())
+    }
+
+    pub fn resume_command(&self) -> Option<&str> {
+        self.resume_command.as_deref()
+    }
+
+    pub fn is_resumable(&self) -> bool {
+        self.capability == ProviderResumeCapability::Resumable
+    }
+
+    fn from_raw(raw: RawProviderResumeReceipt) -> Result<Self, ProviderResumeContractError> {
+        match raw.capability {
+            ProviderResumeCapability::Resumable => {
+                if raw.provider == ProviderResumeProvider::Unknown {
+                    return Err(ProviderResumeContractError::UnknownProvider);
+                }
+                if matches!(
+                    raw.capture_source,
+                    ProviderResumeCaptureSource::Unknown | ProviderResumeCaptureSource::Unsupported
+                ) {
+                    return Err(ProviderResumeContractError::UnknownCaptureSource);
+                }
+                if raw
+                    .conversation_id
+                    .as_deref()
+                    .is_none_or(|conversation_id| conversation_id.trim().is_empty())
+                {
+                    return Err(ProviderResumeContractError::MissingConversationId);
+                }
+                if raw.resume_argv.is_empty()
+                    || raw.resume_argv.iter().any(|arg| arg.trim().is_empty())
+                {
+                    return Err(ProviderResumeContractError::MissingResumeArgv);
+                }
+                if raw
+                    .resume_command
+                    .as_deref()
+                    .is_none_or(|command| command.trim().is_empty())
+                {
+                    return Err(ProviderResumeContractError::MissingResumeCommand);
+                }
+            }
+            ProviderResumeCapability::Unknown | ProviderResumeCapability::Unsupported => {
+                if raw.conversation_id.is_some()
+                    || !raw.resume_argv.is_empty()
+                    || raw.resume_command.is_some()
+                {
+                    return Err(ProviderResumeContractError::IdentityOnNonResumableCapability);
+                }
+            }
+        }
+
+        Ok(Self {
+            provider: raw.provider,
+            capability: raw.capability,
+            capture_source: raw.capture_source,
+            conversation_id: raw.conversation_id,
+            resume_argv: raw.resume_argv,
+            resume_command: raw.resume_command,
+        })
+    }
+}
+
+impl Default for AuthorizedProviderResumeReceipt {
+    fn default() -> Self {
+        Self::unknown(
+            ProviderResumeProvider::Unknown,
+            ProviderResumeCaptureSource::Unknown,
+        )
+    }
+}
+
+impl<'de> Deserialize<'de> for AuthorizedProviderResumeReceipt {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let raw = RawProviderResumeReceipt::deserialize(deserializer)?;
+        Self::from_raw(raw).map_err(serde::de::Error::custom)
+    }
+}
+
+/// Full launch receipt for the authorized control tier.
+///
+/// This preserves Swimmers ownership identity separately from provider resume
+/// identity. It must be projected with [`Self::public_projection`] before
+/// crossing a public/default boundary.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct AuthorizedProviderResumeLaunchReceipt {
+    version: u16,
+    #[serde(flatten)]
+    launch: LaunchReceipt,
+    provider_resume: AuthorizedProviderResumeReceipt,
+}
+
+#[derive(Deserialize)]
+struct RawProviderResumeLaunchReceipt {
+    #[serde(default = "provider_resume_launch_receipt_version")]
+    version: u16,
+    #[serde(flatten)]
+    launch: LaunchReceipt,
+    #[serde(default)]
+    provider_resume: AuthorizedProviderResumeReceipt,
+}
+
+impl AuthorizedProviderResumeLaunchReceipt {
+    pub fn new(launch: LaunchReceipt, provider_resume: AuthorizedProviderResumeReceipt) -> Self {
+        Self {
+            version: PROVIDER_RESUME_LAUNCH_RECEIPT_VERSION,
+            launch,
+            provider_resume,
+        }
+    }
+
+    pub fn version(&self) -> u16 {
+        self.version
+    }
+
+    pub fn launch(&self) -> &LaunchReceipt {
+        &self.launch
+    }
+
+    pub fn provider_resume(&self) -> &AuthorizedProviderResumeReceipt {
+        &self.provider_resume
+    }
+
+    pub fn public_projection(&self) -> ProviderResumePublicProjection {
+        ProviderResumePublicProjection {
+            version: self.version,
+            provider: self.provider_resume.provider,
+            capability: match self.provider_resume.capability {
+                ProviderResumeCapability::Resumable => ProviderResumeCapability::Unknown,
+                capability => capability,
+            },
+            capture_source: self.provider_resume.capture_source,
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for AuthorizedProviderResumeLaunchReceipt {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let raw = RawProviderResumeLaunchReceipt::deserialize(deserializer)?;
+        if raw.version != PROVIDER_RESUME_LAUNCH_RECEIPT_VERSION {
+            return Err(serde::de::Error::custom(
+                ProviderResumeContractError::UnsupportedVersion(raw.version),
+            ));
+        }
+        Ok(Self {
+            version: raw.version,
+            launch: raw.launch,
+            provider_resume: raw.provider_resume,
+        })
+    }
+}
+
+/// Public/default capability projection.
+///
+/// Exact provider identity, commands, argv, and Swimmers control handles are
+/// structurally absent.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProviderResumePublicProjection {
+    pub version: u16,
+    pub provider: ProviderResumeProvider,
+    pub capability: ProviderResumeCapability,
+    pub capture_source: ProviderResumeCaptureSource,
+}
+
+impl Default for ProviderResumePublicProjection {
+    fn default() -> Self {
+        Self {
+            version: PROVIDER_RESUME_LAUNCH_RECEIPT_VERSION,
+            provider: ProviderResumeProvider::Unknown,
+            capability: ProviderResumeCapability::Unknown,
+            capture_source: ProviderResumeCaptureSource::Unknown,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ThoughtConfigUiMetadata {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -2362,3 +2717,7 @@ fn known_tool_name(normalized_token: &str) -> Option<&'static str> {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+#[path = "api/sessions/tests/provider_resume_contract.rs"]
+mod provider_resume_contract;
