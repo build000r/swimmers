@@ -40,12 +40,12 @@ fn mermaid_ascii_sample(pixmap: &Pixmap, cell_x: u16, cell_y: u16) -> MermaidAsc
     let mut total = 0u8;
 
     for sub_y in 0..4 {
-        for sub_x in 0..2 {
+        for (sub_x, col_count) in col_counts.iter_mut().enumerate() {
             let dark = pixel_is_dark(pixmap, base_x + sub_x as u32, base_y + sub_y as u32);
             grid[sub_y][sub_x] = dark;
             if dark {
                 row_counts[sub_y] += 1;
-                col_counts[sub_x] += 1;
+                *col_count += 1;
                 total += 1;
             }
         }
