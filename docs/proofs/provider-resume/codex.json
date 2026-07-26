@@ -1,11 +1,13 @@
 {
-  "proof_version": 1,
+  "proof_version": 2,
   "bead_id": "swimmers-codex-app-server-thread-id-ur7q",
   "criterion": "PC-SW-CODEX-1",
   "status": "PASS",
+  "proof_label": "fixture-backed deterministic proof; never real external Codex",
   "protocol_basis": {
     "codex_cli_version": "0.145.0",
     "transport": "stdio JSONL",
+    "external_codex_executed": false,
     "sequence": [
       "initialize request and response",
       "initialized notification",
@@ -33,6 +35,38 @@
     "failed_child": "killed and reaped before error return",
     "guessed_identity_allowed": false
   },
+  "executed_resume_fixture": {
+    "test": "codex_app_server_provider_fixture_backed_resume_uses_returned_thread_after_termination",
+    "provider_native_thread_id": "thread-from-response",
+    "capture_source": "provider_response",
+    "persisted_state": "persisted-threads.json owned by deterministic fake Codex",
+    "persisted_threads": [
+      "thread-decoy",
+      "thread-from-response"
+    ],
+    "persisted_payload_checked": [
+      "cwd",
+      "initial_prompt"
+    ],
+    "cleanup_boundary": "CodexAppServerSession::terminate kills and waits for the Swimmers-owned app-server child before resume execution",
+    "executed_resume_argv": [
+      "codex",
+      "resume",
+      "thread-from-response"
+    ],
+    "resume_event": "resume thread-from-response"
+  },
+  "wrong_id_proof": {
+    "fixture_rejection_id": "thread-wrong-planted",
+    "fixture_exit_code": 74,
+    "fixture_stderr": "missing persisted thread: thread-wrong-planted",
+    "mutation": "replace returned resume argv with persisted thread-decoy",
+    "command": "cargo test fixture_backed_resume_uses_returned_thread_after_termination -- --nocapture",
+    "expected_exit_code": 101,
+    "observed_exit_code": 101,
+    "observed_failure": "left: String(\"thread-decoy\") right: \"thread-from-response\"",
+    "restored": true
+  },
   "fixtures": {
     "passed": 9,
     "failed": 0,
@@ -44,13 +78,13 @@
       "late_notification_cannot_restore_resumable_claim",
       "cancellation_is_typed_and_unknown",
       "turn_mismatch_blocks_launch_success",
-      "spawn_and_resume_argv_use_returned_thread_id",
+      "fixture_backed_resume_uses_returned_thread_after_termination",
       "rejects_non_absolute_cwd_before_spawn"
     ]
   },
   "validation_context": {
-    "reason": "integration leaf 7lir exclusively owns src/session/providers/mod.rs and src/session/mod.rs wiring",
-    "method": "commands ran in a git-archive validation mirror containing the two authorized Rust files plus temporary module exposure",
+    "reason": "integration leaf 7lir already wired the provider; reopened ur7q changes only provider proof files",
+    "method": "commands ran in the intended checkout against integrated provider wiring",
     "production_shared_wiring_modified": false,
     "resource_mitigation": {
       "CARGO_BUILD_JOBS": "1",
@@ -67,8 +101,16 @@
       "exit_code": 0,
       "tests_passed": 9,
       "tests_failed": 0,
-      "filtered_out": 1406,
-      "duration_seconds": 0.1
+      "filtered_out": 1426,
+      "duration_seconds": 0.35
+    },
+    {
+      "command": "cargo test fixture_backed_resume_uses_returned_thread_after_termination -- --nocapture",
+      "exit_code": 0,
+      "tests_passed": 1,
+      "tests_failed": 0,
+      "filtered_out": 1434,
+      "duration_seconds": 0.25
     },
     {
       "command": "cargo clippy -- -D warnings",
@@ -83,8 +125,8 @@
     },
     {
       "path": "src/session/providers/tests/codex_app_server.rs",
-      "lines": 624,
-      "sha256": "bc00c46249960734d808ceec70358e45a2edf883cb9d9df99e41e6b88a7ffff3"
+      "lines": 709,
+      "sha256": "01613bee330c45860b48585e0471c26ca269af7eaad5c676e7fa5b23b2930362"
     }
   ]
 }

@@ -551,7 +551,7 @@ async fn codex_app_server_provider_turn_mismatch_blocks_launch_success() {
 }
 
 #[tokio::test]
-async fn codex_app_server_provider_spawn_and_resume_argv_use_returned_thread_id() {
+async fn codex_app_server_provider_fixture_backed_resume_uses_returned_thread_after_termination() {
     let directory = tempfile::tempdir().expect("temp directory");
     let fake_codex = directory.path().join("fake-codex");
     std::fs::write(
@@ -559,21 +559,56 @@ async fn codex_app_server_provider_spawn_and_resume_argv_use_returned_thread_id(
         r#"#!/usr/bin/env python3
 import json
 import sys
+from pathlib import Path
 
-assert sys.argv[1:] == ["app-server", "--stdio"]
-for line in sys.stdin:
-    message = json.loads(line)
-    method = message.get("method")
-    if method == "initialize":
-        print(json.dumps({"id": message["id"], "result": {}}), flush=True)
-    elif method == "thread/start":
-        thread_id = "thread-from-response"
-        print(json.dumps({"method": "thread/started", "params": {"thread": {"id": thread_id}}}), flush=True)
-        print(json.dumps({"id": message["id"], "result": {"thread": {"id": thread_id}}}), flush=True)
-    elif method == "turn/start":
-        turn_id = "turn-from-response"
-        print(json.dumps({"id": message["id"], "result": {"turn": {"id": turn_id}}}), flush=True)
-        print(json.dumps({"method": "turn/started", "params": {"threadId": message["params"]["threadId"], "turn": {"id": turn_id}}}), flush=True)
+state_path = Path(__file__).with_name("persisted-threads.json")
+events_path = Path(__file__).with_name("events.log")
+args = sys.argv[1:]
+
+if args == ["app-server", "--stdio"]:
+    for line in sys.stdin:
+        message = json.loads(line)
+        method = message.get("method")
+        if method == "initialize":
+            print(json.dumps({"id": message["id"], "result": {}}), flush=True)
+        elif method == "thread/start":
+            thread_id = "thread-from-response"
+            state_path.write_text(json.dumps({
+                "thread-decoy": {
+                    "cwd": "/tmp/decoy",
+                    "initial_prompt": "wrong persisted thread"
+                },
+                thread_id: {
+                    "cwd": message["params"]["cwd"],
+                    "initial_prompt": None
+                }
+            }))
+            print(json.dumps({"method": "thread/started", "params": {"thread": {"id": thread_id}}}), flush=True)
+            print(json.dumps({"id": message["id"], "result": {"thread": {"id": thread_id}}}), flush=True)
+        elif method == "turn/start":
+            turn_id = "turn-from-response"
+            thread_id = message["params"]["threadId"]
+            state = json.loads(state_path.read_text())
+            state[thread_id]["initial_prompt"] = message["params"]["input"][0]["text"]
+            state_path.write_text(json.dumps(state))
+            print(json.dumps({"id": message["id"], "result": {"turn": {"id": turn_id}}}), flush=True)
+            print(json.dumps({"method": "turn/started", "params": {"threadId": thread_id, "turn": {"id": turn_id}}}), flush=True)
+elif len(args) == 2 and args[0] == "resume":
+    thread_id = args[1]
+    state = json.loads(state_path.read_text())
+    if thread_id not in state:
+        print(f"missing persisted thread: {thread_id}", file=sys.stderr)
+        sys.exit(74)
+    persisted = state[thread_id]
+    events_path.write_text(f"resume {thread_id}\n")
+    print(json.dumps({
+        "resumed_thread_id": thread_id,
+        "persisted_cwd": persisted["cwd"],
+        "persisted_initial_prompt": persisted["initial_prompt"]
+    }))
+else:
+    print(f"unexpected argv: {args!r}", file=sys.stderr)
+    sys.exit(64)
 "#,
     )
     .expect("write fake Codex");
@@ -585,10 +620,11 @@ for line in sys.stdin:
 
     let mut request =
         CodexAppServerLaunchRequest::new(directory.path(), test_config("spawn"), "initial turn");
-    request.codex_binary = fake_codex;
+    request.codex_binary = fake_codex.clone();
     request.timeout = TEST_TIMEOUT;
     let launch = launch_codex_app_server(request).await.expect("launch");
 
+    // Fixture-backed proof only: deterministic fake persisted state, never external Codex.
     assert_eq!(
         launch.provider_resume().capability(),
         ProviderResumeCapability::Resumable
@@ -612,8 +648,57 @@ for line in sys.stdin:
         launch.provider_resume().resume_command(),
         Some("codex resume thread-from-response")
     );
+    assert_eq!(
+        launch.provider_resume().capture_source(),
+        ProviderResumeCaptureSource::ProviderResponse
+    );
     assert_eq!(launch.turn_id(), "turn-from-response");
-    launch.into_session().terminate().await.expect("terminate");
+    let resume_argv = launch
+        .provider_resume()
+        .resume_argv()
+        .expect("resumable argv")
+        .to_vec();
+
+    launch
+        .into_session()
+        .terminate()
+        .await
+        .expect("terminate Swimmers-owned app-server child");
+
+    let planted_wrong_id = tokio::process::Command::new(&fake_codex)
+        .args(["resume", "thread-wrong-planted"])
+        .current_dir(directory.path())
+        .output()
+        .await
+        .expect("execute planted wrong-ID resume");
+    assert_eq!(planted_wrong_id.status.code(), Some(74));
+    assert_eq!(
+        String::from_utf8_lossy(&planted_wrong_id.stderr).trim(),
+        "missing persisted thread: thread-wrong-planted"
+    );
+
+    let resumed = tokio::process::Command::new(&fake_codex)
+        .args(&resume_argv[1..])
+        .current_dir(directory.path())
+        .output()
+        .await
+        .expect("execute fixture-backed Codex resume");
+    assert!(
+        resumed.status.success(),
+        "returned provider thread ID must resume persisted fixture state: {}",
+        String::from_utf8_lossy(&resumed.stderr)
+    );
+    let resumed: Value = serde_json::from_slice(&resumed.stdout).expect("resume output JSON");
+    assert_eq!(resumed["resumed_thread_id"], "thread-from-response");
+    assert_eq!(
+        resumed["persisted_cwd"],
+        directory.path().to_string_lossy().as_ref()
+    );
+    assert_eq!(resumed["persisted_initial_prompt"], "initial turn");
+    assert_eq!(
+        std::fs::read_to_string(directory.path().join("events.log")).expect("resume event"),
+        "resume thread-from-response\n"
+    );
 }
 
 #[test]
