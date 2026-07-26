@@ -24,8 +24,7 @@ pub(super) async fn query_all_active_pane_session_ids(
 ) -> anyhow::Result<HashMap<String, String>> {
     let started = Instant::now();
     let pane_format = format!(
-        "#{{session_name}}{sep}#{{window_active}}{sep}#{{pane_active}}{sep}#{{window_index}}.#{{pane_index}}:#{{pane_id}}",
-        sep = TMUX_LIST_PANES_FIELD_SEPARATOR
+        "#{{session_name}}{TMUX_LIST_PANES_FIELD_SEPARATOR}#{{window_active}}{TMUX_LIST_PANES_FIELD_SEPARATOR}#{{pane_active}}{TMUX_LIST_PANES_FIELD_SEPARATOR}#{{window_index}}.#{{pane_index}}:#{{pane_id}}"
     );
     let output = run_bounded_tmux_probe_for_target(
         "tmux",

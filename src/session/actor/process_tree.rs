@@ -217,7 +217,7 @@ async fn query_process_entries_uncached() -> anyhow::Result<Vec<ProcessEntry>> {
                 PROCESS_ENTRIES_QUERY_TIMEOUT.as_millis()
             )
         })?
-        .map_err(|e| anyhow::anyhow!("failed to run ps: {}", e))?;
+        .map_err(|e| anyhow::anyhow!("failed to run ps: {e}"))?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);

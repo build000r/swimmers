@@ -733,8 +733,7 @@ fn launch_commit_grok_tmux(
             stderr
         };
         return Err(io::Error::other(format!(
-            "tmux launch failed for {}: {}",
-            repo_root, detail
+            "tmux launch failed for {repo_root}: {detail}"
         )));
     }
 

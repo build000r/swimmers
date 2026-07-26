@@ -824,7 +824,7 @@ impl SessionSupervisor {
             let mut sessions = self.sessions.write().await;
             let handle = sessions
                 .remove(session_id)
-                .ok_or_else(|| anyhow::anyhow!("session not found: {}", session_id))?;
+                .ok_or_else(|| anyhow::anyhow!("session not found: {session_id}"))?;
             crate::metrics::set_active_sessions(sessions.len());
             handle
         };
@@ -1238,7 +1238,7 @@ impl SessionSupervisor {
 
     fn allocate_session_id(&self) -> String {
         let n = self.next_id_counter.fetch_add(1, Ordering::SeqCst);
-        format!("sess_{}", n)
+        format!("sess_{n}")
     }
 
     async fn allocate_unique_session_id(&self) -> String {

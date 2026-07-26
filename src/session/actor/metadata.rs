@@ -40,14 +40,14 @@ impl TmuxPaneMetadata {
     pub(super) fn pane_pid(&self) -> anyhow::Result<u32> {
         self.pane_pid
             .parse::<u32>()
-            .map_err(|e| anyhow::anyhow!("invalid pane_pid from tmux: {}", e))
+            .map_err(|e| anyhow::anyhow!("invalid pane_pid from tmux: {e}"))
     }
 
     pub(super) fn session_created(&self) -> anyhow::Result<chrono::DateTime<Utc>> {
         let epoch = self
             .session_created
             .parse::<i64>()
-            .map_err(|e| anyhow::anyhow!("invalid tmux session_created value: {}", e))?;
+            .map_err(|e| anyhow::anyhow!("invalid tmux session_created value: {e}"))?;
         Utc.timestamp_opt(epoch, 0)
             .single()
             .ok_or_else(|| anyhow::anyhow!("tmux returned invalid session_created timestamp"))

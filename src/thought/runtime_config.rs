@@ -146,8 +146,7 @@ fn validate_cadence_warm_ms(
         return Err(ThoughtConfigValidationError::new(
             "cadence_warm_ms",
             format!(
-                "must be between cadence_hot_ms ({}) and {} (inclusive)",
-                cadence_hot_ms, CADENCE_WARM_MAX_MS
+                "must be between cadence_hot_ms ({cadence_hot_ms}) and {CADENCE_WARM_MAX_MS} (inclusive)"
             ),
         ));
     }
@@ -162,8 +161,7 @@ fn validate_cadence_cold_ms(
         return Err(ThoughtConfigValidationError::new(
             "cadence_cold_ms",
             format!(
-                "must be between cadence_warm_ms ({}) and {} (inclusive)",
-                cadence_warm_ms, CADENCE_COLD_MAX_MS
+                "must be between cadence_warm_ms ({cadence_warm_ms}) and {CADENCE_COLD_MAX_MS} (inclusive)"
             ),
         ));
     }

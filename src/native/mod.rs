@@ -167,8 +167,7 @@ fn ghostty_unavailable_reason() -> Option<String> {
 
 fn ghostty_applescript_unavailable_message() -> String {
     format!(
-        "Ghostty AppleScript unavailable. Install Ghostty {}+ and allow automation access.",
-        GHOSTTY_MIN_APPLESCRIPT_VERSION_TEXT
+        "Ghostty AppleScript unavailable. Install Ghostty {GHOSTTY_MIN_APPLESCRIPT_VERSION_TEXT}+ and allow automation access."
     )
 }
 
@@ -177,8 +176,7 @@ fn ghostty_version_requirement_error(version: &str) -> Option<String> {
         Some(parsed) => parsed,
         None => {
             return Some(format!(
-                "Ghostty reported version {version:?}, but native AppleScript control requires Ghostty {}+.",
-                GHOSTTY_MIN_APPLESCRIPT_VERSION_TEXT
+                "Ghostty reported version {version:?}, but native AppleScript control requires Ghostty {GHOSTTY_MIN_APPLESCRIPT_VERSION_TEXT}+."
             ));
         }
     };
@@ -187,8 +185,7 @@ fn ghostty_version_requirement_error(version: &str) -> Option<String> {
     }
 
     Some(format!(
-        "Ghostty {version} is installed, but native AppleScript control requires Ghostty {}+.",
-        GHOSTTY_MIN_APPLESCRIPT_VERSION_TEXT
+        "Ghostty {version} is installed, but native AppleScript control requires Ghostty {GHOSTTY_MIN_APPLESCRIPT_VERSION_TEXT}+."
     ))
 }
 

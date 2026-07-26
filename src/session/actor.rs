@@ -767,7 +767,7 @@ impl SessionActor {
         let pty_system = native_pty_system();
         let pair = pty_system
             .openpty(initial_spawn_pty_size())
-            .map_err(|e| anyhow::anyhow!("failed to open PTY: {}", e))?;
+            .map_err(|e| anyhow::anyhow!("failed to open PTY: {e}"))?;
 
         let cmd = build_tmux_spawn_command(
             spawn_mode,
@@ -781,7 +781,7 @@ impl SessionActor {
         let mut child = pair
             .slave
             .spawn_command(cmd)
-            .map_err(|e| anyhow::anyhow!("failed to spawn tmux: {}", e))?;
+            .map_err(|e| anyhow::anyhow!("failed to spawn tmux: {e}"))?;
         inspect_tmux_child_after_spawn(spawn_mode, child.as_mut())?;
 
         // We intentionally drop the slave side -- the master side is what we use.
@@ -790,7 +790,7 @@ impl SessionActor {
         let writer = pair
             .master
             .take_writer()
-            .map_err(|e| anyhow::anyhow!("failed to take PTY writer: {}", e))?;
+            .map_err(|e| anyhow::anyhow!("failed to take PTY writer: {e}"))?;
 
         let (cmd_tx, cmd_rx) = mpsc::channel::<SessionCommand>(256);
         let (event_tx, _) = broadcast::channel::<ControlEvent>(64);

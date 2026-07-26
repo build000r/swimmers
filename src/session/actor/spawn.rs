@@ -219,7 +219,7 @@ pub(super) fn inspect_tmux_child_after_spawn(
         std::thread::sleep(TMUX_NEW_SESSION_EXIT_GRACE);
         if let Some(status) = child
             .try_wait()
-            .map_err(|e| anyhow::anyhow!("failed to inspect tmux after spawn: {}", e))?
+            .map_err(|e| anyhow::anyhow!("failed to inspect tmux after spawn: {e}"))?
         {
             return Err(anyhow::anyhow!(
                 "tmux new-session exited immediately with status {status}"
