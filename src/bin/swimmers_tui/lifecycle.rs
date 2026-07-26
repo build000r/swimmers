@@ -196,8 +196,7 @@ fn classify_readiness_outcome(
         ReadinessOutcome::Timeout => ReadinessDisposition::Error {
             terminate: true,
             message: format!(
-                "timed out waiting {:?} for swimmers readiness signal. See log: {log_path}",
-                wait_timeout
+                "timed out waiting {wait_timeout:?} for swimmers readiness signal. See log: {log_path}"
             ),
         },
     }

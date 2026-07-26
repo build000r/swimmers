@@ -133,16 +133,13 @@ impl ApiClient {
         let base_url = self.display_base_url();
         match status {
             reqwest::StatusCode::UNAUTHORIZED => format!(
-                "backend at {} requires valid auth for {}. Set AUTH_MODE=token and AUTH_TOKEN to match the target API.",
-                base_url, path
+                "backend at {base_url} requires valid auth for {path}. Set AUTH_MODE=token and AUTH_TOKEN to match the target API."
             ),
             reqwest::StatusCode::FORBIDDEN => format!(
-                "backend at {} denied startup access to {}. Use a token with the required session scope for this TUI instance.",
-                base_url, path
+                "backend at {base_url} denied startup access to {path}. Use a token with the required session scope for this TUI instance."
             ),
             _ => format!(
-                "backend at {} rejected startup access to {} ({status})",
-                base_url, path
+                "backend at {base_url} rejected startup access to {path} ({status})"
             ),
         }
     }
@@ -1357,7 +1354,7 @@ pub(crate) async fn read_error(response: reqwest::Response) -> String {
     let status = response.status();
     match response.json::<ErrorResponse>().await {
         Ok(body) => body.display_message(status),
-        Err(_) => format!("request failed: {}", status),
+        Err(_) => format!("request failed: {status}"),
     }
 }
 

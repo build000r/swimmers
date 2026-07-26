@@ -670,7 +670,7 @@ fn append_skill_atlas_skill_description_text(text: &mut String, skill: &SkillPan
 pub(crate) fn skill_atlas_focus_title(focus: &SkillPanelAction) -> String {
     match focus {
         SkillPanelAction::Skill(skill) => format!("skill {}", skill.name),
-        SkillPanelAction::Source { source_label, .. } => format!("source {}", source_label),
+        SkillPanelAction::Source { source_label, .. } => format!("source {source_label}"),
     }
 }
 

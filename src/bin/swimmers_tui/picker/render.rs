@@ -574,7 +574,7 @@ pub(super) fn initial_request_context_line(
 ) -> String {
     let target_suffix = initial_request_launch_target_suffix(initial_request);
     let line = if let Some((label, count)) = group_context {
-        format!("school: {} ({} sessions)", label, count)
+        format!("school: {label} ({count} sessions)")
     } else if let Some(dirs) = initial_request.batch_dirs.as_ref() {
         format!("batch: {} included dirs{}", dirs.len(), target_suffix)
     } else {

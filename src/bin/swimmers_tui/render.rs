@@ -561,10 +561,7 @@ pub(crate) fn render_too_small(renderer: &mut Renderer) {
     renderer.draw_text(
         2,
         3,
-        &format!(
-            "terminal too small - need at least {}x{}",
-            MIN_WIDTH, MIN_HEIGHT
-        ),
+        &format!("terminal too small - need at least {MIN_WIDTH}x{MIN_HEIGHT}"),
         Color::Red,
     );
     renderer.draw_text(
