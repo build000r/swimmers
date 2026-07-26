@@ -1,7 +1,8 @@
 use std::collections::{HashMap, HashSet};
 use std::fmt;
+use std::fs;
+use std::io::Write;
 use std::path::Path;
-#[cfg(test)]
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
@@ -9,16 +10,17 @@ use std::time::{Duration, Instant};
 
 use chrono::Utc;
 use futures::StreamExt;
+use serde::{Deserialize, Serialize};
 #[cfg(test)]
 use tokio::process::Command;
 use tokio::sync::{broadcast, oneshot, Mutex, Notify, RwLock};
 use tracing::{debug, info, warn};
-#[cfg(test)]
 use uuid::Uuid;
 
 use crate::config::Config;
 #[cfg(test)]
 use crate::launcher::SpawnToolLauncher;
+use crate::launcher::{create_private_file, prepare_private_dir};
 use crate::persistence::file_store::{FileStore, PersistedSession, ThoughtSnapshot};
 use crate::repo_theme::discover_repo_theme;
 use crate::session::actor::{run_bounded_tmux_command_for_target, ActorHandle, SessionCommand};
@@ -76,6 +78,7 @@ const PROCESS_EXIT_SUMMARY_TIMEOUT: Duration = Duration::from_millis(250);
 const TMUX_REDISCOVERY_INTERVAL: Duration = Duration::from_secs(10);
 const TMUX_KILL_SESSION_TIMEOUT: Duration = Duration::from_millis(500);
 const THOUGHT_SNAPSHOT_COLLECTION_CONCURRENCY: usize = 8;
+const EXACT_CLEANUP_RECEIPT_DIR: &str = "exact_session_cleanup_receipts";
 
 enum SummaryCollectOutcome {
     Live(SessionSummary),
@@ -145,6 +148,79 @@ pub struct AdoptedTmuxSession {
     pub session: SessionSummary,
     pub repo_theme: Option<RepoTheme>,
     pub reused_session_id: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExactSessionCleanupOutcome {
+    Deleted,
+    AlreadyGone,
+}
+
+#[derive(Debug, Clone)]
+pub struct ExactSessionCleanupResult {
+    pub outcome: ExactSessionCleanupOutcome,
+    pub delete_mode: crate::config::SessionDeleteMode,
+    pub tmux_session_alive: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ExactSessionCleanupError {
+    NotAuthorized,
+    GenerationMismatch,
+    TmuxIncarnationMismatch,
+    CleanupInProgress,
+    Internal(String),
+}
+
+impl fmt::Display for ExactSessionCleanupError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::NotAuthorized => f.write_str("session cleanup is not authorized"),
+            Self::GenerationMismatch => f.write_str("session cleanup generation mismatch"),
+            Self::TmuxIncarnationMismatch => {
+                f.write_str("tmux session incarnation no longer matches cleanup authority")
+            }
+            Self::CleanupInProgress => f.write_str("session cleanup is already in progress"),
+            Self::Internal(message) => f.write_str(message),
+        }
+    }
+}
+
+impl std::error::Error for ExactSessionCleanupError {}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+enum ExactSessionCleanupState {
+    Active(ExactSessionCleanupTarget),
+    Cleaning(ExactSessionCleanupTarget),
+    Cleaned {
+        generation: String,
+        delete_mode: crate::config::SessionDeleteMode,
+        tmux_session_alive: bool,
+    },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ExactSessionCleanupTarget {
+    generation: String,
+    tmux_name: String,
+    tmux_target: TmuxTarget,
+    tmux_incarnation: TmuxSessionIncarnation,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct TmuxSessionIncarnation {
+    server_pid: u32,
+    session_id: String,
+    session_created: u64,
+}
+
+impl ExactSessionCleanupState {
+    fn generation(&self) -> &str {
+        match self {
+            Self::Active(target) | Self::Cleaning(target) => &target.generation,
+            Self::Cleaned { generation, .. } => generation,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -305,6 +381,14 @@ pub struct SessionSupervisor {
     provider_launch_receipts:
         RwLock<HashMap<String, crate::types::AuthorizedProviderResumeLaunchReceipt>>,
 
+    /// Exact cleanup authority for the current incarnation of each session.
+    /// Cleaned tombstones stay resident so authorized retries remain idempotent.
+    exact_cleanup_states: RwLock<HashMap<String, ExactSessionCleanupState>>,
+
+    /// Private durable authority/tombstone directory. Successful launch does
+    /// not expose a generation until its active record is atomically durable.
+    exact_cleanup_store_dir: PathBuf,
+
     /// Durable private receipt store. Resumable success is not returned until
     /// this store has atomically committed the exact Swimmers/provider pair.
     provider_receipt_store: ProviderReceiptStore,
@@ -324,7 +408,12 @@ const ACTIVE_PANE_CACHE_TTL: Duration = Duration::from_millis(1000);
 
 impl SessionSupervisor {
     pub fn new(config: Arc<Config>) -> Arc<Self> {
-        Self::new_with_provider_receipt_store(config, ProviderReceiptStore::for_default_data_dir())
+        let data_dir = crate::startup::resolve_data_dir();
+        Self::new_with_stores(
+            config,
+            ProviderReceiptStore::for_default_data_dir(),
+            data_dir.join(EXACT_CLEANUP_RECEIPT_DIR),
+        )
     }
 
     #[cfg(test)]
@@ -332,12 +421,18 @@ impl SessionSupervisor {
         config: Arc<Config>,
         data_dir: impl Into<PathBuf>,
     ) -> Arc<Self> {
-        Self::new_with_provider_receipt_store(config, ProviderReceiptStore::new(data_dir))
+        let data_dir = data_dir.into();
+        Self::new_with_stores(
+            config,
+            ProviderReceiptStore::new(data_dir.clone()),
+            data_dir.join(EXACT_CLEANUP_RECEIPT_DIR),
+        )
     }
 
-    fn new_with_provider_receipt_store(
+    fn new_with_stores(
         config: Arc<Config>,
         provider_receipt_store: ProviderReceiptStore,
+        exact_cleanup_store_dir: PathBuf,
     ) -> Arc<Self> {
         let (lifecycle_tx, _) = broadcast::channel(64);
         let (thought_tx, _) = broadcast::channel(64);
@@ -365,6 +460,8 @@ impl SessionSupervisor {
             active_pane_cache: Mutex::new(ActivePaneCache::default()),
             tmux_dependency_health: StdMutex::new(TmuxDependencyHealthState::default()),
             provider_launch_receipts: RwLock::new(HashMap::new()),
+            exact_cleanup_states: RwLock::new(HashMap::new()),
+            exact_cleanup_store_dir,
             provider_receipt_store,
         })
     }
@@ -526,6 +623,29 @@ impl SessionSupervisor {
     pub async fn init_persistence(self: &Arc<Self>, store: Arc<FileStore>) {
         let persisted = store.load_sessions().await;
         let thoughts = store.load_thoughts().await;
+        match load_exact_cleanup_states(self.exact_cleanup_store_dir.clone()).await {
+            Ok(states) => {
+                for session_id in states.keys() {
+                    self.bump_id_counter_from_session_id(session_id);
+                }
+                let mut cleanup_states = self.exact_cleanup_states.write().await;
+                *cleanup_states = states
+                    .into_iter()
+                    .map(|(session_id, state)| {
+                        let state = match state {
+                            ExactSessionCleanupState::Cleaning(target) => {
+                                ExactSessionCleanupState::Active(target)
+                            }
+                            state => state,
+                        };
+                        (session_id, state)
+                    })
+                    .collect();
+            }
+            Err(error) => {
+                warn!(%error, "failed to load durable exact cleanup receipts");
+            }
+        }
         match self.provider_receipt_store.load().await {
             Ok(receipts) => {
                 let mut provider_receipts = self.provider_launch_receipts.write().await;
@@ -772,7 +892,20 @@ impl SessionSupervisor {
         };
         let bootstrap_handle = handle.clone();
 
-        self.insert_active_handle(session_id.clone(), handle).await;
+        if let Err(error) = self.insert_active_handle(session_id.clone(), handle).await {
+            if let Err(kill_error) =
+                kill_tmux_session(&bootstrap_handle.tmux_name, &bootstrap_handle.tmux_target).await
+            {
+                warn!(
+                    %kill_error,
+                    session_id,
+                    "failed to roll back tmux session after cleanup authority persistence failure"
+                );
+            }
+            let _ = bootstrap_handle.cmd_tx.send(SessionCommand::Shutdown).await;
+            schedule_prelaunch_file_cleanup(prelaunch_cleanup_paths);
+            return Err(error.context("exact cleanup authority persistence failed"));
+        }
         // Release the discovery lock as soon as the handle is registered; the
         // remaining summary/emit/persist work no longer races discovery.
         drop(discovery_guard);
@@ -838,6 +971,16 @@ impl SessionSupervisor {
 
     async fn rollback_provider_launch(&self, session_id: &str, handle: &ActorHandle) {
         self.sessions.write().await.remove(session_id);
+        self.exact_cleanup_states.write().await.remove(session_id);
+        if let Err(error) =
+            remove_exact_cleanup_state(self.exact_cleanup_store_dir.clone(), session_id).await
+        {
+            warn!(
+                %error,
+                session_id,
+                "failed to remove rolled-back exact cleanup authority"
+            );
+        }
         crate::metrics::set_active_sessions(self.sessions.read().await.len());
         if let Err(error) = kill_tmux_session(&handle.tmux_name, &handle.tmux_target).await {
             warn!(
@@ -860,6 +1003,14 @@ impl SessionSupervisor {
             .cloned()
     }
 
+    pub(crate) async fn exact_cleanup_generation(&self, session_id: &str) -> Option<String> {
+        self.exact_cleanup_states
+            .read()
+            .await
+            .get(session_id)
+            .map(|state| state.generation().to_string())
+    }
+
     fn allocate_tmux_name(&self, requested_name: Option<String>) -> String {
         normalize_requested_tmux_name(requested_name).unwrap_or_else(|| {
             let n = self.next_name_counter.fetch_add(1, Ordering::SeqCst);
@@ -867,10 +1018,36 @@ impl SessionSupervisor {
         })
     }
 
-    async fn insert_active_handle(&self, session_id: String, handle: ActorHandle) {
+    async fn insert_active_handle(
+        &self,
+        session_id: String,
+        handle: ActorHandle,
+    ) -> anyhow::Result<()> {
+        let tmux_incarnation =
+            match query_tmux_session_incarnation(&handle.tmux_name, &handle.tmux_target).await? {
+                Some(incarnation) => incarnation,
+                None => {
+                    anyhow::bail!("new tmux session disappeared before cleanup authority binding")
+                }
+            };
+        let state = ExactSessionCleanupState::Active(ExactSessionCleanupTarget {
+            generation: Uuid::new_v4().to_string(),
+            tmux_name: handle.tmux_name.clone(),
+            tmux_target: handle.tmux_target.clone(),
+            tmux_incarnation,
+        });
+        persist_exact_cleanup_state(
+            self.exact_cleanup_store_dir.clone(),
+            session_id.clone(),
+            state.clone(),
+        )
+        .await?;
+        let mut cleanup_states = self.exact_cleanup_states.write().await;
         let mut sessions = self.sessions.write().await;
+        cleanup_states.insert(session_id.clone(), state);
         sessions.insert(session_id, handle);
         crate::metrics::set_active_sessions(sessions.len());
+        Ok(())
     }
 
     async fn build_created_summary(
@@ -980,6 +1157,226 @@ impl SessionSupervisor {
         self.persist_registry().await;
 
         Ok(())
+    }
+
+    /// Delete only the exact authorized session incarnation.
+    ///
+    /// The generation check and transition to `Cleaning` happen under one
+    /// lock, so stale or concurrent cleanup cannot remove a replacement actor.
+    /// Provider launch receipts are intentionally outside this state machine
+    /// and survive successful tmux cleanup.
+    pub async fn delete_exact_session(
+        self: &Arc<Self>,
+        session_id: &str,
+        generation: &str,
+        delete_mode: crate::config::SessionDeleteMode,
+    ) -> Result<ExactSessionCleanupResult, ExactSessionCleanupError> {
+        let _discovery_guard = self.discovery_lock.lock().await;
+        let (handle, target) = {
+            let mut states = self.exact_cleanup_states.write().await;
+            let state = states
+                .get(session_id)
+                .ok_or(ExactSessionCleanupError::NotAuthorized)?;
+            if state.generation() != generation {
+                return Err(ExactSessionCleanupError::GenerationMismatch);
+            }
+            match state {
+                ExactSessionCleanupState::Cleaning(_) => {
+                    return Err(ExactSessionCleanupError::CleanupInProgress);
+                }
+                ExactSessionCleanupState::Cleaned {
+                    delete_mode,
+                    tmux_session_alive,
+                    ..
+                } => {
+                    return Ok(ExactSessionCleanupResult {
+                        outcome: ExactSessionCleanupOutcome::AlreadyGone,
+                        delete_mode: delete_mode.clone(),
+                        tmux_session_alive: *tmux_session_alive,
+                    });
+                }
+                ExactSessionCleanupState::Active(_) => {}
+            }
+            let target = match state {
+                ExactSessionCleanupState::Active(target) => target.clone(),
+                ExactSessionCleanupState::Cleaning(_)
+                | ExactSessionCleanupState::Cleaned { .. } => unreachable!(),
+            };
+            let mut sessions = self.sessions.write().await;
+            let handle = sessions.remove(session_id);
+            crate::metrics::set_active_sessions(sessions.len());
+            states.insert(
+                session_id.to_string(),
+                ExactSessionCleanupState::Cleaning(target.clone()),
+            );
+            (handle, target)
+        };
+        if let Err(error) = persist_exact_cleanup_state(
+            self.exact_cleanup_store_dir.clone(),
+            session_id.to_string(),
+            ExactSessionCleanupState::Cleaning(target.clone()),
+        )
+        .await
+        {
+            self.restore_exact_cleanup(session_id, generation, handle)
+                .await;
+            return Err(ExactSessionCleanupError::Internal(format!(
+                "failed to persist exact cleanup transition: {error}"
+            )));
+        }
+
+        let mut tmux_session_alive = true;
+        let outcome = if matches!(delete_mode, crate::config::SessionDeleteMode::KillTmux) {
+            match query_tmux_session_incarnation(&target.tmux_name, &target.tmux_target).await {
+                Ok(None) => {
+                    tmux_session_alive = false;
+                    ExactSessionCleanupOutcome::AlreadyGone
+                }
+                Ok(Some(incarnation)) if incarnation != target.tmux_incarnation => {
+                    self.restore_exact_cleanup(session_id, generation, handle)
+                        .await;
+                    return Err(ExactSessionCleanupError::TmuxIncarnationMismatch);
+                }
+                Ok(Some(_)) => {
+                    match kill_tmux_session_target_with_outcome(
+                        &target.tmux_incarnation.session_id,
+                        &target.tmux_target,
+                    )
+                    .await
+                    {
+                        Ok(was_alive) => {
+                            tmux_session_alive = false;
+                            if was_alive {
+                                ExactSessionCleanupOutcome::Deleted
+                            } else {
+                                ExactSessionCleanupOutcome::AlreadyGone
+                            }
+                        }
+                        Err(error) => {
+                            self.restore_exact_cleanup(session_id, generation, handle)
+                                .await;
+                            return Err(ExactSessionCleanupError::Internal(error.to_string()));
+                        }
+                    }
+                }
+                Err(error) => {
+                    self.restore_exact_cleanup(session_id, generation, handle)
+                        .await;
+                    return Err(ExactSessionCleanupError::Internal(error.to_string()));
+                }
+            }
+        } else if handle.is_some() {
+            ExactSessionCleanupOutcome::Deleted
+        } else {
+            ExactSessionCleanupOutcome::AlreadyGone
+        };
+
+        self.process_exit_seen_at.write().await.remove(session_id);
+        info!(
+            session_id,
+            delete_mode = ?delete_mode,
+            "deleting exact session generation"
+        );
+        if let Some(handle) = handle {
+            let _ = handle.cmd_tx.send(SessionCommand::Shutdown).await;
+        }
+        let _ = self.lifecycle_tx.send(LifecycleEvent::Deleted {
+            session_id: session_id.to_string(),
+            reason: "api_exact_delete".into(),
+            delete_mode: delete_mode.clone(),
+            tmux_session_alive,
+        });
+        self.persist_registry().await;
+
+        let result = ExactSessionCleanupResult {
+            outcome,
+            delete_mode,
+            tmux_session_alive,
+        };
+        self.complete_exact_cleanup(session_id, generation, &result)
+            .await?;
+        Ok(result)
+    }
+
+    async fn complete_exact_cleanup(
+        &self,
+        session_id: &str,
+        generation: &str,
+        result: &ExactSessionCleanupResult,
+    ) -> Result<(), ExactSessionCleanupError> {
+        {
+            let states = self.exact_cleanup_states.read().await;
+            let state = states
+                .get(session_id)
+                .ok_or(ExactSessionCleanupError::NotAuthorized)?;
+            if state.generation() != generation {
+                return Err(ExactSessionCleanupError::GenerationMismatch);
+            }
+            if !matches!(state, ExactSessionCleanupState::Cleaning(_)) {
+                return Err(ExactSessionCleanupError::CleanupInProgress);
+            }
+        }
+        let cleaned = ExactSessionCleanupState::Cleaned {
+            generation: generation.to_string(),
+            delete_mode: result.delete_mode.clone(),
+            tmux_session_alive: result.tmux_session_alive,
+        };
+        persist_exact_cleanup_state(
+            self.exact_cleanup_store_dir.clone(),
+            session_id.to_string(),
+            cleaned.clone(),
+        )
+        .await
+        .map_err(|error| {
+            ExactSessionCleanupError::Internal(format!(
+                "failed to persist exact cleanup receipt: {error}"
+            ))
+        })?;
+        self.exact_cleanup_states
+            .write()
+            .await
+            .insert(session_id.to_string(), cleaned);
+        Ok(())
+    }
+
+    async fn restore_exact_cleanup(
+        &self,
+        session_id: &str,
+        generation: &str,
+        handle: Option<ActorHandle>,
+    ) {
+        let active = {
+            let mut states = self.exact_cleanup_states.write().await;
+            let target = match states.get(session_id) {
+                Some(ExactSessionCleanupState::Cleaning(target))
+                    if target.generation == generation =>
+                {
+                    target.clone()
+                }
+                _ => return,
+            };
+            let mut sessions = self.sessions.write().await;
+            if let Some(handle) = handle {
+                sessions.insert(session_id.to_string(), handle);
+                crate::metrics::set_active_sessions(sessions.len());
+            }
+            let active = ExactSessionCleanupState::Active(target);
+            states.insert(session_id.to_string(), active.clone());
+            active
+        };
+        if let Err(error) = persist_exact_cleanup_state(
+            self.exact_cleanup_store_dir.clone(),
+            session_id.to_string(),
+            active,
+        )
+        .await
+        {
+            warn!(
+                %error,
+                session_id,
+                "failed to persist restored exact cleanup authority"
+            );
+        }
     }
 
     /// Get the actor handle for a session.
@@ -1140,7 +1537,21 @@ impl SessionSupervisor {
 
     #[cfg(any(test, debug_assertions))]
     pub async fn insert_test_handle(&self, handle: ActorHandle) {
+        let mut cleanup_states = self.exact_cleanup_states.write().await;
         let mut sessions = self.sessions.write().await;
+        cleanup_states.insert(
+            handle.session_id.clone(),
+            ExactSessionCleanupState::Active(ExactSessionCleanupTarget {
+                generation: Uuid::new_v4().to_string(),
+                tmux_name: handle.tmux_name.clone(),
+                tmux_target: handle.tmux_target.clone(),
+                tmux_incarnation: TmuxSessionIncarnation {
+                    server_pid: 0,
+                    session_id: format!("test:{}", handle.session_id),
+                    session_created: 0,
+                },
+            }),
+        );
         sessions.insert(handle.session_id.clone(), handle);
         crate::metrics::set_active_sessions(sessions.len());
     }
@@ -1376,6 +1787,15 @@ impl SessionSupervisor {
                 }
             }
 
+            if self
+                .exact_cleanup_states
+                .read()
+                .await
+                .contains_key(&candidate)
+            {
+                continue;
+            }
+
             return candidate;
         }
     }
@@ -1394,20 +1814,225 @@ impl SessionSupervisor {
     }
 }
 
-async fn kill_tmux_session(tmux_name: &str, tmux_target: &TmuxTarget) -> anyhow::Result<()> {
-    let target = exact_session_target(tmux_name);
+const EXACT_CLEANUP_RECORD_VERSION: u16 = 1;
+
+#[derive(Serialize, Deserialize)]
+struct DurableExactCleanupRecord {
+    version: u16,
+    session_id: String,
+    state: ExactSessionCleanupState,
+}
+
+async fn persist_exact_cleanup_state(
+    dir: PathBuf,
+    session_id: String,
+    state: ExactSessionCleanupState,
+) -> anyhow::Result<()> {
+    tokio::task::spawn_blocking(move || {
+        persist_exact_cleanup_state_blocking(&dir, &session_id, &state)
+    })
+    .await
+    .map_err(|error| anyhow::anyhow!("exact cleanup persistence task failed: {error}"))?
+}
+
+fn persist_exact_cleanup_state_blocking(
+    dir: &Path,
+    session_id: &str,
+    state: &ExactSessionCleanupState,
+) -> anyhow::Result<()> {
+    prepare_private_dir(dir)?;
+    let stem = exact_cleanup_hex_name(session_id);
+    let destination = dir.join(format!("{stem}.json"));
+    let temporary = dir.join(format!(".{stem}.{}.tmp", Uuid::new_v4()));
+    let record = DurableExactCleanupRecord {
+        version: EXACT_CLEANUP_RECORD_VERSION,
+        session_id: session_id.to_string(),
+        state: state.clone(),
+    };
+    let encoded = serde_json::to_vec_pretty(&record)?;
+    let write_result = (|| -> anyhow::Result<()> {
+        let mut file = create_private_file(&temporary)?;
+        file.write_all(&encoded)?;
+        file.write_all(b"\n")?;
+        file.sync_all()?;
+        fs::rename(&temporary, &destination)?;
+        if let Err(error) = fs::File::open(dir).and_then(|directory| directory.sync_all()) {
+            let removal = fs::remove_file(&destination);
+            let _ = fs::File::open(dir).and_then(|directory| directory.sync_all());
+            removal?;
+            return Err(error.into());
+        }
+        Ok(())
+    })();
+    if write_result.is_err() {
+        let _ = fs::remove_file(&temporary);
+    }
+    write_result
+}
+
+async fn load_exact_cleanup_states(
+    dir: PathBuf,
+) -> anyhow::Result<HashMap<String, ExactSessionCleanupState>> {
+    tokio::task::spawn_blocking(move || load_exact_cleanup_states_blocking(&dir))
+        .await
+        .map_err(|error| anyhow::anyhow!("exact cleanup load task failed: {error}"))?
+}
+
+fn load_exact_cleanup_states_blocking(
+    dir: &Path,
+) -> anyhow::Result<HashMap<String, ExactSessionCleanupState>> {
+    let entries = match fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(HashMap::new());
+        }
+        Err(error) => return Err(error.into()),
+    };
+    let mut states = HashMap::new();
+    for entry in entries {
+        let entry = entry?;
+        if entry.path().extension().and_then(|value| value.to_str()) != Some("json")
+            || !entry.file_type()?.is_file()
+        {
+            continue;
+        }
+        let record: DurableExactCleanupRecord = serde_json::from_slice(&fs::read(entry.path())?)?;
+        anyhow::ensure!(
+            record.version == EXACT_CLEANUP_RECORD_VERSION,
+            "unsupported exact cleanup receipt version {}",
+            record.version
+        );
+        states.insert(record.session_id, record.state);
+    }
+    Ok(states)
+}
+
+async fn remove_exact_cleanup_state(dir: PathBuf, session_id: &str) -> anyhow::Result<()> {
+    let session_id = session_id.to_string();
+    tokio::task::spawn_blocking(move || {
+        let path = dir.join(format!("{}.json", exact_cleanup_hex_name(&session_id)));
+        match fs::remove_file(path) {
+            Ok(()) => {
+                fs::File::open(dir)?.sync_all()?;
+                Ok(())
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(error.into()),
+        }
+    })
+    .await
+    .map_err(|error| anyhow::anyhow!("exact cleanup removal task failed: {error}"))?
+}
+
+fn exact_cleanup_hex_name(value: &str) -> String {
+    value
+        .as_bytes()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
+
+async fn query_tmux_session_incarnation(
+    tmux_name: &str,
+    tmux_target: &TmuxTarget,
+) -> anyhow::Result<Option<TmuxSessionIncarnation>> {
     let output = run_bounded_tmux_command_for_target(
         "tmux",
         tmux_target,
-        &["kill-session", "-t", &target],
+        &[
+            "list-sessions",
+            "-F",
+            "#{pid}\t#{session_id}\t#{session_created}\t#{session_name}",
+        ],
+        TMUX_KILL_SESSION_TIMEOUT,
+        "list-sessions",
+    )
+    .await?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        if tmux_kill_reports_missing_session(&stderr) {
+            return Ok(None);
+        }
+        return Err(anyhow::anyhow!(
+            "tmux session incarnation query failed: {}",
+            stderr.trim()
+        ));
+    }
+    let stdout = String::from_utf8(output.stdout)
+        .map_err(|error| anyhow::anyhow!("tmux session incarnation was not UTF-8: {error}"))?;
+    let Some(line) = stdout.lines().find(|line| {
+        line.rsplit_once('\t')
+            .is_some_and(|(_, name)| name == tmux_name)
+    }) else {
+        return Ok(None);
+    };
+    let mut fields = line.split('\t');
+    let server_pid = fields
+        .next()
+        .and_then(|value| value.parse::<u32>().ok())
+        .ok_or_else(|| anyhow::anyhow!("tmux session incarnation omitted server pid"))?;
+    let session_id = fields
+        .next()
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| anyhow::anyhow!("tmux session incarnation omitted session id"))?
+        .to_string();
+    let session_created = fields
+        .next()
+        .and_then(|value| value.parse::<u64>().ok())
+        .ok_or_else(|| anyhow::anyhow!("tmux session incarnation omitted creation time"))?;
+    let returned_name = fields
+        .next()
+        .ok_or_else(|| anyhow::anyhow!("tmux session incarnation omitted session name"))?;
+    anyhow::ensure!(
+        returned_name == tmux_name && fields.next().is_none(),
+        "tmux session incarnation returned unexpected fields"
+    );
+    Ok(Some(TmuxSessionIncarnation {
+        server_pid,
+        session_id,
+        session_created,
+    }))
+}
+
+async fn kill_tmux_session(tmux_name: &str, tmux_target: &TmuxTarget) -> anyhow::Result<()> {
+    kill_tmux_session_with_outcome(tmux_name, tmux_target)
+        .await
+        .map(|_| ())
+}
+
+/// Returns `true` when tmux reported a live session was killed and `false`
+/// when the exact tmux target was already absent.
+async fn kill_tmux_session_with_outcome(
+    tmux_name: &str,
+    tmux_target: &TmuxTarget,
+) -> anyhow::Result<bool> {
+    let target = exact_session_target(tmux_name);
+    kill_tmux_session_target_with_outcome(&target, tmux_target).await
+}
+
+async fn kill_tmux_session_target_with_outcome(
+    target: &str,
+    tmux_target: &TmuxTarget,
+) -> anyhow::Result<bool> {
+    let output = run_bounded_tmux_command_for_target(
+        "tmux",
+        tmux_target,
+        &["kill-session", "-t", target],
         TMUX_KILL_SESSION_TIMEOUT,
         "kill-session",
     )
     .await?;
 
-    classify_kill_tmux_session_result(output.status.success(), &output.stderr)
+    if output.status.success() {
+        Ok(true)
+    } else if tmux_kill_reports_missing_session(&String::from_utf8_lossy(&output.stderr)) {
+        Ok(false)
+    } else {
+        classify_failed_kill_tmux_session(&output.stderr).map(|()| false)
+    }
 }
 
+#[cfg(test)]
 fn classify_kill_tmux_session_result(success: bool, stderr: &[u8]) -> anyhow::Result<()> {
     if success {
         Ok(())

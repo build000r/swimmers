@@ -168,6 +168,7 @@ async fn delete_session_rejects_invalid_mode() {
         Path("sess-missing".to_string()),
         Query(DeleteSessionQuery {
             mode: Some("invalid".to_string()),
+            session_generation: None,
         }),
     )
     .await
@@ -195,19 +196,178 @@ fn delete_session_mode_parse_accepts_supported_modes() {
 }
 
 #[tokio::test]
-async fn delete_session_returns_not_found_for_missing_session() {
+async fn exact_session_cleanup_requires_generation() {
     let response = delete_session(
         Extension(AuthInfo::new(OPERATOR_SCOPES.to_vec())),
         State(test_state()),
         Path("sess-missing".to_string()),
-        Query(DeleteSessionQuery { mode: None }),
+        Query(DeleteSessionQuery {
+            mode: None,
+            session_generation: Some("   ".to_string()),
+        }),
+    )
+    .await;
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let json = response_json(response).await;
+    assert_eq!(json["code"], "CLEANUP_GENERATION_REQUIRED");
+}
+
+#[tokio::test]
+async fn exact_session_cleanup_keeps_legacy_no_generation_delete_compatible() {
+    let state = test_state();
+    let _rx = insert_summary_test_handle(&state, summary("sess-legacy", SessionState::Idle)).await;
+    let response = delete_session(
+        Extension(AuthInfo::new(OPERATOR_SCOPES.to_vec())),
+        State(state.clone()),
+        Path("sess-legacy".to_string()),
+        Query(DeleteSessionQuery {
+            mode: Some("detach_bridge".to_string()),
+            session_generation: None,
+        }),
+    )
+    .await;
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let json = response_json(response).await;
+    assert_eq!(json["ok"], true);
+    assert!(state.supervisor.get_session("sess-legacy").await.is_none());
+}
+
+#[tokio::test]
+async fn exact_session_cleanup_rejects_unowned_session_generation() {
+    let response = delete_session(
+        Extension(AuthInfo::new(OPERATOR_SCOPES.to_vec())),
+        State(test_state()),
+        Path("sess-missing".to_string()),
+        Query(DeleteSessionQuery {
+            mode: None,
+            session_generation: Some("generation-for-missing-session".to_string()),
+        }),
     )
     .await;
 
     assert_eq!(response.status(), StatusCode::NOT_FOUND);
     let json = response_json(response).await;
-    assert_eq!(json["code"], "SESSION_NOT_FOUND");
-    assert_eq!(json["message"], Value::Null);
+    assert_eq!(json["code"], "SESSION_CLEANUP_NOT_AUTHORIZED");
+}
+
+#[tokio::test]
+async fn exact_session_cleanup_is_bound_idempotent_and_preserves_concurrent_session() {
+    let state = test_state();
+    let _target_rx =
+        insert_summary_test_handle(&state, summary("sess-target", SessionState::Idle)).await;
+    let _concurrent_rx =
+        insert_summary_test_handle(&state, summary("sess-concurrent", SessionState::Idle)).await;
+    let target_generation = state
+        .supervisor
+        .exact_cleanup_generation("sess-target")
+        .await
+        .expect("target generation");
+    let concurrent_generation = state
+        .supervisor
+        .exact_cleanup_generation("sess-concurrent")
+        .await
+        .expect("concurrent generation");
+
+    for (session_id, generation) in [
+        ("sess-target", "stale-generation"),
+        ("sess-concurrent", target_generation.as_str()),
+    ] {
+        let response = delete_session(
+            Extension(AuthInfo::new(OPERATOR_SCOPES.to_vec())),
+            State(state.clone()),
+            Path(session_id.to_string()),
+            Query(DeleteSessionQuery {
+                mode: Some("detach_bridge".to_string()),
+                session_generation: Some(generation.to_string()),
+            }),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+        let json = response_json(response).await;
+        assert_eq!(json["code"], "SESSION_GENERATION_MISMATCH");
+    }
+    assert!(state.supervisor.get_session("sess-target").await.is_some());
+    assert!(state
+        .supervisor
+        .get_session("sess-concurrent")
+        .await
+        .is_some());
+
+    let cleanup = |generation: &str| {
+        delete_session(
+            Extension(AuthInfo::new(OPERATOR_SCOPES.to_vec())),
+            State(state.clone()),
+            Path("sess-target".to_string()),
+            Query(DeleteSessionQuery {
+                mode: Some("detach_bridge".to_string()),
+                session_generation: Some(generation.to_string()),
+            }),
+        )
+    };
+    let first = cleanup(&target_generation).await;
+    assert_eq!(first.status(), StatusCode::OK);
+    let first = response_json(first).await;
+    assert_eq!(first["version"], 1);
+    assert_eq!(first["outcome"], "deleted");
+    assert_eq!(first["session_id"], "sess-target");
+    assert_eq!(first["session_generation"], target_generation);
+    assert_eq!(first["delete_mode"], "detach_bridge");
+
+    let repeat = cleanup(&target_generation).await;
+    assert_eq!(repeat.status(), StatusCode::OK);
+    let repeat = response_json(repeat).await;
+    assert_eq!(repeat["outcome"], "already_gone");
+    assert_eq!(repeat["session_generation"], target_generation);
+
+    assert!(state.supervisor.get_session("sess-target").await.is_none());
+    assert!(state
+        .supervisor
+        .get_session("sess-concurrent")
+        .await
+        .is_some());
+    assert_eq!(
+        state
+            .supervisor
+            .exact_cleanup_generation("sess-concurrent")
+            .await
+            .as_deref(),
+        Some(concurrent_generation.as_str())
+    );
+}
+
+#[tokio::test]
+async fn exact_session_cleanup_already_gone_is_receipt_bearing() {
+    let state = test_state();
+    let _rx = insert_summary_test_handle(&state, summary("sess-gone", SessionState::Idle)).await;
+    let generation = state
+        .supervisor
+        .exact_cleanup_generation("sess-gone")
+        .await
+        .expect("generation");
+    state
+        .supervisor
+        .delete_session("sess-gone", SessionDeleteMode::DetachBridge)
+        .await
+        .expect("simulate actor already gone");
+
+    let response = delete_session(
+        Extension(AuthInfo::new(OPERATOR_SCOPES.to_vec())),
+        State(state),
+        Path("sess-gone".to_string()),
+        Query(DeleteSessionQuery {
+            mode: Some("kill_tmux".to_string()),
+            session_generation: Some(generation.clone()),
+        }),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let json = response_json(response).await;
+    assert_eq!(json["outcome"], "already_gone");
+    assert_eq!(json["session_id"], "sess-gone");
+    assert_eq!(json["session_generation"], generation);
+    assert_eq!(json["tmux_session_alive"], false);
 }
 
 #[tokio::test]
@@ -221,7 +381,10 @@ async fn delete_session_prefers_remote_namespace_error_over_local_session() {
         Extension(AuthInfo::new(OPERATOR_SCOPES.to_vec())),
         State(state.clone()),
         Path(session_id.clone()),
-        Query(DeleteSessionQuery { mode: None }),
+        Query(DeleteSessionQuery {
+            mode: None,
+            session_generation: None,
+        }),
     )
     .await;
 

@@ -1,0 +1,175 @@
+{
+  "proof_version": 1,
+  "bead_id": "swimmers-exact-session-cleanup-receipt-61fx",
+  "criterion": "PC-SW-CLEANUP-1",
+  "status": "PASS",
+  "source_base": "dc64e1d490c20a6d0c0050c7f5cb7b86e10a860e",
+  "implementation": {
+    "receipt_version": 1,
+    "authorization": {
+      "mutation_scope": "sessions:write",
+      "private_cleanup_scope": "stream:write",
+      "required_identity": [
+        "session_id",
+        "session_generation"
+      ],
+      "generation_exposed_in_public_projection": false,
+      "generation_logged": false
+    },
+    "exact_target": {
+      "lookup": "session_id only",
+      "generation": "opaque UUID allocated and atomically persisted per inserted actor incarnation",
+      "tmux_identity_retained": [
+        "tmux_name",
+        "TmuxTarget",
+        "tmux server pid",
+        "tmux session id",
+        "tmux session creation time"
+      ],
+      "cwd_lookup": false,
+      "name_lookup": false,
+      "replacement_actor_guard": "generation transition and actor removal share the exact-cleanup/sessions lock boundary; cleanup holds discovery lock and rejects a changed tmux incarnation"
+    },
+    "state_machine": [
+      "Active",
+      "Cleaning",
+      "Cleaned"
+    ],
+    "durability": {
+      "path": "exact_session_cleanup_receipts/<hex-swimmers-session-id>.json",
+      "permissions": {
+        "directory": "0700",
+        "file": "0600"
+      },
+      "active_authority_persisted_before_launch_response": true,
+      "cleaned_tombstone_persisted_before_cleanup_response": true,
+      "interrupted_cleaning_recovers_as": "Active for exact revalidation and retry",
+      "reserved_session_ids_survive_restart": true
+    },
+    "outcomes": {
+      "deleted": "exact tracked actor or live exact tmux target removed",
+      "already_gone": "authorized generation tombstone repeated or exact tmux target reported absent",
+      "generation_mismatch": "409 SESSION_GENERATION_MISMATCH with no mutation",
+      "cleanup_in_progress": "409 SESSION_CLEANUP_IN_PROGRESS with no second mutation",
+      "not_authorized": "404 SESSION_CLEANUP_NOT_AUTHORIZED with no mutation"
+    },
+    "receipt_fields": [
+      "version",
+      "ok",
+      "outcome",
+      "session_id",
+      "session_generation",
+      "delete_mode",
+      "tmux_session_alive",
+      "provider_receipt_preserved",
+      "provider_resume_available"
+    ],
+    "provider_history": {
+      "provider_launch_receipt_removed_by_cleanup": false,
+      "durable_provider_receipt_removed_by_cleanup": false,
+      "resume_argv_available_after_tmux_kill": true,
+      "fixture_executes_exact_provider_resume_after_cleanup": true
+    },
+    "remote_delete_behavior": "remote namespaced deletion and legacy no-generation peer forwarding remain compatible; session_generation selects the exact private cleanup contract"
+  },
+  "focused_fixtures": [
+    "exact_session_cleanup_requires_generation",
+    "exact_session_cleanup_keeps_legacy_no_generation_delete_compatible",
+    "exact_session_cleanup_rejects_unowned_session_generation",
+    "exact_session_cleanup_is_bound_idempotent_and_preserves_concurrent_session",
+    "exact_session_cleanup_already_gone_is_receipt_bearing",
+    "exact_session_cleanup_provider_history_survives_tmux_kill_and_resume_is_available",
+    "exact_session_cleanup_stale_generation_cannot_kill_same_name_replacement"
+  ],
+  "validations": [
+    {
+      "command": "cargo fmt --all -- --check",
+      "exit_code": 0
+    },
+    {
+      "command": "cargo test exact_session_cleanup -- --nocapture",
+      "exit_code": 0,
+      "tests_passed": 7,
+      "tests_failed": 0,
+      "tests_filtered_out": 1428
+    },
+    {
+      "command": "cargo test provider_resume_integration -- --nocapture",
+      "exit_code": 0,
+      "tests_passed": 11,
+      "tests_failed": 0,
+      "tests_filtered_out": 1424
+    },
+    {
+      "command": "cargo test delete_session -- --nocapture",
+      "exit_code": 0,
+      "tests_passed": 5,
+      "tests_failed": 0,
+      "tests_filtered_out": 1430
+    },
+    {
+      "command": "cargo clippy -- -D warnings",
+      "exit_code": 0,
+      "diagnostic_count": 0
+    },
+    {
+      "command": "git diff --check",
+      "exit_code": 0
+    }
+  ],
+  "planted_failures": [
+    {
+      "mutation": "disable session generation mismatch comparison",
+      "command": "cargo test exact_session_cleanup_is_bound_idempotent_and_preserves_concurrent_session -- --nocapture",
+      "expected_exit_code": 101,
+      "observed_exit_code": 101,
+      "observed_failure": "expected 409, received 200",
+      "restored": true
+    },
+    {
+      "mutation": "remove in-memory provider launch receipt during exact cleanup",
+      "command": "cargo test exact_session_cleanup_provider_history_survives_tmux_kill_and_resume_is_available -- --nocapture",
+      "expected_exit_code": 101,
+      "observed_exit_code": 101,
+      "observed_failure": "provider receipt survives cleanup",
+      "restored": true
+    },
+    {
+      "mutation": "disable tmux incarnation mismatch comparison",
+      "command": "cargo test exact_session_cleanup_stale_generation_cannot_kill_same_name_replacement -- --nocapture",
+      "expected_exit_code": 101,
+      "observed_exit_code": 101,
+      "observed_failure": "stale authority returned Deleted and killed same-name replacement",
+      "restored": true
+    },
+    {
+      "mutation": "discard durable exact cleanup states during restart load",
+      "command": "cargo test exact_session_cleanup_provider_history_survives_tmux_kill_and_resume_is_available -- --nocapture",
+      "expected_exit_code": 101,
+      "observed_exit_code": 101,
+      "observed_failure": "idempotent cleanup repeat returned NotAuthorized after restart",
+      "restored": true
+    }
+  ],
+  "excluded_foreign_gate": {
+    "command": "cargo clippy --all-targets -- -D warnings",
+    "exit_code": 101,
+    "reason": "137 pre-existing test-target warnings outside 61fx scope; required non-test cargo clippy command passes",
+    "example": "src/api/dirs.rs:770 await_holding_lock"
+  },
+  "independent_review": {
+    "reviewer": "Codex gpt-5.6-sol",
+    "reasoning_effort": "max",
+    "status": "PASS",
+    "review_edits": false,
+    "prior_blocker": "durable cleanup tombstones did not reserve session IDs across supervisor restart",
+    "resolution": "loaded tombstones advance next_id_counter, allocation rejects every retained cleanup-state ID, and the restart fixture proves non-reuse before the receipt-bearing retry",
+    "verdict": "No remaining acceptance or safety blockers"
+  },
+  "source_sha256": {
+    "src/api/service.rs": "c89627e58a87e87bd32427fb63642a68fdefab4341ad2d8a614af6cf756475fc",
+    "src/api/sessions/core_routes.rs": "fd772fe239a5d89c1745db7ebb2494892eb963ede82211f30f6fc9d32137b0aa",
+    "src/api/sessions/tests/session_lifecycle.rs": "c2ac7bcd1fd4848b95d1eddd60a81af30e68f856eefafc5fcda09e08cb941d60",
+    "src/session/supervisor.rs": "b58f146b51a4a0741dfe7ecb02ce9859952b9993597cf13baa891bd994ccf11d"
+  }
+}

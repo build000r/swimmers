@@ -10,6 +10,7 @@ use std::time::{Duration, Instant};
 use axum::http::StatusCode;
 use chrono::{DateTime, Utc};
 use futures::stream::{self, StreamExt};
+use serde::Serialize;
 use tokio::sync::oneshot;
 use uuid::Uuid;
 
@@ -28,6 +29,9 @@ use crate::session::actor::{ActorHandle, SessionCommand};
 #[cfg(test)]
 use crate::session::overlay::OverlayDirGroup;
 use crate::session::overlay::{OverlayDirConfig, OverlayServiceEntry};
+use crate::session::supervisor::{
+    ExactSessionCleanupError, ExactSessionCleanupOutcome, ExactSessionCleanupResult,
+};
 use crate::thought::probe::{run_thought_config_probe, ThoughtConfigProbeResult};
 use crate::thought::runtime_config::ThoughtConfig;
 use crate::thought_ui::thought_config_ui_metadata;
@@ -172,6 +176,112 @@ impl std::fmt::Display for ApiServiceError {
 }
 
 impl std::error::Error for ApiServiceError {}
+
+pub const EXACT_SESSION_CLEANUP_RECEIPT_VERSION: u16 = 1;
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ExactSessionCleanupReceipt {
+    pub version: u16,
+    pub ok: bool,
+    pub outcome: &'static str,
+    pub session_id: String,
+    pub session_generation: String,
+    pub delete_mode: &'static str,
+    pub tmux_session_alive: bool,
+    pub provider_receipt_preserved: bool,
+    pub provider_resume_available: bool,
+}
+
+pub async fn cleanup_exact_local_session(
+    state: &Arc<AppState>,
+    session_id: &str,
+    session_generation: &str,
+    delete_mode: crate::config::SessionDeleteMode,
+) -> Result<ExactSessionCleanupReceipt, ApiServiceError> {
+    if session_id.trim().is_empty() {
+        return Err(ApiServiceError::new(
+            StatusCode::BAD_REQUEST,
+            "SESSION_ID_REQUIRED",
+            "exact cleanup requires a session id",
+        ));
+    }
+    if session_generation.trim().is_empty() {
+        return Err(ApiServiceError::new(
+            StatusCode::BAD_REQUEST,
+            "CLEANUP_GENERATION_REQUIRED",
+            "exact cleanup requires session_generation",
+        ));
+    }
+
+    let result = state
+        .supervisor
+        .delete_exact_session(session_id, session_generation, delete_mode)
+        .await
+        .map_err(exact_session_cleanup_error)?;
+    let provider_receipt = state.supervisor.provider_launch_receipt(session_id).await;
+    Ok(exact_session_cleanup_receipt(
+        session_id,
+        session_generation,
+        result,
+        provider_receipt.as_ref(),
+    ))
+}
+
+fn exact_session_cleanup_receipt(
+    session_id: &str,
+    session_generation: &str,
+    result: ExactSessionCleanupResult,
+    provider_receipt: Option<&crate::types::AuthorizedProviderResumeLaunchReceipt>,
+) -> ExactSessionCleanupReceipt {
+    ExactSessionCleanupReceipt {
+        version: EXACT_SESSION_CLEANUP_RECEIPT_VERSION,
+        ok: true,
+        outcome: match result.outcome {
+            ExactSessionCleanupOutcome::Deleted => "deleted",
+            ExactSessionCleanupOutcome::AlreadyGone => "already_gone",
+        },
+        session_id: session_id.to_string(),
+        session_generation: session_generation.to_string(),
+        delete_mode: match result.delete_mode {
+            crate::config::SessionDeleteMode::DetachBridge => "detach_bridge",
+            crate::config::SessionDeleteMode::KillTmux => "kill_tmux",
+        },
+        tmux_session_alive: result.tmux_session_alive,
+        provider_receipt_preserved: provider_receipt.is_some(),
+        provider_resume_available: provider_receipt
+            .is_some_and(|receipt| receipt.provider_resume().is_resumable()),
+    }
+}
+
+fn exact_session_cleanup_error(error: ExactSessionCleanupError) -> ApiServiceError {
+    match error {
+        ExactSessionCleanupError::NotAuthorized => ApiServiceError::new(
+            StatusCode::NOT_FOUND,
+            "SESSION_CLEANUP_NOT_AUTHORIZED",
+            error.to_string(),
+        ),
+        ExactSessionCleanupError::GenerationMismatch => ApiServiceError::new(
+            StatusCode::CONFLICT,
+            "SESSION_GENERATION_MISMATCH",
+            error.to_string(),
+        ),
+        ExactSessionCleanupError::TmuxIncarnationMismatch => ApiServiceError::new(
+            StatusCode::CONFLICT,
+            "TMUX_SESSION_INCARNATION_MISMATCH",
+            error.to_string(),
+        ),
+        ExactSessionCleanupError::CleanupInProgress => ApiServiceError::new(
+            StatusCode::CONFLICT,
+            "SESSION_CLEANUP_IN_PROGRESS",
+            error.to_string(),
+        ),
+        ExactSessionCleanupError::Internal(_) => ApiServiceError::new(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "INTERNAL_ERROR",
+            error.to_string(),
+        ),
+    }
+}
 
 #[derive(Debug)]
 pub enum NativeOpenServiceError {
