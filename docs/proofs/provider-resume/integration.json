@@ -1,0 +1,133 @@
+{
+  "proof_version": 1,
+  "bead_id": "swimmers-provider-receipt-integration-7lir",
+  "criterion": "PC-SW-INTEGRATION-1",
+  "status": "PASS",
+  "source_base": "3eab028",
+  "integrated_commits": {
+    "contract": "d4061e5",
+    "codex_adapter": "3eab028",
+    "grok_adapter": "bcf76e4"
+  },
+  "implementation": {
+    "receipt_version": 1,
+    "authorized_response": {
+      "authorization_gate": "sessions:write plus stream:write",
+      "shape": "CreateSessionResponse.launch_receipt",
+      "private_type": "AuthorizedProviderResumeLaunchReceipt",
+      "fields": [
+        "Swimmers launch ownership",
+        "provider",
+        "capability",
+        "capture_source",
+        "conversation_id",
+        "resume_argv",
+        "resume_command"
+      ]
+    },
+    "public_response": {
+      "authorization_gate": "sessions:write without stream:write",
+      "private_launch_receipt_omitted": true,
+      "projection_type": "ProviderResumePublicProjection",
+      "resumable_projects_as": "unknown",
+      "forbidden_fields_present": []
+    },
+    "provider_matrix": {
+      "codex": {
+        "identity": "authoritative app-server v2 thread/start thread.id",
+        "handoff": "codex resume <thread.id>",
+        "capture_source": "provider_response"
+      },
+      "grok": {
+        "identity": "preassigned UUID",
+        "launch": "grok --session-id <uuid>",
+        "resume": "grok --resume <same uuid>",
+        "capture_source": "preassigned",
+        "success_token": "nonce-bound private file after exact tmux child remains alive for 150ms"
+      },
+      "claude": {
+        "capability": "unknown",
+        "capture_source": "unsupported",
+        "private_identity_present": false
+      },
+      "no_tool": {
+        "provider": "unknown",
+        "capability": "unknown",
+        "private_identity_present": false
+      }
+    },
+    "durability": {
+      "path": "provider_resume_receipts/<hex-swimmers-session-id>.json",
+      "permissions": {
+        "directory": "0700",
+        "file": "0600"
+      },
+      "ordering": [
+        "provider identity correlated",
+        "tmux provider process observed",
+        "receipt temp file written and fsynced",
+        "receipt atomically renamed and parent directory fsynced",
+        "receipt inserted into supervisor map",
+        "CreateSessionResponse success emitted"
+      ],
+      "partial_persistence": "fails launch; exact tmux session rolled back; post-rename directory-sync failure removes installed destination"
+    },
+    "legacy_compatibility": "Legacy LaunchReceipt and CreateSessionResponse readers ignore additive version and provider_resume fields."
+  },
+  "focused_fixtures": [
+    "provider_resume_integration_unknown_matrix_is_explicit_and_identity_free",
+    "provider_resume_integration_legacy_reader_accepts_versioned_receipt",
+    "provider_resume_integration_durable_store_round_trips_exact_correlation",
+    "provider_resume_integration_partial_persistence_fails_closed",
+    "provider_resume_integration_parallel_store_keeps_exact_pairs",
+    "provider_resume_integration_authorized_response_is_versioned_and_legacy_readable",
+    "provider_resume_integration_public_projection_omits_private_identity",
+    "provider_resume_integration_grok_adapter_tmux_persistence_api_path",
+    "provider_resume_integration_rejected_grok_never_persists_or_returns_success"
+  ],
+  "validations": [
+    {
+      "command": "cargo fmt --check",
+      "exit_code": 0
+    },
+    {
+      "command": "cargo test provider_resume_integration -- --nocapture",
+      "exit_code": 0,
+      "tests_passed": 9,
+      "tests_failed": 0,
+      "tests_filtered_out": 1420,
+      "duration_seconds": 2.34
+    },
+    {
+      "command": "cargo clippy -- -D warnings",
+      "exit_code": 0,
+      "diagnostic_count": 0
+    },
+    {
+      "command": "git diff --check",
+      "exit_code": 0
+    }
+  ],
+  "independent_review": {
+    "reviewer": "Codex gpt-5.6-sol",
+    "reasoning_effort": "max",
+    "initial_verdict": "FAIL",
+    "initial_findings_fixed": [
+      "Grok running observation was self-asserted",
+      "post-rename directory-sync failure could leave a loadable receipt",
+      "focused tests lacked adapter-to-tmux-to-persistence-to-API proof"
+    ],
+    "final_verdict": "PASS",
+    "review_edits": false,
+    "independent_test_result": {
+      "tests_passed": 9,
+      "tests_failed": 0,
+      "tests_filtered_out": 1420
+    }
+  },
+  "source_sha256": {
+    "src/session/providers/mod.rs": "4aca4ed8c8e1e97b9d2d0c5f6b0d06c2140ee2a285f1b1a88707c1d25e0ac674",
+    "src/session/supervisor.rs": "6c9c9fb24c638ee11f795a8d783e20059fb639e1e98be996b57fbc2375b0a661",
+    "src/api/sessions/core_routes.rs": "2180873d8d0c36378c8789836f5a0e7c145b9aac26fefa8db6bf2fefde09e762"
+  }
+}

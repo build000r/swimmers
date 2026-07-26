@@ -68,6 +68,9 @@ use self::summary::{
 };
 pub use self::thought_persistence::SupervisorProvider;
 use self::thought_persistence::THOUGHT_PERSIST_QUEUE_CAP;
+#[path = "providers/mod.rs"]
+mod providers;
+use self::providers::{prepare_provider_launch, unknown_launch_receipt, ProviderReceiptStore};
 
 const PROCESS_EXIT_SUMMARY_TIMEOUT: Duration = Duration::from_millis(250);
 const TMUX_REDISCOVERY_INTERVAL: Duration = Duration::from_secs(10);
@@ -297,6 +300,14 @@ pub struct SessionSupervisor {
 
     /// Latest tmux dependency observations for /health.
     tmux_dependency_health: StdMutex<TmuxDependencyHealthState>,
+
+    /// Private, versioned provider resume receipts keyed by Swimmers session id.
+    provider_launch_receipts:
+        RwLock<HashMap<String, crate::types::AuthorizedProviderResumeLaunchReceipt>>,
+
+    /// Durable private receipt store. Resumable success is not returned until
+    /// this store has atomically committed the exact Swimmers/provider pair.
+    provider_receipt_store: ProviderReceiptStore,
 }
 
 #[derive(Default)]
@@ -313,6 +324,21 @@ const ACTIVE_PANE_CACHE_TTL: Duration = Duration::from_millis(1000);
 
 impl SessionSupervisor {
     pub fn new(config: Arc<Config>) -> Arc<Self> {
+        Self::new_with_provider_receipt_store(config, ProviderReceiptStore::for_default_data_dir())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn new_with_provider_receipt_data_dir(
+        config: Arc<Config>,
+        data_dir: impl Into<PathBuf>,
+    ) -> Arc<Self> {
+        Self::new_with_provider_receipt_store(config, ProviderReceiptStore::new(data_dir))
+    }
+
+    fn new_with_provider_receipt_store(
+        config: Arc<Config>,
+        provider_receipt_store: ProviderReceiptStore,
+    ) -> Arc<Self> {
         let (lifecycle_tx, _) = broadcast::channel(64);
         let (thought_tx, _) = broadcast::channel(64);
         Arc::new(Self {
@@ -338,6 +364,8 @@ impl SessionSupervisor {
             discovery_lock: Mutex::new(()),
             active_pane_cache: Mutex::new(ActivePaneCache::default()),
             tmux_dependency_health: StdMutex::new(TmuxDependencyHealthState::default()),
+            provider_launch_receipts: RwLock::new(HashMap::new()),
+            provider_receipt_store,
         })
     }
 
@@ -498,6 +526,24 @@ impl SessionSupervisor {
     pub async fn init_persistence(self: &Arc<Self>, store: Arc<FileStore>) {
         let persisted = store.load_sessions().await;
         let thoughts = store.load_thoughts().await;
+        match self.provider_receipt_store.load().await {
+            Ok(receipts) => {
+                let mut provider_receipts = self.provider_launch_receipts.write().await;
+                *provider_receipts = receipts
+                    .into_iter()
+                    .filter_map(|receipt| {
+                        receipt
+                            .launch()
+                            .session_id
+                            .clone()
+                            .map(|session_id| (session_id, receipt))
+                    })
+                    .collect();
+            }
+            Err(error) => {
+                warn!(%error, "failed to load durable provider resume receipts");
+            }
+        }
 
         self.advance_id_counter_from_persisted_state(&persisted, &thoughts);
         self.assign_stale_sessions_from_persistence(&persisted, &thoughts)
@@ -676,15 +722,27 @@ impl SessionSupervisor {
 
         let initial_tool = initial_tool_name(spawn_tool.as_ref());
         let mut prelaunch_cleanup_paths = Vec::new();
-        let initial_command = spawn_tool.map(|tool| {
-            let command =
-                prepare_spawn_tool_command(tool, start_cwd.as_deref(), initial_request.as_deref());
-            prelaunch_cleanup_paths = command.cleanup_paths;
-            if spawn_tool_consumes_initial_request(tool) {
-                initial_request = None;
-            }
-            wrap_spawn_tool_command_for_tmux(&command.command)
-        });
+        let mut provider_launch =
+            prepare_provider_launch(spawn_tool, start_cwd.as_deref(), initial_request.as_deref())
+                .await?;
+        let initial_command = if let Some(provider_launch) = provider_launch.as_mut() {
+            prelaunch_cleanup_paths = provider_launch.take_cleanup_paths();
+            initial_request = None;
+            Some(wrap_spawn_tool_command_for_tmux(provider_launch.command()))
+        } else {
+            spawn_tool.map(|tool| {
+                let command = prepare_spawn_tool_command(
+                    tool,
+                    start_cwd.as_deref(),
+                    initial_request.as_deref(),
+                );
+                prelaunch_cleanup_paths = command.cleanup_paths;
+                if spawn_tool_consumes_initial_request(tool) {
+                    initial_request = None;
+                }
+                wrap_spawn_tool_command_for_tmux(&command.command)
+            })
+        };
         // Hold the discovery lock across spawn (which runs the real
         // `tmux new-session`) and the handle insert below so the periodic tmux
         // reconcile loop / adopt path cannot observe the freshly-created tmux
@@ -729,6 +787,41 @@ impl SessionSupervisor {
             )
             .await;
         let repo_theme = self.resolve_repo_theme_for_summary(&mut summary);
+        if let Some(provider_launch) = provider_launch.as_mut() {
+            if let Err(error) = provider_launch.confirm_started().await {
+                self.rollback_provider_launch(&session_id, &bootstrap_handle)
+                    .await;
+                schedule_prelaunch_file_cleanup(prelaunch_cleanup_paths);
+                return Err(error);
+            }
+        }
+        let launch_receipt =
+            crate::types::LaunchReceipt::local(summary.cwd.clone(), session_id.clone(), false);
+        let provider_receipt = match provider_launch {
+            Some(provider_launch) => provider_launch.finalize(launch_receipt),
+            None => Ok(unknown_launch_receipt(launch_receipt, spawn_tool)),
+        };
+        let provider_receipt = match provider_receipt {
+            Ok(receipt) => receipt,
+            Err(error) => {
+                self.rollback_provider_launch(&session_id, &bootstrap_handle)
+                    .await;
+                schedule_prelaunch_file_cleanup(prelaunch_cleanup_paths);
+                return Err(error);
+            }
+        };
+        if provider_receipt.provider_resume().is_resumable() {
+            if let Err(error) = self.provider_receipt_store.persist(&provider_receipt).await {
+                self.rollback_provider_launch(&session_id, &bootstrap_handle)
+                    .await;
+                schedule_prelaunch_file_cleanup(prelaunch_cleanup_paths);
+                return Err(error.context("durable provider receipt persistence failed"));
+            }
+        }
+        self.provider_launch_receipts
+            .write()
+            .await
+            .insert(session_id.clone(), provider_receipt);
         let initial_request_delay = initial_request_delay(spawn_tool, initial_request.as_ref());
         self.enqueue_initial_request_if_present(
             bootstrap_handle,
@@ -741,6 +834,30 @@ impl SessionSupervisor {
         self.persist_registry().await;
 
         Ok((summary, repo_theme))
+    }
+
+    async fn rollback_provider_launch(&self, session_id: &str, handle: &ActorHandle) {
+        self.sessions.write().await.remove(session_id);
+        crate::metrics::set_active_sessions(self.sessions.read().await.len());
+        if let Err(error) = kill_tmux_session(&handle.tmux_name, &handle.tmux_target).await {
+            warn!(
+                %error,
+                session_id,
+                "failed to roll back tmux session after provider receipt failure"
+            );
+        }
+        let _ = handle.cmd_tx.send(SessionCommand::Shutdown).await;
+    }
+
+    pub(crate) async fn provider_launch_receipt(
+        &self,
+        session_id: &str,
+    ) -> Option<crate::types::AuthorizedProviderResumeLaunchReceipt> {
+        self.provider_launch_receipts
+            .read()
+            .await
+            .get(session_id)
+            .cloned()
     }
 
     fn allocate_tmux_name(&self, requested_name: Option<String>) -> String {

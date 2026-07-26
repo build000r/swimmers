@@ -17,8 +17,10 @@ use crate::fleet_lens::{build_fleet_lens_presets, build_fleet_lens_summary};
 use crate::session::actor::{ActorHandle, InputDeliveryResult, SessionCommand};
 use crate::session::supervisor::TmuxAdoptError;
 use crate::types::{
-    AdoptSessionRequest, AdoptSessionResponse, CreateSessionRequest, CreateSessionsBatchRequest,
-    CreateSessionsBatchResponse, EnvironmentListResponse, LaunchTargetSummary, SessionInputRequest,
+    AdoptSessionRequest, AdoptSessionResponse, AuthorizedProviderResumeLaunchReceipt,
+    AuthorizedProviderResumeReceipt, CreateSessionRequest, CreateSessionResponse,
+    CreateSessionsBatchRequest, CreateSessionsBatchResponse, EnvironmentListResponse,
+    LaunchTargetSummary, ProviderResumeCaptureSource, ProviderResumeProvider, SessionInputRequest,
     SessionInputResponse, SessionListResponse, SessionState, TerminalSnapshot,
     MAX_SESSION_INPUT_BYTES,
 };
@@ -84,7 +86,7 @@ pub(super) async fn create_session(
         return create_remote_session_response(body).await;
     }
 
-    create_local_session_response(&state, body).await
+    create_local_session_response(&auth, &state, body).await
 }
 
 async fn create_remote_session_response(body: CreateSessionRequest) -> axum::response::Response {
@@ -95,6 +97,7 @@ async fn create_remote_session_response(body: CreateSessionRequest) -> axum::res
 }
 
 async fn create_local_session_response(
+    auth: &AuthInfo,
     state: &Arc<AppState>,
     body: CreateSessionRequest,
 ) -> axum::response::Response {
@@ -113,7 +116,7 @@ async fn create_local_session_response(
             if explicit_local_override {
                 mark_create_session_local_override(&mut response);
             }
-            (StatusCode::CREATED, Json(response)).into_response()
+            provider_create_session_response(auth, state, response).await
         }
         Err(error) => error_response(
             error.status(),
@@ -121,6 +124,76 @@ async fn create_local_session_response(
             Some(error.message().to_string()),
         ),
     }
+}
+
+async fn provider_create_session_response(
+    auth: &AuthInfo,
+    state: &Arc<AppState>,
+    response: CreateSessionResponse,
+) -> Response {
+    let provider_receipt = match response.session.as_ref() {
+        Some(session) => {
+            state
+                .supervisor
+                .provider_launch_receipt(&session.session_id)
+                .await
+        }
+        None => None,
+    };
+    provider_create_session_response_with_receipt(auth, response, provider_receipt)
+}
+
+fn provider_create_session_response_with_receipt(
+    auth: &AuthInfo,
+    response: CreateSessionResponse,
+    stored_receipt: Option<AuthorizedProviderResumeLaunchReceipt>,
+) -> Response {
+    let Some(launch_receipt) = response.launch_receipt.clone() else {
+        return (StatusCode::CREATED, Json(response)).into_response();
+    };
+    let provider_resume = stored_receipt
+        .as_ref()
+        .map(|receipt| receipt.provider_resume().clone())
+        .unwrap_or_else(|| {
+            AuthorizedProviderResumeReceipt::unknown(
+                ProviderResumeProvider::Unknown,
+                ProviderResumeCaptureSource::Unknown,
+            )
+        });
+    let receipt = AuthorizedProviderResumeLaunchReceipt::new(launch_receipt, provider_resume);
+    let mut value = match serde_json::to_value(&response) {
+        Ok(value) => value,
+        Err(error) => {
+            tracing::error!(%error, "failed to serialize create-session response");
+            return error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "INTERNAL_ERROR",
+                Some("failed to serialize create-session response".to_string()),
+            );
+        }
+    };
+    let Some(object) = value.as_object_mut() else {
+        return error_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "INTERNAL_ERROR",
+            Some("invalid create-session response shape".to_string()),
+        );
+    };
+
+    if auth.has_scope(AuthScope::StreamWrite) {
+        object.insert(
+            "launch_receipt".to_string(),
+            serde_json::to_value(receipt).expect("provider receipt serialization cannot fail"),
+        );
+    } else {
+        object.remove("launch_receipt");
+        object.insert(
+            "provider_resume".to_string(),
+            serde_json::to_value(receipt.public_projection())
+                .expect("public provider projection serialization cannot fail"),
+        );
+    }
+    (StatusCode::CREATED, Json(value)).into_response()
 }
 
 // ---------------------------------------------------------------------------
@@ -726,4 +799,284 @@ pub(super) enum SnapshotRequestError {
     ActorUnavailable,
     ReplyDropped,
     Timeout,
+}
+
+#[cfg(test)]
+mod provider_resume_integration_tests {
+    use super::*;
+    use crate::auth::OPERATOR_SCOPES;
+    use crate::config::{Config, SessionDeleteMode};
+    use crate::session::supervisor::SessionSupervisor;
+    use crate::types::{
+        LaunchReceipt, ProviderResumeCapability, SpawnTool, PROVIDER_RESUME_LAUNCH_RECEIPT_VERSION,
+    };
+    use axum::body::to_bytes;
+    use serde_json::Value;
+    use std::ffi::OsString;
+    use std::os::unix::fs::PermissionsExt;
+    use std::sync::{Arc, Mutex, OnceLock};
+    use tempfile::tempdir;
+
+    static GROK_ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+
+    struct EnvRestore {
+        key: &'static str,
+        value: Option<OsString>,
+    }
+
+    impl Drop for EnvRestore {
+        fn drop(&mut self) {
+            match self.value.take() {
+                Some(value) => std::env::set_var(self.key, value),
+                None => std::env::remove_var(self.key),
+            }
+        }
+    }
+
+    struct TmuxCleanup {
+        name: String,
+    }
+
+    impl Drop for TmuxCleanup {
+        fn drop(&mut self) {
+            let _ = std::process::Command::new("tmux")
+                .args(["kill-session", "-t", &format!("={}", self.name)])
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status();
+        }
+    }
+
+    fn response_fixture() -> CreateSessionResponse {
+        CreateSessionResponse {
+            session: None,
+            repo_theme: None,
+            launch_receipt: Some(LaunchReceipt::local(
+                "/workspace/swimmers",
+                "swimmers-session-22",
+                false,
+            )),
+        }
+    }
+
+    fn receipt_fixture() -> AuthorizedProviderResumeLaunchReceipt {
+        AuthorizedProviderResumeLaunchReceipt::new(
+            response_fixture().launch_receipt.expect("launch receipt"),
+            AuthorizedProviderResumeReceipt::resumable(
+                ProviderResumeProvider::Codex,
+                "thread-authoritative-22",
+                vec![
+                    "codex".to_string(),
+                    "resume".to_string(),
+                    "thread-authoritative-22".to_string(),
+                ],
+                "codex resume thread-authoritative-22",
+                ProviderResumeCaptureSource::ProviderResponse,
+            )
+            .expect("valid Codex receipt"),
+        )
+    }
+
+    async fn response_value(response: Response) -> Value {
+        let bytes = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("response body");
+        serde_json::from_slice(&bytes).expect("response JSON")
+    }
+
+    #[tokio::test]
+    async fn provider_resume_integration_authorized_response_is_versioned_and_legacy_readable() {
+        let response = provider_create_session_response_with_receipt(
+            &AuthInfo::new(OPERATOR_SCOPES.to_vec()),
+            response_fixture(),
+            Some(receipt_fixture()),
+        );
+        assert_eq!(response.status(), StatusCode::CREATED);
+        let value = response_value(response).await;
+        assert_eq!(
+            value["launch_receipt"]["version"],
+            PROVIDER_RESUME_LAUNCH_RECEIPT_VERSION
+        );
+        assert_eq!(
+            value["launch_receipt"]["provider_resume"]["conversation_id"],
+            "thread-authoritative-22"
+        );
+        let legacy: CreateSessionResponse =
+            serde_json::from_value(value).expect("legacy CreateSessionResponse reader");
+        assert_eq!(
+            legacy
+                .launch_receipt
+                .and_then(|receipt| receipt.session_id)
+                .as_deref(),
+            Some("swimmers-session-22")
+        );
+    }
+
+    #[tokio::test]
+    async fn provider_resume_integration_public_projection_omits_private_identity() {
+        let response = provider_create_session_response_with_receipt(
+            &AuthInfo::new(vec![AuthScope::SessionsWrite]),
+            response_fixture(),
+            Some(receipt_fixture()),
+        );
+        let value = response_value(response).await;
+        assert!(value.get("launch_receipt").is_none());
+        assert_eq!(
+            value["provider_resume"]["capability"],
+            serde_json::to_value(ProviderResumeCapability::Unknown).expect("capability")
+        );
+        let encoded = serde_json::to_string(&value).expect("encode response");
+        for private in ["conversation_id", "resume_argv", "resume_command"] {
+            assert!(
+                !encoded.contains(private),
+                "public response leaked {private}"
+            );
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn provider_resume_integration_grok_adapter_tmux_persistence_api_path() {
+        let _env_lock = GROK_ENV_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .expect("Grok env lock");
+        let original = std::env::var_os(crate::launcher::SWIMMERS_GROK_BIN_ENV);
+        let _restore = EnvRestore {
+            key: crate::launcher::SWIMMERS_GROK_BIN_ENV,
+            value: original,
+        };
+        let dir = tempdir().expect("tempdir");
+        let fixture = dir.path().join("grok-fixture");
+        std::fs::write(&fixture, "#!/bin/sh\nsleep 5\n").expect("write fixture");
+        let mut permissions = std::fs::metadata(&fixture)
+            .expect("fixture metadata")
+            .permissions();
+        permissions.set_mode(0o700);
+        std::fs::set_permissions(&fixture, permissions).expect("fixture executable");
+        std::env::set_var(crate::launcher::SWIMMERS_GROK_BIN_ENV, &fixture);
+
+        let tmux_name = format!("swimmers-provider-integration-{}", uuid::Uuid::new_v4());
+        let _tmux_cleanup = TmuxCleanup {
+            name: tmux_name.clone(),
+        };
+        let config = Arc::new(Config::default());
+        let supervisor =
+            SessionSupervisor::new_with_provider_receipt_data_dir(config, dir.path().join("data"));
+        let (session, _) = supervisor
+            .create_session(
+                Some(tmux_name),
+                Some(dir.path().to_string_lossy().into_owned()),
+                Some(SpawnTool::Grok),
+                None,
+            )
+            .await
+            .expect("provider launch");
+        let receipt = supervisor
+            .provider_launch_receipt(&session.session_id)
+            .await
+            .expect("provider receipt");
+        assert!(receipt.provider_resume().is_resumable());
+        assert_eq!(
+            receipt.provider_resume().provider(),
+            ProviderResumeProvider::Grok
+        );
+        assert_eq!(
+            receipt.provider_resume().capture_source(),
+            ProviderResumeCaptureSource::Preassigned
+        );
+
+        let durable_files =
+            std::fs::read_dir(dir.path().join("data").join("provider_resume_receipts"))
+                .expect("durable receipt directory")
+                .filter_map(Result::ok)
+                .filter(|entry| {
+                    entry.path().extension().and_then(|value| value.to_str()) == Some("json")
+                })
+                .count();
+        assert_eq!(durable_files, 1);
+
+        let response = provider_create_session_response_with_receipt(
+            &AuthInfo::new(OPERATOR_SCOPES.to_vec()),
+            CreateSessionResponse {
+                launch_receipt: Some(LaunchReceipt::local(
+                    session.cwd.clone(),
+                    session.session_id.clone(),
+                    false,
+                )),
+                session: Some(session.clone()),
+                repo_theme: None,
+            },
+            Some(receipt.clone()),
+        );
+        let value = response_value(response).await;
+        assert_eq!(
+            value["launch_receipt"]["provider_resume"]["conversation_id"],
+            receipt
+                .provider_resume()
+                .conversation_id()
+                .expect("conversation id")
+        );
+
+        supervisor
+            .delete_session(&session.session_id, SessionDeleteMode::KillTmux)
+            .await
+            .expect("delete exact fixture tmux");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn provider_resume_integration_rejected_grok_never_persists_or_returns_success() {
+        let _env_lock = GROK_ENV_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .expect("Grok env lock");
+        let original = std::env::var_os(crate::launcher::SWIMMERS_GROK_BIN_ENV);
+        let _restore = EnvRestore {
+            key: crate::launcher::SWIMMERS_GROK_BIN_ENV,
+            value: original,
+        };
+        let dir = tempdir().expect("tempdir");
+        let fixture = dir.path().join("grok-reject-fixture");
+        std::fs::write(&fixture, "#!/bin/sh\nexit 29\n").expect("write fixture");
+        let mut permissions = std::fs::metadata(&fixture)
+            .expect("fixture metadata")
+            .permissions();
+        permissions.set_mode(0o700);
+        std::fs::set_permissions(&fixture, permissions).expect("fixture executable");
+        std::env::set_var(crate::launcher::SWIMMERS_GROK_BIN_ENV, &fixture);
+
+        let tmux_name = format!("swimmers-provider-reject-{}", uuid::Uuid::new_v4());
+        let _tmux_cleanup = TmuxCleanup {
+            name: tmux_name.clone(),
+        };
+        let config = Arc::new(Config::default());
+        let supervisor =
+            SessionSupervisor::new_with_provider_receipt_data_dir(config, dir.path().join("data"));
+        let error = supervisor
+            .create_session(
+                Some(tmux_name),
+                Some(dir.path().to_string_lossy().into_owned()),
+                Some(SpawnTool::Grok),
+                None,
+            )
+            .await
+            .expect_err("rejected Grok launch must fail");
+        assert!(
+            error
+                .to_string()
+                .contains("did not remain running long enough"),
+            "{error:#}"
+        );
+        let receipt_dir = dir.path().join("data").join("provider_resume_receipts");
+        let durable_files = std::fs::read_dir(receipt_dir)
+            .map(|entries| {
+                entries
+                    .filter_map(Result::ok)
+                    .filter(|entry| {
+                        entry.path().extension().and_then(|value| value.to_str()) == Some("json")
+                    })
+                    .count()
+            })
+            .unwrap_or(0);
+        assert_eq!(durable_files, 0);
+    }
 }
