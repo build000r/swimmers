@@ -1,0 +1,90 @@
+{
+  "proof_version": 1,
+  "bead_id": "swimmers-codex-app-server-thread-id-ur7q",
+  "criterion": "PC-SW-CODEX-1",
+  "status": "PASS",
+  "protocol_basis": {
+    "codex_cli_version": "0.145.0",
+    "transport": "stdio JSONL",
+    "sequence": [
+      "initialize request and response",
+      "initialized notification",
+      "thread/start with exact cwd and config",
+      "ThreadStartResponse.thread.id",
+      "matching thread/started thread.id",
+      "turn/start with initial prompt",
+      "matching turn/start response and turn/started notification",
+      "typed resumable receipt"
+    ],
+    "resume_argv_fixture": [
+      "codex",
+      "resume",
+      "thread-from-response"
+    ],
+    "resume_command_fixture": "codex resume thread-from-response",
+    "filesystem_session_inference": false
+  },
+  "failure_contract": {
+    "timeout": "typed Timeout with ProviderResumeCapability::Unknown",
+    "cancellation": "typed Cancelled with ProviderResumeCapability::Unknown",
+    "missing_thread": "typed MissingThread with ProviderResumeCapability::Unknown",
+    "response_notification_mismatch": "typed ThreadCorrelationMismatch with ProviderResumeCapability::Unknown",
+    "late_notification": "deadline remains authoritative and capability remains unknown",
+    "failed_child": "killed and reaped before error return",
+    "guessed_identity_allowed": false
+  },
+  "fixtures": {
+    "passed": 9,
+    "failed": 0,
+    "names": [
+      "parallel_starts_keep_exact_ids_cwds_and_configs",
+      "response_notification_mismatch_is_unknown",
+      "missing_thread_is_unknown",
+      "missing_notification_times_out_unknown",
+      "late_notification_cannot_restore_resumable_claim",
+      "cancellation_is_typed_and_unknown",
+      "turn_mismatch_blocks_launch_success",
+      "spawn_and_resume_argv_use_returned_thread_id",
+      "rejects_non_absolute_cwd_before_spawn"
+    ]
+  },
+  "validation_context": {
+    "reason": "integration leaf 7lir exclusively owns src/session/providers/mod.rs and src/session/mod.rs wiring",
+    "method": "commands ran in a git-archive validation mirror containing the two authorized Rust files plus temporary module exposure",
+    "production_shared_wiring_modified": false,
+    "resource_mitigation": {
+      "CARGO_BUILD_JOBS": "1",
+      "CARGO_PROFILE_TEST_DEBUG": "0"
+    }
+  },
+  "validations": [
+    {
+      "command": "cargo fmt --check",
+      "exit_code": 0
+    },
+    {
+      "command": "cargo test codex_app_server_provider -- --nocapture",
+      "exit_code": 0,
+      "tests_passed": 9,
+      "tests_failed": 0,
+      "filtered_out": 1406,
+      "duration_seconds": 0.1
+    },
+    {
+      "command": "cargo clippy -- -D warnings",
+      "exit_code": 0
+    }
+  ],
+  "artifacts": [
+    {
+      "path": "src/session/providers/codex_app_server.rs",
+      "lines": 834,
+      "sha256": "7815db5a3c6239afff517d62c56c2e8038396c5d1fd1c639cdc287e32e419465"
+    },
+    {
+      "path": "src/session/providers/tests/codex_app_server.rs",
+      "lines": 624,
+      "sha256": "bc00c46249960734d808ceec70358e45a2edf883cb9d9df99e41e6b88a7ffff3"
+    }
+  ]
+}
