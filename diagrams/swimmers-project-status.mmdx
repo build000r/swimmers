@@ -20,11 +20,11 @@
 flowchart LR
   vision["Vision: glanceable tmux aquarium, thought rail, and explicit remote cockpit"]:::gray
   runtime["GREEN Rust API, native TUI, browser cockpit, and Web CI gate are integrated"]:::green
-  beads["YELLOW merged Beads truth has 9 unresolved: 2 ready, 6 blocked, 1 in progress, no cycles"]:::yellow
+  beads["YELLOW Beads truth has 12 unresolved: 1 ready, 2 in progress, 9 blocked/dependent, no cycles"]:::yellow
   release["GREEN v0.3.0 tag and macOS-arm64 plus Linux prebuilt installer assets exist"]:::green
   remote["GREEN remote validation, isolated tmux targets, probe backoff, and crash evidence are integrated"]:::green
-  publishBlocked["YELLOW updated stack not live-published: auth/publish covered by swimmers-buildooor-mmdx-auth-refresh-e7jy and swimmers-buildooor-status-link-republish-ygjl"]:::yellow
-  hardening["YELLOW tmux crash-resilience epic remains in progress: swimmers-tmux-crash-resilience-lla5"]:::yellow
+  publish["GREEN Buildooor status short link republished in place with live_verification=OK"]:::green
+  provider["YELLOW provider-resume launch/receipt epic in progress: swimmers-provider-resume-launch-cleanup-y2qz"]:::yellow
   browser["YELLOW browser harness remains ready: swimmers-0qfm"]:::yellow
   proofLink["Open proof status"]:::gray
   flowsLink["Open primary flows"]:::gray
@@ -35,11 +35,11 @@ flowchart LR
   erdLink["Open ERD"]:::gray
   nextLink["Open next move"]:::gray
 
-  vision --> runtime --> beads --> release --> remote --> publishBlocked
-  remote --> hardening
+  vision --> runtime --> beads --> release --> remote --> publish
+  remote --> provider
   runtime --> browser
-  publishBlocked --> nextLink
-  hardening --> nextLink
+  publish --> nextLink
+  provider --> nextLink
   browser --> nextLink
   runtime --> proofLink
   vision --> flowsLink
@@ -58,19 +58,19 @@ flowchart LR
 ## chart epic-gantt Swimmers Epic Status
 ```mermaid
 gantt
-  title swimmers status as of 2026-07-15
+  title swimmers status as of 2026-07-26
   dateFormat YYYY-MM-DD
   section GREEN Proven
   GREEN token-safe live proof and release docs landed :done, 2026-06-21, 1d
   GREEN Web CI gate validated :done, 2026-07-04, 1d
   GREEN isolated tmux targets and crash hardening landed :done, 2026-07-06, 1d
+  GREEN Buildooor auth refresh and status short-link republish :done, 2026-07-26, 1d
   section YELLOW Bead-Covered Gaps
-  YELLOW finish tmux crash-resilience epic swimmers-tmux-crash-resilience-lla5 :active, 2026-07-06, 10d
-  YELLOW restore Buildooor status publish auth swimmers-buildooor-mmdx-auth-refresh-e7jy :active, 2026-07-15, 1d
-  YELLOW republish and refresh status stack swimmers-buildooor-status-link-republish-ygjl :active, 2026-07-15, 1d
-  YELLOW add browser harness swimmers-0qfm :active, 2026-07-15, 1d
+  YELLOW provider-resume launch receipt epic swimmers-provider-resume-launch-cleanup-y2qz :active, 2026-07-26, 7d
+  YELLOW final no-ragrets acceptance swimmers-final-release-status-acceptance-ui1s :active, 2026-07-26, 1d
+  YELLOW add browser harness swimmers-0qfm :active, 2026-07-15, 12d
   section GRAY Not Reproved This Pass
-  GRAY interactive TUI and live cockpit probes are outside this git reconcile :active, 2026-07-15, 1d
+  GRAY interactive TUI and live cockpit probes are outside this proof closeout :active, 2026-07-26, 1d
 ```
 
 ## chart epic-map Swimmers Dependency Map
@@ -83,13 +83,14 @@ flowchart TD
   release["GREEN DONE v0.3.0 installer and macOS-arm64 plus Linux assets"]:::green
   remote["GREEN DONE remote validation, isolated tmux targets, and probe backoff"]:::green
   webci["GREEN DONE bounded Web CI test and build gate"]:::green
-  status["YELLOW Buildooor auth, republish, refresh, and final acceptance remain Bead-covered"]:::yellow
+  status["GREEN DONE Buildooor auth, in-place republish, and status stack refresh path"]:::green
+  provider["YELLOW provider-resume launch/receipt epic remains open: swimmers-provider-resume-launch-cleanup-y2qz"]:::yellow
   browser["YELLOW browser harness blocks remaining visual interaction work: swimmers-0qfm"]:::yellow
 
   core --> tui --> web --> webci --> env
   core --> release --> remote --> status
   webci --> browser
-  browser --> status
+  core --> provider
 
   classDef green fill:#dff7df,stroke:#20833a,stroke-width:2px,color:#0f2f18
   classDef yellow fill:#fff3bf,stroke:#b7791f,stroke-width:2px,color:#3a2a00
@@ -189,17 +190,16 @@ flowchart LR
 ```mermaid
 flowchart TD
   docs["GREEN read AGENTS, README, VISION, proof docs, release doc, and existing stack"]:::green
-  beads["YELLOW merged tracker: 773 issues, 9 unresolved, 2 ready, 6 blocked, 1 in progress, 0 cycles"]:::yellow
-  history["GREEN local 147-commit line and 3 upstream commits are merged without history rewrite"]:::green
+  beads["YELLOW tracker: 796 issues, 12 unresolved, 1 ready, 2 in progress, 0 cycles"]:::yellow
+  history["GREEN local and origin histories reconciled without history rewrite"]:::green
   mmdx["GREEN MMDX preflight passes with 10 linked charts"]:::green
-  fmt["GREEN cargo fmt check passes after semantic conflict resolution"]:::green
-  tests["GREEN merged Rust, Web, CI clippy, docs, TUI, and operational dry-run validation passed"]:::green
-  publish["YELLOW Buildooor auth and in-place republish remain open: swimmers-buildooor-mmdx-auth-refresh-e7jy"]:::yellow
-  live["GRAY interactive TUI and live cockpit probes are outside this git-only reconcile"]:::gray
+  redgate["GREEN status-red-bead-coverage gate passes with 0 uncovered RED/GAP nodes"]:::green
+  auth["GREEN Buildooor MMDX auth via BUILDOOOR_ACCESS_TOKEN_COMMAND; mmd.py list as buildooor"]:::green
+  publish["GREEN short link republished: live_verification=OK"]:::green
+  live["GRAY interactive TUI and live cockpit probes are outside this proof closeout"]:::gray
 
-  docs --> beads --> history --> mmdx --> fmt --> tests
-  tests --> publish
-  tests --> live
+  docs --> beads --> history --> mmdx --> redgate --> auth --> publish
+  mmdx --> live
 
   classDef green fill:#dff7df,stroke:#20833a,stroke-width:2px,color:#0f2f18
   classDef yellow fill:#fff3bf,stroke:#b7791f,stroke-width:2px,color:#3a2a00
@@ -211,10 +211,10 @@ flowchart TD
 ```mermaid
 flowchart TD
   code["GREEN merged code contains local hardening plus upstream Web CI, isolated tmux, and review fixes"]:::green
-  beads["YELLOW tracker union preserves both histories and remains acyclic with 9 unresolved"]:::yellow
-  closed["GREEN token-safe auth transport, leak regression, and v0.3.0 release-doc drift are closed"]:::green
-  status["GREEN local status stack is reconciled to live 2026-07-15 repo and Beads truth"]:::green
-  publish["YELLOW public Buildooor short link remains blocked on auth and republish Beads"]:::yellow
+  beads["YELLOW tracker remains acyclic with 12 unresolved including provider-resume P0 epic"]:::yellow
+  closed["GREEN token-safe auth transport, leak regression, release-doc truth, and Buildooor publish are closed"]:::green
+  status["GREEN local status stack reconciled to live 2026-07-26 repo and Beads truth"]:::green
+  publish["GREEN public short link buildooor/swimmers-project-status is live"]:::green
   crates["GRAY crates.io publication remains planned, not claimed as shipped"]:::gray
 
   code --> beads --> status --> publish
@@ -230,15 +230,17 @@ flowchart TD
 ## chart next-move Swimmers Next Move
 ```mermaid
 flowchart TD
-  now["Crux: merged local code is current; remaining release-status work is operational proof and publication"]:::gray
-  merge["GREEN reconcile local and origin histories, preserve tracker union, and validate"]:::green
-  auth["YELLOW ready: refresh Buildooor MMDX auth; swimmers-buildooor-mmdx-auth-refresh-e7jy"]:::yellow
-  republish["YELLOW republish the existing short link in place; swimmers-buildooor-status-link-republish-ygjl"]:::yellow
-  refresh["YELLOW refresh public status and run final acceptance; swimmers-status-stack-refresh-after-proof-lon0"]:::yellow
-  browser["YELLOW independent ready move: add browser harness; swimmers-0qfm"]:::yellow
+  now["Crux: release/status proof chain is authenticated and published; finish acceptance then provider-resume"]:::gray
+  auth["GREEN Buildooor MMDX auth refreshed; swimmers-buildooor-mmdx-auth-refresh-e7jy"]:::green
+  republish["GREEN existing short link republished in place; swimmers-buildooor-status-link-republish-ygjl"]:::green
+  refresh["GREEN status stack refreshed from proof; swimmers-status-stack-refresh-after-proof-lon0"]:::green
+  accept["YELLOW next: final no-ragrets acceptance pass; swimmers-final-release-status-acceptance-ui1s"]:::yellow
+  provider["YELLOW parallel P0: provider-resume launch receipt epic; swimmers-provider-resume-launch-cleanup-y2qz"]:::yellow
+  browser["YELLOW independent ready move: browser harness; swimmers-0qfm"]:::yellow
 
-  now --> merge --> auth --> republish --> refresh
-  merge --> browser
+  now --> auth --> republish --> refresh --> accept
+  now --> provider
+  now --> browser
 
   classDef green fill:#dff7df,stroke:#20833a,stroke-width:2px,color:#0f2f18
   classDef yellow fill:#fff3bf,stroke:#b7791f,stroke-width:2px,color:#3a2a00
