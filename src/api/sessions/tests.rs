@@ -601,8 +601,22 @@ fn install_fake_tmux(script: &str) -> (TempDir, TestPathGuard) {
 const FAKE_TMUX_FOR_CREATE: &str = r##"#!/bin/sh
 set -eu
 cmd="${1-}"
+sessions="${0%/*}/sessions"
 case "$cmd" in
-  new-session|attach-session)
+  new-session)
+    previous=""
+    for arg in "$@"; do
+      if [ "$previous" = "-s" ]; then
+        printf '%s\n' "$arg" >> "$sessions"
+        break
+      fi
+      previous="$arg"
+    done
+    while IFS= read -r line; do
+      printf '%s\r\n' "$line"
+    done
+    ;;
+  attach-session)
     while IFS= read -r line; do
       printf '%s\r\n' "$line"
     done
@@ -622,7 +636,11 @@ case "$cmd" in
     printf 'captured pane\n'
     ;;
   list-sessions)
-    exit 0
+    if [ -f "$sessions" ]; then
+      while IFS= read -r name || [ -n "$name" ]; do
+        printf '4242\t$%s\t1700000000\t%s\n' "$name" "$name"
+      done < "$sessions"
+    fi
     ;;
 esac
 "##;

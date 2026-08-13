@@ -408,12 +408,25 @@ const ACTIVE_PANE_CACHE_TTL: Duration = Duration::from_millis(1000);
 
 impl SessionSupervisor {
     pub fn new(config: Arc<Config>) -> Arc<Self> {
-        let data_dir = crate::startup::resolve_data_dir();
-        Self::new_with_stores(
-            config,
-            ProviderReceiptStore::for_default_data_dir(),
-            data_dir.join(EXACT_CLEANUP_RECEIPT_DIR),
-        )
+        #[cfg(test)]
+        {
+            let data_dir =
+                std::env::temp_dir().join(format!("swimmers-supervisor-test-{}", Uuid::new_v4()));
+            return Self::new_with_stores(
+                config,
+                ProviderReceiptStore::new(data_dir.clone()),
+                data_dir.join(EXACT_CLEANUP_RECEIPT_DIR),
+            );
+        }
+        #[cfg(not(test))]
+        {
+            let data_dir = crate::startup::resolve_data_dir();
+            Self::new_with_stores(
+                config,
+                ProviderReceiptStore::for_default_data_dir(),
+                data_dir.join(EXACT_CLEANUP_RECEIPT_DIR),
+            )
+        }
     }
 
     #[cfg(test)]
