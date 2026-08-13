@@ -552,6 +552,9 @@ async fn codex_app_server_provider_turn_mismatch_blocks_launch_success() {
 
 #[tokio::test]
 async fn codex_app_server_provider_fixture_backed_resume_uses_returned_thread_after_termination() {
+    let _env_lock = crate::test_support::ENV_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let directory = tempfile::tempdir().expect("temp directory");
     let fake_codex = directory.path().join("fake-codex");
     std::fs::write(
