@@ -861,10 +861,8 @@ mod provider_resume_integration_tests {
     use serde_json::Value;
     use std::ffi::OsString;
     use std::os::unix::fs::PermissionsExt;
-    use std::sync::{Arc, Mutex, OnceLock};
+    use std::sync::Arc;
     use tempfile::tempdir;
-
-    static GROK_ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 
     struct EnvRestore {
         key: &'static str,
@@ -994,8 +992,7 @@ mod provider_resume_integration_tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn provider_resume_integration_grok_adapter_tmux_persistence_api_path() {
-        let _env_lock = GROK_ENV_LOCK
-            .get_or_init(|| Mutex::new(()))
+        let _env_lock = crate::test_support::ENV_LOCK
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         let original = std::env::var_os(crate::launcher::SWIMMERS_GROK_BIN_ENV);
@@ -1087,8 +1084,7 @@ mod provider_resume_integration_tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn exact_session_cleanup_provider_history_survives_tmux_kill_and_resume_is_available() {
-        let _env_lock = GROK_ENV_LOCK
-            .get_or_init(|| Mutex::new(()))
+        let _env_lock = crate::test_support::ENV_LOCK
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         let original = std::env::var_os(crate::launcher::SWIMMERS_GROK_BIN_ENV);
@@ -1260,8 +1256,7 @@ sleep 5
 
     #[tokio::test(flavor = "current_thread")]
     async fn exact_session_cleanup_stale_generation_cannot_kill_same_name_replacement() {
-        let _env_lock = GROK_ENV_LOCK
-            .get_or_init(|| Mutex::new(()))
+        let _env_lock = crate::test_support::ENV_LOCK
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         let original = std::env::var_os(crate::launcher::SWIMMERS_GROK_BIN_ENV);
@@ -1337,8 +1332,7 @@ sleep 5
 
     #[tokio::test(flavor = "current_thread")]
     async fn provider_resume_integration_rejected_grok_never_persists_or_returns_success() {
-        let _env_lock = GROK_ENV_LOCK
-            .get_or_init(|| Mutex::new(()))
+        let _env_lock = crate::test_support::ENV_LOCK
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         let original = std::env::var_os(crate::launcher::SWIMMERS_GROK_BIN_ENV);
