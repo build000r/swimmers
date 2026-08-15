@@ -1,0 +1,30 @@
+{
+  "protocol_version": "repo-validation-commands/v1",
+  "source": "Makefile tui-check + package.json test/typecheck",
+  "commands": [
+    {
+      "id": "tui-check",
+      "cwd": ".",
+      "command": "make tui-check",
+      "timeout_seconds": 300
+    },
+    {
+      "id": "test",
+      "cwd": ".",
+      "command": "npm test",
+      "timeout_seconds": 1800
+    },
+    {
+      "id": "typecheck",
+      "cwd": ".",
+      "command": "npm run typecheck",
+      "timeout_seconds": 300
+    },
+    {
+      "id": "diff-check",
+      "cwd": ".",
+      "command": "git diff --check",
+      "timeout_seconds": 300
+    }
+  ]
+}

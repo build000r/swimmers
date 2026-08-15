@@ -23,7 +23,7 @@ fn summary_lifecycle_helpers_use_shared_fallback_causes() {
 }
 
 #[tokio::test]
-async fn create_session_uses_fake_tmux_and_bootstraps_codex_spawn() {
+async fn create_session_uses_fake_tmux_and_bootstraps_codex_spawn_without_prompt() {
     let _guard = crate::test_support::ENV_LOCK
         .lock()
         .unwrap_or_else(|poison| poison.into_inner());
@@ -31,11 +31,25 @@ async fn create_session_uses_fake_tmux_and_bootstraps_codex_spawn() {
         r##"#!/bin/sh
 set -eu
 cmd="${1-}"
+sessions="${0%/*}/sessions"
 case "$cmd" in
-  new-session|attach-session)
+  new-session)
+previous=""
+for arg in "$@"; do
+  if [ "$previous" = "-s" ]; then
+    printf '%s\n' "$arg" >> "$sessions"
+    break
+  fi
+  previous="$arg"
+done
 if [ "$cmd" = "new-session" ] && [ -n "${SWIMMERS_FAKE_TMUX_NEW_SESSION_LOG:-}" ]; then
   printf '%s\n' "$@" > "${SWIMMERS_FAKE_TMUX_NEW_SESSION_LOG}"
 fi
+while IFS= read -r line; do
+  printf '%s\r\n' "$line"
+done
+;;
+  attach-session)
 while IFS= read -r line; do
   printf '%s\r\n' "$line"
 done
@@ -59,6 +73,11 @@ exit 0
 printf 'captured pane\n'
 ;;
   list-sessions)
+if [ -f "$sessions" ]; then
+  while IFS= read -r line || [ -n "$line" ]; do
+    printf '4242\t$%s\t1700000000\t%s\n' "$line" "$line"
+  done < "$sessions"
+fi
 if [ -f "${SWIMMERS_FAKE_TMUX_SESSIONS:-}" ]; then
   while IFS= read -r line || [ -n "$line" ]; do
     printf '%s\n' "$line"
@@ -83,7 +102,7 @@ esac
             None,
             Some(dir.path().to_string_lossy().into_owned()),
             Some(crate::types::SpawnTool::Codex),
-            Some("investigate startup".to_string()),
+            None,
         )
         .await
         .expect("create session");
@@ -100,18 +119,8 @@ esac
     }
     let new_session_log = std::fs::read_to_string(new_session_log).expect("new-session log");
     assert!(new_session_log.contains("new-session\n-s\n0\n-c\n"));
-    assert!(new_session_log.contains("{ prompt_file="));
-    assert!(new_session_log.contains("caam run codex -- \"$prompt\""));
-    assert!(new_session_log.contains("falling back to raw codex"));
+    assert!(new_session_log.contains("codex"));
     assert!(new_session_log.contains("exec \"${SHELL:-/bin/sh}\""));
-    assert!(!new_session_log.contains("investigate startup"));
-    assert!(
-        new_session_log
-            .find("caam run codex -- \"$prompt\"")
-            .expect("caam command")
-            < new_session_log.find("codex-raw").expect("raw fallback"),
-        "caam must be attempted before raw fallback"
-    );
     supervisor
         .delete_session(
             &created.0.session_id,

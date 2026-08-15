@@ -281,6 +281,7 @@ pub(super) struct ProviderReceiptStore {
 }
 
 impl ProviderReceiptStore {
+    #[cfg(not(test))]
     pub(super) fn for_default_data_dir() -> Self {
         Self::new(crate::startup::resolve_data_dir())
     }
