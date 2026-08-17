@@ -315,51 +315,393 @@ fn expand_group_dir_single_star_projects_skills() {
     assert!(results.iter().any(|p| p.ends_with("beta/skills")));
 }
 
-#[test]
-fn load_client_overlays_returns_none_when_clients_dir_is_missing() {
-    let tmp = tempfile::tempdir().expect("tempdir");
-    assert!(load_client_overlays(tmp.path()).is_none());
+// ---------------------------------------------------------------------------
+// Skillbox environment-inventory contract
+// ---------------------------------------------------------------------------
+
+fn json_string(raw: &str) -> String {
+    serde_json::to_string(raw).expect("json string")
+}
+
+/// Every field the contract must still promise, optionally dropping one to
+/// prove the loader notices.
+fn superseded_fields_json(dropped: Option<&str>) -> String {
+    let entries: Vec<String> = REQUIRED_SUPERSEDED_FIELDS
+        .iter()
+        .filter(|field| Some(**field) != dropped)
+        .map(|field| format!("{}:[\"contract.path\"]", json_string(field)))
+        .collect();
+    format!("{{{}}}", entries.join(","))
+}
+
+fn contract_document(clients: &str, repos: &str, sources: &str) -> String {
+    contract_document_with(r#"{"declared":{}}"#, clients, repos, sources, None)
+}
+
+fn contract_document_with(
+    machine: &str,
+    clients: &str,
+    repos: &str,
+    sources: &str,
+    dropped_field: Option<&str>,
+) -> String {
+    let fields = superseded_fields_json(dropped_field);
+    format!(
+        r#"{{"contract":"{INVENTORY_CONTRACT}","schema_version":"{INVENTORY_SCHEMA_VERSION}",
+           "machine":{machine},"clients":{clients},"repos":{repos},"sources":{sources},
+           "readiness":{{"status":"ready"}},"freshness":{{"observed":false}},"recovery":[],
+           "supersedes":{{"consumer":"swimmers","fields":{fields}}}}}"#
+    )
+}
+
+fn load_contract(document: &str) -> Result<LoadedInventory, ContractUnavailable> {
+    parse_inventory_json(document, "test-contract")?.into_payload()
+}
+
+/// Full happy path: parse, verify the contract still promises what we deleted
+/// our parser for, then project clients.
+fn contract_clients(document: &str) -> Vec<ClientOverlay> {
+    let payload = load_contract(document).expect("payload");
+    payload.verify_contract_version().expect("schema version");
+    payload.verify_supersedes().expect("supersedes");
+    payload.build_client_overlays()
 }
 
 #[test]
-fn load_client_overlays_returns_empty_when_clients_dir_has_no_overlay_files() {
-    let tmp = tempfile::tempdir().expect("tempdir");
-    let clients_dir = tmp.path().join("clients");
-    std::fs::create_dir_all(clients_dir.join("empty-client")).expect("client dir");
-    std::fs::write(clients_dir.join("not-a-client"), "x").expect("file");
+fn contract_reports_not_built_instead_of_returning_none() {
+    let envelope = r#"{"ok":false,"action":"show","source":"cache","stale":false,
+        "cache_path":"/box/.skillbox-state/inventory/environment_inventory.json",
+        "inventory":null,"reason":"no cache written yet",
+        "next_actions":["python3 .env-manager/manage.py env-inventory refresh --format json"]}"#;
 
-    let clients = load_client_overlays(tmp.path()).expect("scan clients");
+    let err = load_contract(envelope).expect_err("cache miss must be typed");
 
-    assert!(clients.is_empty());
+    assert_eq!(err.code(), "CONTRACT_NOT_BUILT");
+    assert_eq!(
+        err.remedy().as_deref(),
+        Some("python3 .env-manager/manage.py env-inventory refresh --format json")
+    );
+    assert!(err.to_string().contains("no cache written yet"));
 }
 
 #[test]
-fn client_overlay_paths_are_sorted_by_client_dir() {
-    let root = PathBuf::from("/tmp/swimmers-overlay-sort");
-    let mut paths = vec![
-        (root.join("zeta"), root.join("zeta").join("overlay.yaml")),
-        (root.join("alpha"), root.join("alpha").join("overlay.yaml")),
-        (
-            root.join("middle"),
-            root.join("middle").join("overlay.yaml"),
-        ),
+fn contract_rejects_an_unknown_schema_version() {
+    let document =
+        contract_document("[]", "[]", "[]").replace(INVENTORY_SCHEMA_VERSION, "1999-01-01+v0");
+
+    let err = load_contract(&document)
+        .expect("payload")
+        .verify_contract_version()
+        .expect_err("schema mismatch must be typed");
+
+    assert_eq!(err.code(), "CONTRACT_SCHEMA_UNSUPPORTED");
+    assert!(err.to_string().contains("1999-01-01+v0"));
+}
+
+#[test]
+fn contract_rejects_a_supersedes_block_that_dropped_a_field_we_stopped_parsing() {
+    let document = contract_document_with(
+        r#"{"declared":{}}"#,
+        "[]",
+        "[]",
+        "[]",
+        Some("context.cwd_match"),
+    );
+
+    let err = load_contract(&document)
+        .expect("payload")
+        .verify_supersedes()
+        .expect_err("missing promise must be typed");
+
+    assert_eq!(err.code(), "CONTRACT_SUPERSEDES_INCOMPLETE");
+    assert!(err.to_string().contains("context.cwd_match"));
+}
+
+#[test]
+fn contract_treats_an_empty_supersedes_promise_as_missing() {
+    let document = contract_document("[]", "[]", "[]").replace(
+        &format!("{}:[\"contract.path\"]", json_string("client.label")),
+        &format!("{}:[]", json_string("client.label")),
+    );
+
+    let err = load_contract(&document)
+        .expect("payload")
+        .verify_supersedes()
+        .expect_err("empty promise must be typed");
+
+    assert!(err.to_string().contains("client.label"));
+}
+
+#[test]
+fn contract_unavailable_codes_are_distinct() {
+    let codes = [
+        ContractUnavailable::SkillboxRepoNotFound {
+            searched: Vec::new(),
+        },
+        ContractUnavailable::CommandUnavailable {
+            command: String::new(),
+            detail: String::new(),
+        },
+        ContractUnavailable::CommandFailed {
+            command: String::new(),
+            code: None,
+            detail: String::new(),
+        },
+        ContractUnavailable::MalformedPayload {
+            source: String::new(),
+            detail: String::new(),
+        },
+        ContractUnavailable::NotBuilt {
+            reason: String::new(),
+            next_action: None,
+        },
+        ContractUnavailable::SchemaUnsupported {
+            contract: String::new(),
+            schema_version: String::new(),
+        },
+        ContractUnavailable::SupersedesIncomplete {
+            consumer: String::new(),
+            missing: Vec::new(),
+        },
+        ContractUnavailable::NoClients {
+            schema_version: String::new(),
+        },
+    ]
+    .iter()
+    .map(ContractUnavailable::code)
+    .collect::<BTreeSet<_>>();
+
+    assert_eq!(codes.len(), 8, "every reason needs its own operator action");
+}
+
+#[test]
+fn contract_client_overlay_paths_skip_absent_and_pathless_sources() {
+    let sources = vec![
+        InventorySource {
+            kind: "client_overlay".to_string(),
+            client_id: Some("present".to_string()),
+            path: Some("/config/clients/present/overlay.yaml".to_string()),
+            present: true,
+        },
+        InventorySource {
+            kind: "client_overlay".to_string(),
+            client_id: Some("absent".to_string()),
+            path: Some("/config/clients/absent/overlay.yaml".to_string()),
+            present: false,
+        },
+        InventorySource {
+            kind: "client_overlay".to_string(),
+            client_id: Some("pathless".to_string()),
+            path: None,
+            present: true,
+        },
+        InventorySource {
+            kind: "machines".to_string(),
+            client_id: None,
+            path: Some("/config/machines.yaml".to_string()),
+            present: true,
+        },
     ];
 
-    sort_client_overlay_paths(&mut paths);
+    let paths = client_overlay_paths(&sources);
+
+    assert_eq!(paths.keys().copied().collect::<Vec<_>>(), vec!["present"]);
+    assert_eq!(
+        paths["present"],
+        PathBuf::from("/config/clients/present/overlay.yaml")
+    );
+}
+
+#[test]
+fn contract_repo_paths_translate_declared_roots_onto_this_machine() {
+    let repo = InventoryRepo {
+        repo_id: "sha256:deadbeef".to_string(),
+        declared: InventoryRepoDeclared {
+            path_declared: Some("/elsewhere/repos/widget".to_string()),
+            path_relative: Some("widget".to_string()),
+            root_category: Some("repos".to_string()),
+            ..InventoryRepoDeclared::default()
+        },
+        observed: None,
+    };
+    let roots = MachineRoots {
+        repos: vec!["/box/repos".to_string(), "/box/repos-alias".to_string()],
+        projects: vec!["/box/projects".to_string()],
+    };
 
     assert_eq!(
-        paths
-            .iter()
-            .map(|(client_dir, _)| {
-                client_dir
-                    .file_name()
-                    .expect("client dir name")
-                    .to_string_lossy()
-                    .into_owned()
-            })
-            .collect::<Vec<_>>(),
-        vec!["alpha", "middle", "zeta"]
+        repo_match_paths(&repo, &roots),
+        vec![
+            "/box/repos/widget".to_string(),
+            "/box/repos-alias/widget".to_string(),
+            "/elsewhere/repos/widget".to_string(),
+        ],
+        "root translation is Skillbox's job, and we must consume it"
     );
+}
+
+#[test]
+fn contract_repo_paths_prefer_the_observed_path_when_present() {
+    let repo = InventoryRepo {
+        repo_id: "sha256:deadbeef".to_string(),
+        declared: InventoryRepoDeclared {
+            path_declared: Some("~/repos/widget".to_string()),
+            path_relative: Some("widget".to_string()),
+            root_category: Some("repos".to_string()),
+            ..InventoryRepoDeclared::default()
+        },
+        observed: Some(InventoryRepoObserved {
+            path: Some("/box/repos/widget".to_string()),
+            present: true,
+        }),
+    };
+    let roots = MachineRoots {
+        repos: vec!["/box/repos".to_string()],
+        projects: Vec::new(),
+    };
+
+    assert_eq!(repo_match_paths(&repo, &roots)[0], "/box/repos/widget");
+    assert_eq!(
+        observed_repo_path(&repo).as_deref(),
+        Some("/box/repos/widget")
+    );
+}
+
+#[test]
+fn contract_repo_paths_ignore_an_observed_repo_that_is_not_present() {
+    let repo = InventoryRepo {
+        repo_id: "sha256:deadbeef".to_string(),
+        declared: InventoryRepoDeclared {
+            path_declared: Some("/elsewhere/widget".to_string()),
+            ..InventoryRepoDeclared::default()
+        },
+        observed: Some(InventoryRepoObserved {
+            path: Some("/box/repos/widget".to_string()),
+            present: false,
+        }),
+    };
+
+    assert_eq!(observed_repo_path(&repo), None);
+    assert_eq!(
+        repo_match_paths(&repo, &MachineRoots::default()),
+        vec!["/elsewhere/widget".to_string()]
+    );
+}
+
+#[test]
+fn contract_client_cwd_patterns_follow_match_then_scan_roots_then_landscape_repos() {
+    let clients = contract_clients(&contract_document(
+        r#"[{"client_id":"personal","declared":{"client_id":"personal","label":"Personal",
+             "cwd_match":["/box/repos/one"],"scan_roots":["/box/scan"],
+             "repo_ids":["sha256:aaa","sha256:bbb"],"plan_root":null,"plan_draft":null}}]"#,
+        r#"[{"repo_id":"sha256:aaa","declared":{"path_declared":"/box/landscape/alpha",
+             "declared_by":["client:personal.repo_landscape"]}},
+            {"repo_id":"sha256:bbb","declared":{"path_declared":"/box/repos/beta",
+             "declared_by":["client:personal.repos"]}}]"#,
+        "[]",
+    ));
+
+    assert_eq!(clients.len(), 1);
+    assert_eq!(clients[0].label, "Personal");
+    assert_eq!(clients[0].cwd_match_count, 1);
+    assert_eq!(
+        clients[0].cwd_patterns,
+        vec![
+            "/box/repos/one".to_string(),
+            "/box/scan".to_string(),
+            "/box/landscape/alpha".to_string(),
+        ],
+        "repos declared under client.repos[] are not cwd patterns"
+    );
+}
+
+#[test]
+fn contract_client_label_falls_back_to_the_declared_client_id() {
+    let clients = contract_clients(&contract_document(
+        r#"[{"client_id":"dir-name","declared":{"client_id":"declared-id","label":"  ",
+             "cwd_match":[],"scan_roots":[],"repo_ids":[]}}]"#,
+        "[]",
+        "[]",
+    ));
+
+    assert_eq!(clients[0].label, "declared-id");
+}
+
+#[test]
+fn contract_plan_dirs_resolve_against_the_client_overlay_directory() {
+    let clients = contract_clients(&contract_document(
+        r#"[{"client_id":"personal","declared":{"client_id":"personal","label":"Personal",
+             "cwd_match":[],"scan_roots":[],"repo_ids":[],
+             "plan_root":"plans/released","plan_draft":"plans/draft"}}]"#,
+        "[]",
+        r#"[{"kind":"client_overlay","client_id":"personal","present":true,
+             "path":"/config/clients/personal/overlay.yaml"}]"#,
+    ));
+
+    assert_eq!(
+        clients[0].plan_root,
+        Some(PathBuf::from("/config/clients/personal/plans/released"))
+    );
+    assert_eq!(
+        clients[0].plan_draft,
+        Some(PathBuf::from("/config/clients/personal/plans/draft"))
+    );
+}
+
+#[test]
+fn contract_plan_dirs_are_none_without_a_readable_client_overlay_source() {
+    let clients = contract_clients(&contract_document(
+        r#"[{"client_id":"personal","declared":{"client_id":"personal","label":"Personal",
+             "cwd_match":[],"scan_roots":[],"repo_ids":[],
+             "plan_root":"plans/released","plan_draft":"plans/draft"}}]"#,
+        "[]",
+        r#"[{"kind":"client_overlay","client_id":"personal","present":false,
+             "path":"/config/clients/personal/overlay.yaml"}]"#,
+    ));
+
+    assert_eq!(clients[0].plan_root, None);
+    assert_eq!(clients[0].plan_draft, None);
+    assert!(clients[0].dir_config.is_none());
+}
+
+#[test]
+fn contract_accepts_a_bare_inventory_document_as_well_as_the_cli_envelope() {
+    let payload = load_contract(&contract_document("[]", "[]", "[]")).expect("bare document");
+
+    assert_eq!(payload.source, "file");
+    assert!(!payload.stale);
+    assert_eq!(payload.facts().schema_version, INVENTORY_SCHEMA_VERSION);
+}
+
+#[test]
+fn contract_facts_carry_machine_identity_and_staleness_for_health() {
+    let document = format!(
+        r#"{{"ok":true,"source":"cache","stale":true,"inventory":{}}}"#,
+        contract_document_with(
+            r#"{"declared":{"machine_id":"mac-laptop","repo_roots":[],"projects_roots":[]},
+                "detection_source":"hostname"}"#,
+            "[]",
+            "[]",
+            "[]",
+            None,
+        )
+    );
+
+    let facts = load_contract(&document).expect("payload").facts();
+
+    assert_eq!(facts.source, "cache");
+    assert!(facts.stale, "staleness is reported, never blocking");
+    assert_eq!(facts.machine_id.as_deref(), Some("mac-laptop"));
+    assert_eq!(facts.detection_source.as_deref(), Some("hostname"));
+    assert_eq!(facts.readiness.as_deref(), Some("ready"));
+}
+
+#[test]
+fn contract_malformed_stdout_is_typed_rather_than_silent() {
+    let err = load_contract("not json at all").expect_err("garbage must be typed");
+
+    assert_eq!(err.code(), "CONTRACT_MALFORMED");
+    assert!(err.to_string().contains("test-contract"));
 }
 
 #[test]
@@ -549,6 +891,7 @@ fn all_launch_targets_preserves_first_client_order_and_first_duplicate() {
             ),
         ],
         loaded_at: Utc::now(),
+        contract: ContractFacts::default(),
     };
 
     let targets = overlay.all_launch_targets();
@@ -583,6 +926,7 @@ fn all_launch_targets_returns_empty_when_no_clients_have_dir_config() {
             fleet_presets: Vec::new(),
         }],
         loaded_at: Utc::now(),
+        contract: ContractFacts::default(),
     };
 
     assert!(overlay.all_launch_targets().is_empty());
@@ -608,6 +952,7 @@ fn find_dir_config_prefers_base_path_over_earlier_cwd_match() {
             test_dir_client("base-owner", owned_base, Vec::new(), true),
         ],
         loaded_at: Utc::now(),
+        contract: ContractFacts::default(),
     };
 
     let config = overlay
@@ -634,6 +979,7 @@ fn find_dir_config_falls_back_to_cwd_match() {
             true,
         )],
         loaded_at: Utc::now(),
+        contract: ContractFacts::default(),
     };
 
     let config = overlay
@@ -668,6 +1014,7 @@ fn find_dir_config_clients_without_dir_config_cannot_produce_fallback_config() {
             ),
         ],
         loaded_at: Utc::now(),
+        contract: ContractFacts::default(),
     };
 
     assert!(overlay.find_dir_config(&cwd.to_string_lossy()).is_none());
@@ -837,7 +1184,12 @@ fn append_scan_root_services_skips_dirs_already_seen_by_absolute_path() {
     }];
     let mut seen_dirs = BTreeSet::from([alpha_dir]);
 
-    append_scan_root_services(&mut services, &mut seen_dirs, &[external.clone()], &base);
+    append_scan_root_services(
+        &mut services,
+        &mut seen_dirs,
+        std::slice::from_ref(&external),
+        &base,
+    );
 
     assert_eq!(
         services
@@ -849,7 +1201,7 @@ fn append_scan_root_services_skips_dirs_already_seen_by_absolute_path() {
 }
 
 #[test]
-fn parse_client_overlay_adds_client_repos_to_dir_config_services() {
+fn contract_client_repos_become_dir_config_services() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let client_dir = tmp.path().join("clients").join("personal");
     std::fs::create_dir_all(&client_dir).expect("client dir");
@@ -863,29 +1215,14 @@ fn parse_client_overlay_adds_client_repos_to_dir_config_services() {
     let scanned_hard_repo = hard_root.join("pcbcd");
     std::fs::create_dir_all(scanned_hard_repo.join(".git")).expect("scanned hard repo");
     let overlay_path = client_dir.join("overlay.yaml");
+
+    // Only `dev_sanity` survives on disk: the client/context sections that used
+    // to live alongside it are now read from the contract.
     std::fs::write(
         &overlay_path,
         format!(
             r#"
 version: 1
-client:
-  id: personal
-  context:
-    cwd_match:
-      - {repo_base}
-    repo_landscape:
-      scan_roots:
-        - {hard_root}
-  repos:
-    - id: finalreceipts
-      kind: repo
-      repo_path: {repo_base}/finalreceipts
-    - id: sweet-potato-dupe
-      kind: repo
-      repo_path: {repo_base}/sweet-potato
-    - id: mmd-pcb
-      kind: repo
-      repo_path: {hard_repo}
 dev_sanity:
   services:
     base_path: {repo_base}
@@ -898,15 +1235,42 @@ dev_sanity:
       paths:
         - {repo_base}/finalreceipts
 "#,
-            hard_repo = hard_repo.display(),
-            hard_root = hard_root.display(),
             repo_base = repo_base.display()
         ),
     )
     .expect("write overlay");
 
-    let client = parse_client_overlay(&client_dir, &overlay_path).expect("parse overlay");
-    let config = client.dir_config.expect("dir config");
+    let clients = contract_clients(&contract_document(
+        &format!(
+            r#"[{{"client_id":"personal","declared":{{"client_id":"personal","label":"personal",
+                 "cwd_match":[{repo_base}],"scan_roots":[{hard_root}],
+                 "repo_ids":["sha256:aaa","sha256:bbb","sha256:ccc"]}}}}]"#,
+            repo_base = json_string(&repo_base.display().to_string()),
+            hard_root = json_string(&hard_root.display().to_string()),
+        ),
+        &format!(
+            r#"[{{"repo_id":"sha256:aaa","declared":{{"registry_id":"finalreceipts","kind":"repo",
+                 "path_declared":{finalreceipts},"declared_by":["client:personal.repos"]}}}},
+                {{"repo_id":"sha256:bbb","declared":{{"registry_id":"sweet-potato-dupe","kind":"repo",
+                 "path_declared":{sweet_potato},"declared_by":["client:personal.repos"]}}}},
+                {{"repo_id":"sha256:ccc","declared":{{"registry_id":"mmd-pcb","kind":"repo",
+                 "path_declared":{hard_repo},"declared_by":["client:personal.repos"]}}}}]"#,
+            finalreceipts = json_string(&repo_base.join("finalreceipts").display().to_string()),
+            sweet_potato = json_string(&repo_base.join("sweet-potato").display().to_string()),
+            hard_repo = json_string(&hard_repo.display().to_string()),
+        ),
+        &format!(
+            r#"[{{"kind":"client_overlay","client_id":"personal","present":true,"path":{path}}}]"#,
+            path = json_string(&overlay_path.display().to_string()),
+        ),
+    ));
+
+    let config = clients
+        .into_iter()
+        .next()
+        .expect("client")
+        .dir_config
+        .expect("dir config");
     let service_dirs: Vec<&str> = config
         .services
         .iter()
@@ -934,7 +1298,26 @@ dev_sanity:
 }
 
 #[test]
-fn parse_client_overlay_keeps_harmless_fleet_lens_presets() {
+fn contract_client_repos_skip_non_repo_kinds() {
+    let entry = service_entry_from_client_repo(
+        &InventoryRepo {
+            repo_id: "sha256:aaa".to_string(),
+            declared: InventoryRepoDeclared {
+                registry_id: Some("docs".to_string()),
+                kind: Some("notes".to_string()),
+                path_declared: Some("/box/repos/docs".to_string()),
+                ..InventoryRepoDeclared::default()
+            },
+            observed: None,
+        },
+        Path::new("/box/repos"),
+    );
+
+    assert!(entry.is_none());
+}
+
+#[test]
+fn contract_client_keeps_harmless_fleet_lens_presets() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let client_dir = tmp.path().join("clients").join("personal");
     std::fs::create_dir_all(&client_dir).expect("client dir");
@@ -946,11 +1329,6 @@ fn parse_client_overlay_keeps_harmless_fleet_lens_presets() {
         format!(
             r#"
 version: 1
-client:
-  id: personal
-  context:
-    cwd_match:
-      - {repo_base}
 dev_sanity:
   fleet_lenses:
     - id: swimmers-on-devbox
@@ -969,7 +1347,17 @@ dev_sanity:
     )
     .expect("write overlay");
 
-    let client = parse_client_overlay(&client_dir, &overlay_path).expect("parse overlay");
+    let clients = contract_clients(&contract_document(
+        r#"[{"client_id":"personal","declared":{"client_id":"personal","label":"personal",
+             "cwd_match":[],"scan_roots":[],"repo_ids":[]}}]"#,
+        "[]",
+        &format!(
+            r#"[{{"kind":"client_overlay","client_id":"personal","present":true,"path":{path}}}]"#,
+            path = json_string(&overlay_path.display().to_string()),
+        ),
+    ));
+
+    let client = clients.into_iter().next().expect("client");
     assert_eq!(client.fleet_presets.len(), 1);
     assert_eq!(client.fleet_presets[0].id, "swimmers-on-devbox");
     assert_eq!(client.fleet_presets[0].label, "Swimmers on devbox");
@@ -1017,6 +1405,7 @@ fn list_all_plans_sorts_by_mtime_desc() {
     let overlay = SkillboxOverlay {
         clients: vec![client],
         loaded_at: Utc::now(),
+        contract: ContractFacts::default(),
     };
     let plans = overlay.list_all_plans();
     assert_eq!(
@@ -1065,6 +1454,7 @@ fn list_all_plans_breaks_equal_mtime_ties_deterministically() {
             },
         ],
         loaded_at: Utc::now(),
+        contract: ContractFacts::default(),
     };
 
     let plans = overlay.list_all_plans();
@@ -1104,6 +1494,7 @@ fn list_all_plans_skips_archived_and_missing_schema() {
     let overlay = SkillboxOverlay {
         clients: vec![client],
         loaded_at: Utc::now(),
+        contract: ContractFacts::default(),
     };
     let plans = overlay.list_all_plans();
     assert_eq!(plans.len(), 1);
@@ -1146,6 +1537,7 @@ fn overlay_health_reports_load_age_and_remote_target_count_without_probe() {
     let overlay = SkillboxOverlay {
         clients: vec![client],
         loaded_at: Utc::now() - chrono::Duration::seconds(1),
+        contract: ContractFacts::default(),
     };
 
     let health = overlay.health_snapshot();
@@ -1194,6 +1586,7 @@ fn find_plan_dirs_overlay_with_clients(clients: Vec<ClientOverlay>) -> SkillboxO
     SkillboxOverlay {
         clients,
         loaded_at: Utc::now(),
+        contract: ContractFacts::default(),
     }
 }
 
@@ -1336,4 +1729,38 @@ fn find_plan_dirs_returns_none_when_no_plan_paths_configured() {
     let client = make_plan_client(vec![cwd.clone()], 1, None, None);
     let overlay = find_plan_dirs_overlay(client);
     assert!(overlay.find_plan_dirs(&cwd).is_none());
+}
+
+/// End-to-end check against the real Skillbox checkout on this box.
+///
+/// Ignored by default: it shells out to `manage.py env-inventory show --cached`,
+/// so it only means anything where Skillbox is actually installed and its cache
+/// has been built. Run with
+/// `cargo test session::overlay -- --ignored --nocapture`.
+#[test]
+#[ignore = "requires a local skillbox checkout with a built inventory cache"]
+fn live_contract_loads_clients_from_the_skillbox_cli() {
+    let overlay = match default_overlay_result() {
+        Ok(overlay) => overlay,
+        Err(unavailable) => panic!("[{}] {unavailable}", unavailable.code()),
+    };
+    let facts = overlay.contract();
+
+    assert_eq!(facts.schema_version, INVENTORY_SCHEMA_VERSION);
+    assert!(
+        !overlay.all_launch_targets().is_empty(),
+        "a live contract should still yield launch targets from dev_sanity"
+    );
+    println!(
+        "contract source={} stale={} observed={} machine={:?} detection={:?} readiness={:?} \
+         launch_targets={} plans={}",
+        facts.source,
+        facts.stale,
+        facts.observed,
+        facts.machine_id,
+        facts.detection_source,
+        facts.readiness,
+        overlay.all_launch_targets().len(),
+        overlay.list_all_plans().len(),
+    );
 }

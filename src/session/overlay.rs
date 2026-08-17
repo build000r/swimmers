@@ -1,7 +1,9 @@
 use std::collections::{BTreeMap, BTreeSet};
+use std::io::Read;
 use std::path::{Component, Path, PathBuf};
+use std::process::{Command, Stdio};
 use std::sync::OnceLock;
-use std::time::SystemTime;
+use std::time::{Duration, Instant, SystemTime};
 
 use chrono::{DateTime, Utc};
 use serde::Deserialize;
@@ -13,33 +15,182 @@ use crate::types::{
 
 /// Cached skillbox overlay, loaded once from disk.
 pub fn default_overlay() -> Option<&'static SkillboxOverlay> {
-    static OVERLAY: OnceLock<Option<SkillboxOverlay>> = OnceLock::new();
+    default_overlay_result().ok()
+}
+
+/// Loaded overlay, or the typed reason the Skillbox contract could not be read.
+///
+/// Callers that need to explain themselves — API errors, health details — must
+/// use this instead of `default_overlay()`. The `None` from `default_overlay()`
+/// exists only so long-standing call sites keep compiling.
+pub fn default_overlay_result() -> Result<&'static SkillboxOverlay, &'static ContractUnavailable> {
+    static OVERLAY: OnceLock<Result<SkillboxOverlay, ContractUnavailable>> = OnceLock::new();
     OVERLAY.get_or_init(SkillboxOverlay::load).as_ref()
 }
 
 pub fn default_overlay_health() -> DependencyHealthSnapshot {
     let now = Utc::now();
-    default_overlay().map_or_else(
-        || DependencyHealthSnapshot::unavailable(now, "skillbox overlay unavailable"),
-        SkillboxOverlay::health_snapshot,
-    )
+    match default_overlay_result() {
+        Ok(overlay) => overlay.health_snapshot(),
+        Err(unavailable) => DependencyHealthSnapshot::unavailable(now, unavailable.to_string())
+            .with_detail("contract_status", unavailable.code()),
+    }
 }
 
 pub fn remote_targets_health() -> DependencyHealthSnapshot {
     let now = Utc::now();
-    default_overlay().map_or_else(
-        || {
-            DependencyHealthSnapshot::unknown(now)
-                .with_detail("configured_targets", "unknown")
-                .with_detail("probe", "overlay_unavailable")
-        },
-        SkillboxOverlay::remote_targets_health_snapshot,
-    )
+    match default_overlay_result() {
+        Ok(overlay) => overlay.remote_targets_health_snapshot(),
+        Err(unavailable) => DependencyHealthSnapshot::unknown(now)
+            .with_detail("configured_targets", "unknown")
+            .with_detail("probe", "contract_unavailable")
+            .with_detail("contract_status", unavailable.code()),
+    }
 }
 
 pub struct SkillboxOverlay {
     clients: Vec<ClientOverlay>,
     loaded_at: DateTime<Utc>,
+    contract: ContractFacts,
+}
+
+/// Contract-level facts worth reporting even when every client parses cleanly.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ContractFacts {
+    /// `schema_version` the payload was produced under.
+    pub schema_version: String,
+    /// `"cache"`, `"build"` (CLI) or `"file"` (explicit override).
+    pub source: String,
+    /// True when the cached projection is past its TTL. Never blocks a read.
+    pub stale: bool,
+    /// True when the payload carries `observed` presence facts.
+    pub observed: bool,
+    /// Which machine Skillbox resolved this box to.
+    pub machine_id: Option<String>,
+    /// How that machine was identified (`explicit`, `env`, `hostname`, `none`).
+    pub detection_source: Option<String>,
+    /// `ready` / `degraded` / `unconfigured`.
+    pub readiness: Option<String>,
+}
+
+/// Why the Skillbox `env-inventory` contract could not be consumed.
+///
+/// Every variant is a distinct operator action, which is the point: the old
+/// loader collapsed all of these into `None` and left the message
+/// "no skillbox-config overlay is available" as the only trace.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ContractUnavailable {
+    /// No Skillbox checkout carrying `.env-manager/manage.py` was found.
+    SkillboxRepoNotFound { searched: Vec<String> },
+    /// The contract CLI could not be spawned at all.
+    CommandUnavailable { command: String, detail: String },
+    /// The CLI ran and failed in a way the contract does not define.
+    CommandFailed {
+        command: String,
+        code: Option<i32>,
+        detail: String,
+    },
+    /// The CLI answered, but not with the documented envelope.
+    MalformedPayload { source: String, detail: String },
+    /// `ok: false` — the cache has never been written under this schema.
+    NotBuilt {
+        reason: String,
+        next_action: Option<String>,
+    },
+    /// The payload is some other contract, or a schema this build cannot read.
+    SchemaUnsupported {
+        contract: String,
+        schema_version: String,
+    },
+    /// `supersedes.fields` no longer promises a fact Swimmers stopped parsing.
+    SupersedesIncomplete {
+        consumer: String,
+        missing: Vec<String>,
+    },
+    /// The contract parsed but declares no clients.
+    NoClients { schema_version: String },
+}
+
+impl ContractUnavailable {
+    /// Stable machine-readable discriminator for API errors and health details.
+    pub fn code(&self) -> &'static str {
+        match self {
+            Self::SkillboxRepoNotFound { .. } => "SKILLBOX_REPO_NOT_FOUND",
+            Self::CommandUnavailable { .. } => "CONTRACT_COMMAND_UNAVAILABLE",
+            Self::CommandFailed { .. } => "CONTRACT_COMMAND_FAILED",
+            Self::MalformedPayload { .. } => "CONTRACT_MALFORMED",
+            Self::NotBuilt { .. } => "CONTRACT_NOT_BUILT",
+            Self::SchemaUnsupported { .. } => "CONTRACT_SCHEMA_UNSUPPORTED",
+            Self::SupersedesIncomplete { .. } => "CONTRACT_SUPERSEDES_INCOMPLETE",
+            Self::NoClients { .. } => "CONTRACT_NO_CLIENTS",
+        }
+    }
+
+    /// The one command that most plausibly clears this state.
+    pub fn remedy(&self) -> Option<String> {
+        match self {
+            Self::SkillboxRepoNotFound { .. } => {
+                Some("set SWIMMERS_SKILLBOX_REPO to a skillbox checkout".to_string())
+            }
+            Self::CommandUnavailable { .. } => {
+                Some("set SWIMMERS_SKILLBOX_PYTHON to a python3 interpreter".to_string())
+            }
+            Self::NotBuilt { next_action, .. } => next_action.clone().or_else(|| {
+                Some(format!(
+                    "{INVENTORY_CLI_SCRIPT} env-inventory refresh --format json"
+                ))
+            }),
+            Self::CommandFailed { .. }
+            | Self::MalformedPayload { .. }
+            | Self::SchemaUnsupported { .. }
+            | Self::SupersedesIncomplete { .. }
+            | Self::NoClients { .. } => None,
+        }
+    }
+}
+
+impl std::fmt::Display for ContractUnavailable {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "skillbox {INVENTORY_CONTRACT} unavailable: ")?;
+        match self {
+            Self::SkillboxRepoNotFound { searched } => write!(
+                f,
+                "no skillbox checkout with {INVENTORY_CLI_SCRIPT} (looked in {})",
+                searched.join(", ")
+            ),
+            Self::CommandUnavailable { command, detail } => {
+                write!(f, "could not run `{command}` ({detail})")
+            }
+            Self::CommandFailed {
+                command,
+                code,
+                detail,
+            } => {
+                let code = code.map_or_else(|| "signal".to_string(), |code| code.to_string());
+                write!(f, "`{command}` exited {code} ({detail})")
+            }
+            Self::MalformedPayload { source, detail } => {
+                write!(f, "{source} is not the documented envelope ({detail})")
+            }
+            Self::NotBuilt { reason, .. } => write!(f, "cache not built yet ({reason})"),
+            Self::SchemaUnsupported {
+                contract,
+                schema_version,
+            } => write!(
+                f,
+                "got contract '{contract}' schema '{schema_version}', expected \
+                 '{INVENTORY_CONTRACT}' schema '{INVENTORY_SCHEMA_VERSION}'"
+            ),
+            Self::SupersedesIncomplete { consumer, missing } => write!(
+                f,
+                "supersedes.fields for consumer '{consumer}' no longer covers: {}",
+                missing.join(", ")
+            ),
+            Self::NoClients { schema_version } => {
+                write!(f, "schema '{schema_version}' declares no clients")
+            }
+        }
+    }
 }
 
 /// A service entry declared in the overlay's `dev_sanity.services` section.
@@ -147,28 +298,57 @@ struct ClientOverlay {
 }
 
 impl SkillboxOverlay {
-    fn load() -> Option<Self> {
-        let config_root = resolve_skillbox_config_root()?;
-        let clients = load_client_overlays(&config_root)?;
+    fn load() -> Result<Self, ContractUnavailable> {
+        let envelope = load_inventory_envelope()?;
+        let payload = envelope.into_payload()?;
+        payload.verify_contract_version()?;
+        payload.verify_supersedes()?;
+
+        let clients = payload.build_client_overlays();
         if clients.is_empty() {
-            None
-        } else {
-            Some(Self {
-                clients,
-                loaded_at: Utc::now(),
-            })
+            return Err(ContractUnavailable::NoClients {
+                schema_version: payload.inventory.schema_version.clone(),
+            });
         }
+        Ok(Self {
+            clients,
+            loaded_at: Utc::now(),
+            contract: payload.facts(),
+        })
+    }
+
+    /// Contract provenance for this load — schema, source, staleness, machine.
+    pub fn contract(&self) -> &ContractFacts {
+        &self.contract
     }
 
     pub fn health_snapshot(&self) -> DependencyHealthSnapshot {
         let now = Utc::now();
-        DependencyHealthSnapshot::healthy(now)
+        let snapshot = DependencyHealthSnapshot::healthy(now)
             .with_last_seen(self.loaded_at)
             .with_detail("client_count", self.clients.len().to_string())
             .with_detail(
                 "launch_target_count",
                 self.all_launch_targets().len().to_string(),
             )
+            .with_detail(
+                "contract_schema_version",
+                self.contract.schema_version.clone(),
+            )
+            .with_detail("contract_source", self.contract.source.clone())
+            .with_detail("contract_stale", self.contract.stale.to_string())
+            .with_detail("contract_observed", self.contract.observed.to_string());
+        with_optional_details(
+            snapshot,
+            [
+                ("machine_id", self.contract.machine_id.as_deref()),
+                (
+                    "machine_detection",
+                    self.contract.detection_source.as_deref(),
+                ),
+                ("contract_readiness", self.contract.readiness.as_deref()),
+            ],
+        )
     }
 
     pub fn remote_targets_health_snapshot(&self) -> DependencyHealthSnapshot {
@@ -295,6 +475,21 @@ impl SkillboxOverlay {
     }
 }
 
+fn with_optional_details<'a, I>(
+    snapshot: DependencyHealthSnapshot,
+    details: I,
+) -> DependencyHealthSnapshot
+where
+    I: IntoIterator<Item = (&'a str, Option<&'a str>)>,
+{
+    details
+        .into_iter()
+        .filter_map(|(key, value)| value.map(|value| (key, value)))
+        .fold(snapshot, |snapshot, (key, value)| {
+            snapshot.with_detail(key, value)
+        })
+}
+
 fn compare_overlay_plan_entries(a: &OverlayPlanEntry, b: &OverlayPlanEntry) -> std::cmp::Ordering {
     a.client_label
         .cmp(&b.client_label)
@@ -353,53 +548,6 @@ fn client_matches_cwd_patterns(client: &ClientOverlay, cwd_normalized: &str) -> 
         .cwd_patterns
         .iter()
         .any(|pattern| cwd_starts_with(cwd_normalized, pattern))
-}
-
-fn load_client_overlays(config_root: &Path) -> Option<Vec<ClientOverlay>> {
-    let clients_dir = config_root.join("clients");
-    if !clients_dir.is_dir() {
-        return None;
-    }
-
-    client_overlay_paths(&clients_dir).map(|paths| {
-        paths
-            .into_iter()
-            .filter_map(|(client_dir, overlay_path)| {
-                parse_client_overlay(&client_dir, &overlay_path)
-            })
-            .collect()
-    })
-}
-
-fn client_overlay_paths(clients_dir: &Path) -> Option<Vec<(PathBuf, PathBuf)>> {
-    let entries = std::fs::read_dir(clients_dir).ok()?;
-    let mut paths = Vec::new();
-    for entry in entries.flatten() {
-        let client_dir = entry.path();
-        if let Some(overlay_path) = overlay_file_in_client_dir(&client_dir) {
-            paths.push((client_dir, overlay_path));
-        }
-    }
-    sort_client_overlay_paths(&mut paths);
-    Some(paths)
-}
-
-fn overlay_file_in_client_dir(client_dir: &Path) -> Option<PathBuf> {
-    if !client_dir.is_dir() {
-        return None;
-    }
-    let overlay_path = client_dir.join("overlay.yaml");
-    overlay_path.is_file().then_some(overlay_path)
-}
-
-fn sort_client_overlay_paths(paths: &mut [(PathBuf, PathBuf)]) {
-    paths.sort_by(
-        |(left_client, left_overlay), (right_client, right_overlay)| {
-            left_client
-                .cmp(right_client)
-                .then_with(|| left_overlay.cmp(right_overlay))
-        },
-    );
 }
 
 fn client_display_label(client: &ClientOverlay) -> String {
@@ -495,69 +643,680 @@ fn plan_dir_latest_mtime(dir: &Path) -> Option<SystemTime> {
 }
 
 // ---------------------------------------------------------------------------
-// Overlay YAML parsing (minimal — only extract what we need)
+// Skillbox environment-inventory contract
+//
+// Skillbox owns machine/client/repo intent and the root translation that turns
+// `~/repos/foo` into wherever that repo actually lives on this box. Everything
+// this section reads is a field `supersedes.fields` names explicitly; Swimmers
+// no longer globs `clients/*/overlay.yaml` nor parses `client.*` / `context.*`.
+// The one thing still parsed privately is `dev_sanity`, which is launch config
+// (and credential-adjacent) rather than environment inventory.
+// ---------------------------------------------------------------------------
+
+const INVENTORY_CONTRACT: &str = "skillbox.environment_inventory";
+const INVENTORY_SCHEMA_VERSION: &str = "2026-07-25+environment_inventory.v1";
+const INVENTORY_CONSUMER: &str = "swimmers";
+const INVENTORY_CLI_SCRIPT: &str = ".env-manager/manage.py";
+/// `show --cached` reports a cache miss as exit 4 (drift), which is a normal
+/// answer carrying a payload — not a failure.
+const INVENTORY_CLI_DRIFT_EXIT: i32 = 4;
+const INVENTORY_CLI_TIMEOUT: Duration = Duration::from_secs(20);
+
+/// Every `supersedes.fields` key Swimmers relies on. Each one names a fact this
+/// module used to derive by parsing skillbox-config directly; if the contract
+/// ever stops promising one, we must fail loudly rather than silently read a
+/// field that no longer means what it meant.
+const REQUIRED_SUPERSEDED_FIELDS: &[&str] = &[
+    "<derived> repo exists on this box",
+    "<derived> repo root translation",
+    "<derived> which machine am I",
+    "<discovery> clients/*/overlay.yaml glob",
+    "client.id",
+    "client.label",
+    "client.repos[].id",
+    "client.repos[].kind",
+    "client.repos[].repo_path",
+    "context.cwd_match",
+    "context.plans.plan_draft",
+    "context.plans.plan_root",
+    "context.repo_landscape.repos[].path",
+    "context.repo_landscape.scan_roots",
+];
+
+#[derive(Debug, Deserialize)]
+struct InventoryEnvelope {
+    #[serde(default)]
+    ok: bool,
+    #[serde(default)]
+    source: Option<String>,
+    #[serde(default)]
+    stale: bool,
+    #[serde(default)]
+    cache_path: Option<String>,
+    #[serde(default)]
+    reason: Option<String>,
+    #[serde(default)]
+    inventory: Option<Inventory>,
+    #[serde(default)]
+    next_actions: Vec<String>,
+}
+
+/// An envelope whose `inventory` is known to be present.
+#[derive(Debug)]
+struct LoadedInventory {
+    inventory: Inventory,
+    source: String,
+    stale: bool,
+}
+
+impl InventoryEnvelope {
+    fn into_payload(self) -> Result<LoadedInventory, ContractUnavailable> {
+        let source = self.source.unwrap_or_else(|| "unknown".to_string());
+        match self.inventory.filter(|_| self.ok) {
+            Some(inventory) => Ok(LoadedInventory {
+                inventory,
+                source,
+                stale: self.stale,
+            }),
+            None => Err(ContractUnavailable::NotBuilt {
+                reason: self.reason.unwrap_or_else(|| {
+                    self.cache_path.map_or_else(
+                        || "no inventory in payload".to_string(),
+                        |path| format!("no cache at {path}"),
+                    )
+                }),
+                next_action: self.next_actions.into_iter().next(),
+            }),
+        }
+    }
+}
+
+#[derive(Debug, Deserialize, Default)]
+struct Inventory {
+    #[serde(default)]
+    contract: String,
+    #[serde(default)]
+    schema_version: String,
+    #[serde(default)]
+    machine: InventoryMachine,
+    #[serde(default)]
+    clients: Vec<InventoryClient>,
+    #[serde(default)]
+    repos: Vec<InventoryRepo>,
+    #[serde(default)]
+    sources: Vec<InventorySource>,
+    #[serde(default)]
+    supersedes: InventorySupersedes,
+    #[serde(default)]
+    readiness: InventoryReadiness,
+    #[serde(default)]
+    freshness: InventoryFreshness,
+}
+
+#[derive(Debug, Deserialize, Default)]
+struct InventoryMachine {
+    #[serde(default)]
+    declared: InventoryMachineDeclared,
+    #[serde(default)]
+    detection_source: Option<String>,
+}
+
+#[derive(Debug, Deserialize, Default)]
+struct InventoryMachineDeclared {
+    #[serde(default)]
+    machine_id: Option<String>,
+    #[serde(default)]
+    repo_roots: Vec<String>,
+    #[serde(default)]
+    projects_roots: Vec<String>,
+}
+
+#[derive(Debug, Deserialize, Default)]
+struct InventoryClient {
+    #[serde(default)]
+    client_id: String,
+    #[serde(default)]
+    declared: InventoryClientDeclared,
+}
+
+#[derive(Debug, Deserialize, Default)]
+struct InventoryClientDeclared {
+    #[serde(default)]
+    client_id: Option<String>,
+    #[serde(default)]
+    label: Option<String>,
+    #[serde(default)]
+    cwd_match: Vec<String>,
+    #[serde(default)]
+    plan_root: Option<String>,
+    #[serde(default)]
+    plan_draft: Option<String>,
+    #[serde(default)]
+    scan_roots: Vec<String>,
+    #[serde(default)]
+    repo_ids: Vec<String>,
+}
+
+#[derive(Debug, Deserialize, Default)]
+struct InventoryRepo {
+    #[serde(default)]
+    repo_id: String,
+    #[serde(default)]
+    declared: InventoryRepoDeclared,
+    #[serde(default)]
+    observed: Option<InventoryRepoObserved>,
+}
+
+#[derive(Debug, Deserialize, Default)]
+struct InventoryRepoDeclared {
+    #[serde(default)]
+    registry_id: Option<String>,
+    #[serde(default)]
+    kind: Option<String>,
+    #[serde(default)]
+    path_declared: Option<String>,
+    #[serde(default)]
+    path_relative: Option<String>,
+    #[serde(default)]
+    root_category: Option<String>,
+    #[serde(default)]
+    declared_by: Vec<String>,
+}
+
+#[derive(Debug, Deserialize, Default)]
+struct InventoryRepoObserved {
+    #[serde(default)]
+    path: Option<String>,
+    #[serde(default)]
+    present: bool,
+}
+
+#[derive(Debug, Deserialize, Default)]
+struct InventorySource {
+    #[serde(default)]
+    kind: String,
+    #[serde(default)]
+    client_id: Option<String>,
+    #[serde(default)]
+    path: Option<String>,
+    #[serde(default)]
+    present: bool,
+}
+
+#[derive(Debug, Deserialize, Default)]
+struct InventorySupersedes {
+    #[serde(default)]
+    consumer: Option<String>,
+    #[serde(default)]
+    fields: BTreeMap<String, Vec<String>>,
+}
+
+#[derive(Debug, Deserialize, Default)]
+struct InventoryReadiness {
+    #[serde(default)]
+    status: Option<String>,
+}
+
+#[derive(Debug, Deserialize, Default)]
+struct InventoryFreshness {
+    #[serde(default)]
+    observed: bool,
+}
+
+impl LoadedInventory {
+    fn facts(&self) -> ContractFacts {
+        ContractFacts {
+            schema_version: self.inventory.schema_version.clone(),
+            source: self.source.clone(),
+            stale: self.stale,
+            observed: self.inventory.freshness.observed,
+            machine_id: nonempty(self.inventory.machine.declared.machine_id.clone()),
+            detection_source: nonempty(self.inventory.machine.detection_source.clone()),
+            readiness: nonempty(self.inventory.readiness.status.clone()),
+        }
+    }
+
+    fn verify_contract_version(&self) -> Result<(), ContractUnavailable> {
+        let matches = self.inventory.contract == INVENTORY_CONTRACT
+            && self.inventory.schema_version == INVENTORY_SCHEMA_VERSION;
+        if matches {
+            return Ok(());
+        }
+        Err(ContractUnavailable::SchemaUnsupported {
+            contract: self.inventory.contract.clone(),
+            schema_version: self.inventory.schema_version.clone(),
+        })
+    }
+
+    /// Assert the contract still promises every mapping Swimmers deleted its
+    /// private parser for. A key present with an empty list counts as missing:
+    /// the promise is the list of contract paths that now own the fact.
+    fn verify_supersedes(&self) -> Result<(), ContractUnavailable> {
+        let supersedes = &self.inventory.supersedes;
+        let missing: Vec<String> = REQUIRED_SUPERSEDED_FIELDS
+            .iter()
+            .filter(|field| {
+                supersedes
+                    .fields
+                    .get(**field)
+                    .is_none_or(|paths| paths.is_empty())
+            })
+            .map(|field| (*field).to_string())
+            .collect();
+        if missing.is_empty() {
+            return Ok(());
+        }
+        Err(ContractUnavailable::SupersedesIncomplete {
+            consumer: supersedes
+                .consumer
+                .clone()
+                .unwrap_or_else(|| INVENTORY_CONSUMER.to_string()),
+            missing,
+        })
+    }
+
+    fn build_client_overlays(&self) -> Vec<ClientOverlay> {
+        let index = ContractIndex::new(&self.inventory);
+        self.inventory
+            .clients
+            .iter()
+            .map(|client| build_client_overlay(client, &index))
+            .collect()
+    }
+}
+
+/// Declared repo roots for this machine, used to translate a repo's declared
+/// spelling onto wherever it actually lives here.
+#[derive(Default)]
+struct MachineRoots {
+    repos: Vec<String>,
+    projects: Vec<String>,
+}
+
+impl MachineRoots {
+    fn for_category(&self, category: Option<&str>) -> &[String] {
+        match category {
+            Some("repos") => &self.repos,
+            Some("projects") => &self.projects,
+            _ => &[],
+        }
+    }
+}
+
+struct ContractIndex<'a> {
+    repos: BTreeMap<&'a str, &'a InventoryRepo>,
+    /// client_id -> the overlay.yaml the contract read that client from.
+    overlay_paths: BTreeMap<&'a str, PathBuf>,
+    machine_roots: MachineRoots,
+}
+
+impl<'a> ContractIndex<'a> {
+    fn new(inventory: &'a Inventory) -> Self {
+        Self {
+            repos: inventory
+                .repos
+                .iter()
+                .map(|repo| (repo.repo_id.as_str(), repo))
+                .collect(),
+            overlay_paths: client_overlay_paths(&inventory.sources),
+            machine_roots: MachineRoots {
+                repos: inventory.machine.declared.repo_roots.clone(),
+                projects: inventory.machine.declared.projects_roots.clone(),
+            },
+        }
+    }
+
+    /// Repos this client declared under `declared_by` marker `suffix`, in the
+    /// contract's stable `repo_ids` order.
+    fn client_repos(&self, client: &InventoryClient, suffix: &str) -> Vec<&'a InventoryRepo> {
+        let marker = format!("client:{}.{suffix}", contract_client_id(client));
+        client
+            .declared
+            .repo_ids
+            .iter()
+            .filter_map(|id| self.repos.get(id.as_str()).copied())
+            .filter(|repo| repo.declared.declared_by.contains(&marker))
+            .collect()
+    }
+}
+
+fn client_overlay_paths(sources: &[InventorySource]) -> BTreeMap<&str, PathBuf> {
+    sources
+        .iter()
+        .filter(|source| source.kind == "client_overlay" && source.present)
+        .filter_map(|source| {
+            let client_id = source.client_id.as_deref()?;
+            let path = nonempty(source.path.clone())?;
+            Some((client_id, PathBuf::from(expand_path(&path))))
+        })
+        .collect()
+}
+
+fn contract_client_id(client: &InventoryClient) -> &str {
+    client
+        .declared
+        .client_id
+        .as_deref()
+        .filter(|id| !id.trim().is_empty())
+        .unwrap_or(&client.client_id)
+}
+
+fn build_client_overlay(client: &InventoryClient, index: &ContractIndex) -> ClientOverlay {
+    let client_id = contract_client_id(client);
+    let label = nonempty(client.declared.label.clone()).unwrap_or_else(|| client_id.to_string());
+    let overlay_path = index.overlay_paths.get(client_id);
+    let client_dir = overlay_path.and_then(|path| path.parent());
+
+    let landscape_repos = index.client_repos(client, "repo_landscape");
+    let cwd_patterns = client_cwd_patterns(client, &landscape_repos, &index.machine_roots);
+    let scan_roots: Vec<PathBuf> = client
+        .declared
+        .scan_roots
+        .iter()
+        .map(|root| PathBuf::from(expand_path(root)))
+        .collect();
+
+    let dev_sanity = overlay_path.and_then(|path| read_dev_sanity_section(path));
+    let fleet_presets = dev_sanity
+        .as_ref()
+        .map(|section| parse_fleet_lenses(&section.fleet_lenses))
+        .unwrap_or_default();
+    let dir_config = dev_sanity.and_then(|section| {
+        let client_repos = index.client_repos(client, "repos");
+        parse_dir_config(section, &label, &client_repos, &scan_roots)
+    });
+
+    ClientOverlay {
+        label,
+        cwd_patterns,
+        cwd_match_count: client.declared.cwd_match.len(),
+        plan_root: contract_plan_dir(client_dir, client.declared.plan_root.as_deref()),
+        plan_draft: contract_plan_dir(client_dir, client.declared.plan_draft.as_deref()),
+        dir_config,
+        fleet_presets,
+    }
+}
+
+fn contract_plan_dir(client_dir: Option<&Path>, relative: Option<&str>) -> Option<PathBuf> {
+    let relative = nonempty(relative.map(str::to_string))?;
+    Some(client_dir?.join(relative))
+}
+
+/// `cwd_match`, then `scan_roots`, then every declared landscape repo — the
+/// same precedence the private parser used, now sourced from the contract.
+fn client_cwd_patterns(
+    client: &InventoryClient,
+    landscape_repos: &[&InventoryRepo],
+    roots: &MachineRoots,
+) -> Vec<String> {
+    let mut patterns: Vec<String> = client
+        .declared
+        .cwd_match
+        .iter()
+        .chain(client.declared.scan_roots.iter())
+        .map(|path| expand_path(path))
+        .collect();
+    for repo in landscape_repos {
+        patterns.extend(repo_match_paths(repo, roots));
+    }
+    dedupe_preserving_order(patterns)
+}
+
+/// Every place this repo could be on this box, most-authoritative first.
+///
+/// The observed path is Skillbox's own answer. Failing that we translate
+/// `path_relative` onto each declared root for its category — the root
+/// translation this module used to skip entirely — and only then fall back to
+/// the declared spelling.
+fn repo_match_paths(repo: &InventoryRepo, roots: &MachineRoots) -> Vec<String> {
+    let mut paths = Vec::new();
+    if let Some(observed) = observed_repo_path(repo) {
+        paths.push(observed);
+    }
+    if let Some(relative) = nonempty(repo.declared.path_relative.clone()) {
+        for root in roots.for_category(repo.declared.root_category.as_deref()) {
+            let root = expand_path(root);
+            paths.push(format!("{}/{relative}", root.trim_end_matches('/')));
+        }
+    }
+    if let Some(declared) = nonempty(repo.declared.path_declared.clone()) {
+        paths.push(expand_path(&declared));
+    }
+    dedupe_preserving_order(paths)
+}
+
+fn observed_repo_path(repo: &InventoryRepo) -> Option<String> {
+    let observed = repo.observed.as_ref()?;
+    observed
+        .present
+        .then(|| nonempty(observed.path.clone()))
+        .flatten()
+        .map(|path| expand_path(&path))
+}
+
+fn dedupe_preserving_order(values: Vec<String>) -> Vec<String> {
+    let mut seen = BTreeSet::new();
+    values
+        .into_iter()
+        .filter(|value| !value.trim().is_empty())
+        .filter(|value| seen.insert(value.clone()))
+        .collect()
+}
+
+fn nonempty(value: Option<String>) -> Option<String> {
+    value.and_then(nonempty_launch_metadata)
+}
+
+// ---------------------------------------------------------------------------
+// Contract transport: locate a Skillbox checkout, run the CLI, read the payload
+// ---------------------------------------------------------------------------
+
+fn load_inventory_envelope() -> Result<InventoryEnvelope, ContractUnavailable> {
+    if let Some(path) = inventory_override_path() {
+        return read_inventory_file(&path);
+    }
+    run_inventory_cli(&skillbox_repo_root()?)
+}
+
+/// Explicit payload override: an already-captured `env-inventory show` envelope
+/// (or a bare inventory document). Keeps the contract readable on a box with no
+/// Skillbox checkout, and gives tests a seam that never shells out.
+fn inventory_override_path() -> Option<PathBuf> {
+    let raw = std::env::var("SWIMMERS_SKILLBOX_INVENTORY").ok()?;
+    nonempty(Some(raw)).map(|raw| PathBuf::from(expand_path(&raw)))
+}
+
+fn read_inventory_file(path: &Path) -> Result<InventoryEnvelope, ContractUnavailable> {
+    let source = path.display().to_string();
+    let contents =
+        std::fs::read_to_string(path).map_err(|err| ContractUnavailable::MalformedPayload {
+            source: source.clone(),
+            detail: err.to_string(),
+        })?;
+    parse_inventory_json(&contents, &source)
+}
+
+/// Accepts either the CLI envelope or a bare inventory document (the shape
+/// written to the cache file), so an operator can point at either one.
+fn parse_inventory_json(raw: &str, source: &str) -> Result<InventoryEnvelope, ContractUnavailable> {
+    let value: serde_json::Value =
+        serde_json::from_str(raw).map_err(|err| ContractUnavailable::MalformedPayload {
+            source: source.to_string(),
+            detail: err.to_string(),
+        })?;
+    let is_envelope = value.get("inventory").is_some();
+    let malformed = |err: serde_json::Error| ContractUnavailable::MalformedPayload {
+        source: source.to_string(),
+        detail: err.to_string(),
+    };
+    if is_envelope {
+        return serde_json::from_value(value).map_err(malformed);
+    }
+    let inventory: Inventory = serde_json::from_value(value).map_err(malformed)?;
+    Ok(InventoryEnvelope {
+        ok: true,
+        source: Some("file".to_string()),
+        stale: false,
+        cache_path: None,
+        reason: None,
+        inventory: Some(inventory),
+        next_actions: Vec::new(),
+    })
+}
+
+fn skillbox_repo_root() -> Result<PathBuf, ContractUnavailable> {
+    let candidates = skillbox_repo_candidates();
+    candidates
+        .iter()
+        .find(|root| root.join(INVENTORY_CLI_SCRIPT).is_file())
+        .cloned()
+        .ok_or_else(|| ContractUnavailable::SkillboxRepoNotFound {
+            searched: candidates
+                .iter()
+                .map(|root| root.display().to_string())
+                .collect(),
+        })
+}
+
+fn skillbox_repo_candidates() -> Vec<PathBuf> {
+    if let Some(explicit) = std::env::var("SWIMMERS_SKILLBOX_REPO")
+        .ok()
+        .and_then(|raw| nonempty(Some(raw)))
+    {
+        return vec![PathBuf::from(expand_path(&explicit))];
+    }
+    let Some(home) = dirs::home_dir() else {
+        return Vec::new();
+    };
+    vec![
+        home.join("repos").join("opensource").join("skillbox"),
+        home.join("repos").join("skillbox"),
+    ]
+}
+
+fn run_inventory_cli(repo_root: &Path) -> Result<InventoryEnvelope, ContractUnavailable> {
+    let python = std::env::var("SWIMMERS_SKILLBOX_PYTHON")
+        .ok()
+        .and_then(|raw| nonempty(Some(raw)))
+        .unwrap_or_else(|| "python3".to_string());
+    // `--cached` is the only hot-path-safe read: one file, no YAML, no probing.
+    // The subcommand flags are not mirrored onto the parent parser, so
+    // `--format json` has to follow `show`.
+    let args = [
+        INVENTORY_CLI_SCRIPT,
+        "env-inventory",
+        "show",
+        "--cached",
+        "--format",
+        "json",
+    ];
+    let display = format!("{python} {}", args.join(" "));
+
+    let mut command = Command::new(&python);
+    command
+        .args(args)
+        .current_dir(repo_root)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+
+    let captured = capture_command(command, INVENTORY_CLI_TIMEOUT).map_err(|err| {
+        ContractUnavailable::CommandUnavailable {
+            command: display.clone(),
+            detail: err.to_string(),
+        }
+    })?;
+    let Some(captured) = captured else {
+        return Err(ContractUnavailable::CommandFailed {
+            command: display,
+            code: None,
+            detail: format!("timed out after {}s", INVENTORY_CLI_TIMEOUT.as_secs()),
+        });
+    };
+
+    // Exit 4 is the contract's "cache miss" answer and still carries a payload.
+    if !matches!(captured.code, Some(0) | Some(INVENTORY_CLI_DRIFT_EXIT)) {
+        return Err(ContractUnavailable::CommandFailed {
+            command: display,
+            code: captured.code,
+            detail: first_line(&captured.stderr),
+        });
+    }
+    parse_inventory_json(&captured.stdout, &display)
+}
+
+struct CapturedCommand {
+    code: Option<i32>,
+    stdout: String,
+    stderr: String,
+}
+
+/// Run `command`, draining both pipes on their own threads so a payload larger
+/// than the pipe buffer cannot deadlock, and give up after `timeout`.
+fn capture_command(
+    mut command: Command,
+    timeout: Duration,
+) -> std::io::Result<Option<CapturedCommand>> {
+    let mut child = command.spawn()?;
+    let stdout = child.stdout.take().map(drain_pipe);
+    let stderr = child.stderr.take().map(drain_pipe);
+
+    let deadline = Instant::now() + timeout;
+    let status = loop {
+        match child.try_wait()? {
+            Some(status) => break status,
+            None if Instant::now() >= deadline => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Ok(None);
+            }
+            None => std::thread::sleep(Duration::from_millis(20)),
+        }
+    };
+
+    Ok(Some(CapturedCommand {
+        code: status.code(),
+        stdout: stdout.map(join_pipe).unwrap_or_default(),
+        stderr: stderr.map(join_pipe).unwrap_or_default(),
+    }))
+}
+
+fn drain_pipe<R>(mut pipe: R) -> std::thread::JoinHandle<String>
+where
+    R: Read + Send + 'static,
+{
+    std::thread::spawn(move || {
+        let mut buffer = Vec::new();
+        let _ = pipe.read_to_end(&mut buffer);
+        String::from_utf8_lossy(&buffer).into_owned()
+    })
+}
+
+fn join_pipe(handle: std::thread::JoinHandle<String>) -> String {
+    handle.join().unwrap_or_default()
+}
+
+fn first_line(text: &str) -> String {
+    text.lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .unwrap_or("no output")
+        .to_string()
+}
+
+// ---------------------------------------------------------------------------
+// Retained private parsing: `dev_sanity` only.
+//
+// This section is launch config, not environment inventory — `auth_token_env`,
+// `ssh_alias` and `base_url` are credential-adjacent, and Skillbox deliberately
+// left them out of the contract. Everything else that used to live here now
+// comes from `supersedes.fields`.
 // ---------------------------------------------------------------------------
 
 #[derive(Deserialize, Default)]
 struct OverlayFile {
     #[serde(default)]
-    client: Option<OverlayClient>,
-    #[serde(default)]
     dev_sanity: Option<DevSanitySection>,
-}
-
-#[derive(Deserialize, Default)]
-struct OverlayClient {
-    #[serde(default)]
-    id: Option<String>,
-    #[serde(default)]
-    label: Option<String>,
-    #[serde(default)]
-    context: Option<OverlayContext>,
-    #[serde(default)]
-    repos: Vec<ClientRepoEntry>,
-}
-
-#[derive(Deserialize, Default)]
-struct OverlayContext {
-    #[serde(default)]
-    cwd_match: Vec<String>,
-    #[serde(default)]
-    plans: Option<OverlayPlans>,
-    #[serde(default)]
-    repo_landscape: Option<RepoLandscape>,
-}
-
-#[derive(Deserialize, Default)]
-struct OverlayPlans {
-    #[serde(default)]
-    plan_root: Option<String>,
-    #[serde(default)]
-    plan_draft: Option<String>,
-}
-
-#[derive(Deserialize, Default)]
-struct RepoLandscape {
-    #[serde(default)]
-    scan_roots: Vec<String>,
-    #[serde(default)]
-    repos: Vec<RepoEntry>,
-}
-
-#[derive(Deserialize, Default)]
-struct RepoEntry {
-    #[serde(default)]
-    path: Option<String>,
-}
-
-#[derive(Deserialize, Default)]
-struct ClientRepoEntry {
-    #[serde(default)]
-    id: Option<String>,
-    #[serde(default)]
-    kind: Option<String>,
-    #[serde(default)]
-    repo_path: Option<String>,
 }
 
 #[derive(Deserialize, Default)]
@@ -654,103 +1413,16 @@ struct DevSanityServiceEntry {
     open_url: Option<String>,
 }
 
-fn parse_client_overlay(client_dir: &Path, overlay_path: &Path) -> Option<ClientOverlay> {
-    let file = read_overlay_file(overlay_path)?;
-    let client = file.client?;
-    let client_label = resolve_client_label(&client, client_dir);
-    let client_repos = client.repos;
-    let context = client.context?;
-    let cwd_match_count = context.cwd_match.len();
-    let cwd_patterns = cwd_patterns_from_context(&context);
-    let scan_roots = scan_roots_from_context(&context);
-    let (plan_root, plan_draft) = plan_dirs_from_context(client_dir, context.plans);
-    let dev_sanity = file.dev_sanity;
-    let fleet_presets = dev_sanity
-        .as_ref()
-        .map(|section| parse_fleet_lenses(&section.fleet_lenses))
-        .unwrap_or_default();
-    let dir_config =
-        dev_sanity.and_then(|ds| parse_dir_config(ds, &client_label, client_repos, &scan_roots));
-
-    Some(ClientOverlay {
-        label: client_label,
-        cwd_patterns,
-        cwd_match_count,
-        plan_root,
-        plan_draft,
-        dir_config,
-        fleet_presets,
-    })
-}
-
-fn read_overlay_file(overlay_path: &Path) -> Option<OverlayFile> {
+fn read_dev_sanity_section(overlay_path: &Path) -> Option<DevSanitySection> {
     let content = std::fs::read_to_string(overlay_path).ok()?;
-    serde_yaml::from_str(&content).ok()
-}
-
-fn resolve_client_label(client: &OverlayClient, client_dir: &Path) -> String {
-    client
-        .label
-        .clone()
-        .or_else(|| client.id.clone())
-        .unwrap_or_else(|| fallback_client_label(client_dir))
-}
-
-fn fallback_client_label(client_dir: &Path) -> String {
-    client_dir
-        .file_name()
-        .map(|name| name.to_string_lossy().into_owned())
-        .unwrap_or_else(|| "overlay".to_string())
-}
-
-fn cwd_patterns_from_context(context: &OverlayContext) -> Vec<String> {
-    let mut patterns: Vec<String> = context.cwd_match.iter().map(|p| expand_path(p)).collect();
-    if let Some(landscape) = &context.repo_landscape {
-        patterns.extend(landscape.scan_roots.iter().map(|root| expand_path(root)));
-        patterns.extend(
-            landscape
-                .repos
-                .iter()
-                .filter_map(|repo| repo.path.as_deref())
-                .map(expand_path),
-        );
-    }
-    patterns
-}
-
-fn scan_roots_from_context(context: &OverlayContext) -> Vec<PathBuf> {
-    context
-        .repo_landscape
-        .as_ref()
-        .map(|landscape| {
-            landscape
-                .scan_roots
-                .iter()
-                .map(|root| PathBuf::from(expand_path(root)))
-                .collect()
-        })
-        .unwrap_or_default()
-}
-
-fn plan_dirs_from_context(
-    client_dir: &Path,
-    plans: Option<OverlayPlans>,
-) -> (Option<PathBuf>, Option<PathBuf>) {
-    let plan_root = plans
-        .as_ref()
-        .and_then(|p| p.plan_root.as_deref())
-        .map(|rel| client_dir.join(rel));
-    let plan_draft = plans
-        .as_ref()
-        .and_then(|p| p.plan_draft.as_deref())
-        .map(|rel| client_dir.join(rel));
-    (plan_root, plan_draft)
+    let file: OverlayFile = serde_yaml::from_str(&content).ok()?;
+    file.dev_sanity
 }
 
 fn parse_dir_config(
     section: DevSanitySection,
     client_label: &str,
-    client_repos: Vec<ClientRepoEntry>,
+    client_repos: &[&InventoryRepo],
     scan_roots: &[PathBuf],
 ) -> Option<OverlayDirConfig> {
     let launch = parse_agent_launch(section.agent_launch);
@@ -835,7 +1507,7 @@ fn extend_unique_paths<'a, I, F>(
 
 fn parse_services(
     entries: Vec<DevSanityServiceEntry>,
-    client_repos: Vec<ClientRepoEntry>,
+    client_repos: &[&InventoryRepo],
     scan_roots: &[PathBuf],
     base_path: &Path,
 ) -> Vec<OverlayServiceEntry> {
@@ -866,7 +1538,7 @@ fn parse_service_entry(entry: DevSanityServiceEntry) -> Option<OverlayServiceEnt
 fn append_client_repo_services(
     services: &mut Vec<OverlayServiceEntry>,
     seen_dirs: &mut BTreeSet<String>,
-    client_repos: Vec<ClientRepoEntry>,
+    client_repos: &[&InventoryRepo],
     base_path: &Path,
 ) {
     for repo in client_repos {
@@ -1178,16 +1850,34 @@ where
     unique_targets
 }
 
+/// Turn a contract repo the client declared under `client.repos[]` into a
+/// browsable service entry.
+///
+/// `registry_id` is `client.repos[].id`, `kind` is `client.repos[].kind`, and
+/// the path prefers Skillbox's observed answer before falling back to the
+/// declared spelling.
 fn service_entry_from_client_repo(
-    repo: ClientRepoEntry,
+    repo: &InventoryRepo,
     base_path: &Path,
 ) -> Option<OverlayServiceEntry> {
-    if repo.kind.as_deref().is_some_and(|kind| kind != "repo") {
+    if repo
+        .declared
+        .kind
+        .as_deref()
+        .is_some_and(|kind| kind != "repo")
+    {
         return None;
     }
 
-    let repo_path = expand_repo_path(&repo.repo_path?, base_path);
-    service_entry_from_repo_path(repo.id, repo_path, base_path)
+    let repo_path = match observed_repo_path(repo) {
+        Some(observed) => PathBuf::from(observed),
+        None => expand_repo_path(&nonempty(repo.declared.path_declared.clone())?, base_path),
+    };
+    service_entry_from_repo_path(
+        nonempty(repo.declared.registry_id.clone()),
+        repo_path,
+        base_path,
+    )
 }
 
 fn service_entry_from_repo_path(
@@ -1237,23 +1927,6 @@ fn relative_dir_from_base(base_path: &Path, path: &Path) -> Option<String> {
 // ---------------------------------------------------------------------------
 // Path helpers
 // ---------------------------------------------------------------------------
-
-fn resolve_skillbox_config_root() -> Option<PathBuf> {
-    if let Ok(val) = std::env::var("SWIMMERS_SKILLBOX_CONFIG") {
-        let path = PathBuf::from(expand_path(&val));
-        if path.is_dir() {
-            return Some(path);
-        }
-    }
-    // Default: ~/repos/skillbox-config
-    let home = dirs::home_dir()?;
-    let default = home.join("repos").join("skillbox-config");
-    if default.is_dir() {
-        Some(default)
-    } else {
-        None
-    }
-}
 
 /// Expand a group dir entry into concrete filesystem paths.
 ///

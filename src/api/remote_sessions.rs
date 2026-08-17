@@ -16,7 +16,9 @@ use serde::Serialize;
 use crate::api::envelope::error_body_msg;
 use crate::api::service::validate_sessions_batch_dirs;
 use crate::config::{Config, SessionDeleteMode};
-use crate::session::overlay::default_overlay;
+use crate::session::overlay::{
+    default_overlay, default_overlay_result, ContractUnavailable, SkillboxOverlay,
+};
 use crate::types::{
     CreateSessionRequest, CreateSessionResponse, CreateSessionsBatchRequest,
     CreateSessionsBatchResponse, DependencyHealthStatus, DirListResponse, EnvironmentAuthSummary,
@@ -628,12 +630,48 @@ fn remote_base_url_config_error(target: &LaunchTargetSummary) -> Option<String> 
 
 pub fn remote_targets_health_snapshot() -> crate::types::DependencyHealthSnapshot {
     let now = Utc::now();
-    let Some(overlay) = default_overlay() else {
-        return crate::types::DependencyHealthSnapshot::unknown(now)
-            .with_detail("configured_targets", "unknown")
-            .with_detail("probe", "overlay_unavailable");
+    let overlay = match default_overlay_result() {
+        Ok(overlay) => overlay,
+        Err(unavailable) => {
+            return crate::types::DependencyHealthSnapshot::unknown(now)
+                .with_detail("configured_targets", "unknown")
+                .with_detail("probe", "contract_unavailable")
+                .with_detail("contract_status", unavailable.code())
+        }
     };
     remote_targets_health_snapshot_for_targets(overlay.all_launch_targets(), &Config::from_env())
+}
+
+/// Resolve the overlay, or turn the typed contract failure into an API error.
+///
+/// The old code collapsed every reason the Skillbox contract could be missing
+/// into a bare `None` and a fixed sentence. The `LAUNCH_TARGET_UNKNOWN` code and
+/// the leading sentence stay put — callers assert on both — but the contract's
+/// own reason code, detail and remedy now ride along, so an operator can tell
+/// "no skillbox checkout here" apart from "cache never built" apart from "the
+/// contract stopped promising a field we rely on".
+fn overlay_or_contract_error(
+    context: &str,
+) -> Result<&'static SkillboxOverlay, RemoteSessionError> {
+    default_overlay_result().map_err(|unavailable| {
+        RemoteSessionError::new(
+            StatusCode::BAD_REQUEST,
+            "LAUNCH_TARGET_UNKNOWN",
+            contract_unavailable_message(context, unavailable),
+        )
+    })
+}
+
+fn contract_unavailable_message(context: &str, unavailable: &ContractUnavailable) -> String {
+    let mut message = format!(
+        "no skillbox-config overlay is available for {context} [{}]: {unavailable}",
+        unavailable.code()
+    );
+    if let Some(remedy) = unavailable.remedy() {
+        message.push_str("; try: ");
+        message.push_str(&remedy);
+    }
+    message
 }
 
 fn remote_targets_health_snapshot_for_targets(
@@ -1880,13 +1918,7 @@ fn resolve_dir_inventory_target(
             "remote directory inventory requires a non-local launch target",
         ));
     }
-    let Some(overlay) = default_overlay() else {
-        return Err(RemoteSessionError::new(
-            StatusCode::BAD_REQUEST,
-            "LAUNCH_TARGET_UNKNOWN",
-            "no skillbox-config overlay is available for remote directory inventory",
-        ));
-    };
+    let overlay = overlay_or_contract_error("remote directory inventory")?;
     let cwd_scoped = local_path.and_then(|path| overlay.launch_target_for_cwd(path, target_id));
     let target = choose_dir_inventory_target(
         target_id,
@@ -2238,13 +2270,7 @@ fn resolve_configured_launch_target_for_cwd(
     cwd: &str,
     target_id: &str,
 ) -> Result<LaunchTargetSummary, RemoteSessionError> {
-    let Some(overlay) = default_overlay() else {
-        return Err(RemoteSessionError::new(
-            StatusCode::BAD_REQUEST,
-            "LAUNCH_TARGET_UNKNOWN",
-            "no skillbox-config overlay is available for remote launch targets",
-        ));
-    };
+    let overlay = overlay_or_contract_error("remote launch targets")?;
     let target = overlay
         .launch_target_for_cwd(cwd, target_id)
         .or_else(|| overlay.launch_target_by_id(target_id))
