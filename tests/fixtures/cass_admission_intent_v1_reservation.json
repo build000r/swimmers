@@ -1,0 +1,8 @@
+{
+  "schema_version": "cass_admission_reservation/v1",
+  "reservation_id": "rsv_de621cd4b4a5343ee1fe1bb2d726fdfe5f0c217edd9d7d969cfec3b110b49a5f",
+  "batch_id": "018f0e11-7c3a-7000-8000-0000000000aa",
+  "batch_index": 0,
+  "index": 0,
+  "target_id": "local"
+}

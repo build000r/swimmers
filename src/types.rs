@@ -2715,6 +2715,801 @@ fn known_tool_name(normalized_token: &str) -> Option<&'static str> {
         .find_map(|(alias, name)| (*alias == normalized_token).then_some(*name))
 }
 
+pub const CASS_PROVIDER_IDENTITY_SCHEMA: &str = "cass_provider_identity/v1";
+pub const CASS_ADMISSION_INTENT_SCHEMA: &str = "cass_admission_intent/v1";
+pub const CASS_ADMISSION_SUBJECT_SCHEMA: &str = "cass_admission_subject/v1";
+pub const CASS_ADMISSION_RESERVATION_SCHEMA: &str = "cass_admission_reservation/v1";
+pub const CASS_ADMISSION_COMMAND_SCHEMA: &str = "cass_admission_command/v1";
+pub const CASS_MAX_CIPHERTEXT_CHUNK_BYTES: u64 = 8 * 1024 * 1024;
+pub const CASS_ZERO_SHA256: &str =
+    "0000000000000000000000000000000000000000000000000000000000000000";
+
+const CASS_KNOWN_PROVIDERS: &[&str] = &["swimmers", "hermes", "amp", "claude", "codex", "grok"];
+const CASS_IDENTITY_FORBIDDEN_CLAIMS: &[&str] = &[
+    "adapter",
+    "adapter_id",
+    "root",
+    "path",
+    "transcript",
+    "token",
+    "cursor",
+];
+const CASS_INTENT_FORBIDDEN_SESSION_KEYS: &[&str] = &[
+    "provider_session_id",
+    "swimmers_session_id",
+    "producer_session_id",
+];
+const CASS_SECRET_KEY_NEEDLES: &[&str] = &[
+    "token",
+    "secret",
+    "password",
+    "passwd",
+    "api_key",
+    "apikey",
+    "authorization",
+    "private",
+    "receipt",
+];
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CassAdmissionMode {
+    #[default]
+    Disabled,
+    Shadow,
+    Enforce,
+}
+
+impl CassAdmissionMode {
+    pub fn parse(raw: Option<&str>) -> Result<Self, CassAdmissionError> {
+        match raw.map(str::trim).filter(|value| !value.is_empty()) {
+            None => Ok(Self::Disabled),
+            Some("disabled") | Some("legacy") => Ok(Self::Disabled),
+            Some("shadow") => Ok(Self::Shadow),
+            Some("enforce") => Ok(Self::Enforce),
+            Some(other) => Err(CassAdmissionError::new(
+                "unknown_mode",
+                format!("cass admission mode {other:?} is unknown"),
+            )),
+        }
+    }
+
+    pub fn from_env() -> Result<Self, CassAdmissionError> {
+        Self::parse(
+            std::env::var("SKILLBOX_CASS_ADMISSION_MODE")
+                .ok()
+                .as_deref(),
+        )
+    }
+
+    pub fn is_enforce(self) -> bool {
+        matches!(self, Self::Enforce)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CassOrigin {
+    Local,
+    Remote,
+}
+
+impl CassOrigin {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Local => "local",
+            Self::Remote => "remote",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CassAdmissionError {
+    pub code: String,
+    pub message: String,
+}
+
+impl CassAdmissionError {
+    pub fn new(code: impl Into<String>, message: impl Into<String>) -> Self {
+        Self {
+            code: code.into(),
+            message: message.into(),
+        }
+    }
+}
+
+impl std::fmt::Display for CassAdmissionError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}: {}", self.code, self.message)
+    }
+}
+
+impl std::error::Error for CassAdmissionError {}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct CassProviderIdentity {
+    pub schema_version: String,
+    pub provider: String,
+    pub provider_session_id: String,
+    pub swimmers_session_id: String,
+    pub batch_id: String,
+    pub batch_index: u64,
+    pub origin: CassOrigin,
+}
+
+impl CassProviderIdentity {
+    pub fn from_value(value: &serde_json::Value) -> Result<Self, CassAdmissionError> {
+        let object = value.as_object().ok_or_else(|| {
+            CassAdmissionError::new(
+                "document_invalid",
+                "cass_provider_identity/v1 must be a mapping",
+            )
+        })?;
+        refuse_cass_secret_keys(object, "cass_provider_identity/v1")?;
+        let forbidden = object
+            .keys()
+            .filter(|key| {
+                CASS_IDENTITY_FORBIDDEN_CLAIMS.contains(&key.as_str()) || cass_key_is_secret(key)
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        if !forbidden.is_empty() {
+            let code = if forbidden.iter().any(|key| cass_key_is_secret(key)) {
+                "secret_shaped_key"
+            } else {
+                "document_invalid"
+            };
+            return Err(CassAdmissionError::new(
+                code,
+                "cass_provider_identity/v1 carries forbidden claims",
+            ));
+        }
+        let extra = object
+            .keys()
+            .filter(|key| {
+                !matches!(
+                    key.as_str(),
+                    "schema_version"
+                        | "provider"
+                        | "provider_session_id"
+                        | "swimmers_session_id"
+                        | "batch_id"
+                        | "batch_index"
+                        | "origin"
+                )
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        if !extra.is_empty() {
+            return Err(CassAdmissionError::new(
+                "document_invalid",
+                "cass_provider_identity/v1 carries extra claims",
+            ));
+        }
+        let schema_version = required_cass_string(object, "schema_version")?;
+        if schema_version != CASS_PROVIDER_IDENTITY_SCHEMA {
+            return Err(CassAdmissionError::new(
+                "unknown_version",
+                "provider identity schema_version is unknown",
+            ));
+        }
+        let provider = parse_cass_provider(required_cass_string(object, "provider")?)?;
+        let batch_index = object.get("batch_index").ok_or_else(|| {
+            CassAdmissionError::new("malformed_index", "batch_index must be an integer >= 0")
+        })?;
+        let batch_index = batch_index.as_u64().ok_or_else(|| {
+            CassAdmissionError::new("malformed_index", "batch_index must be an integer >= 0")
+        })?;
+        Ok(Self {
+            schema_version: CASS_PROVIDER_IDENTITY_SCHEMA.to_string(),
+            provider,
+            provider_session_id: parse_cass_uuid(
+                required_cass_string(object, "provider_session_id")?,
+                "provider_session_id",
+            )?,
+            swimmers_session_id: parse_cass_uuid(
+                required_cass_string(object, "swimmers_session_id")?,
+                "swimmers_session_id",
+            )?,
+            batch_id: parse_cass_uuid(required_cass_string(object, "batch_id")?, "batch_id")?,
+            batch_index,
+            origin: parse_cass_origin(&required_cass_string(object, "origin")?)?,
+        })
+    }
+
+    pub fn from_json_str(raw: &str) -> Result<Self, CassAdmissionError> {
+        let value = serde_json::from_str(raw).map_err(|error| {
+            CassAdmissionError::new(
+                "document_invalid",
+                format!("invalid identity JSON: {error}"),
+            )
+        })?;
+        Self::from_value(&value)
+    }
+}
+
+impl<'de> Deserialize<'de> for CassProviderIdentity {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let value = serde_json::Value::deserialize(deserializer)?;
+        Self::from_value(&value).map_err(serde::de::Error::custom)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct CassAdmissionIntent {
+    pub schema_version: String,
+    pub provider: String,
+    pub batch_id: String,
+    pub batch_index: u64,
+    pub family_id: String,
+    pub publisher_locality: CassOrigin,
+    pub adapter_id: String,
+    pub source_id: String,
+    pub path_template: String,
+    pub max_next_chunk_bytes: u64,
+}
+
+impl CassAdmissionIntent {
+    pub fn from_value(value: &serde_json::Value) -> Result<Self, CassAdmissionError> {
+        let object = value.as_object().ok_or_else(|| {
+            CassAdmissionError::new("document_invalid", "admission intent must be a mapping")
+        })?;
+        refuse_cass_secret_keys(object, "admission intent")?;
+        let session_keys = object
+            .keys()
+            .filter(|key| CASS_INTENT_FORBIDDEN_SESSION_KEYS.contains(&key.as_str()))
+            .cloned()
+            .collect::<Vec<_>>();
+        if !session_keys.is_empty() {
+            return Err(CassAdmissionError::new(
+                "document_invalid",
+                "admission intent must not carry a provider session UUID",
+            ));
+        }
+        if object.keys().any(|key| {
+            !matches!(
+                key.as_str(),
+                "schema_version"
+                    | "provider"
+                    | "batch_id"
+                    | "batch_index"
+                    | "family_id"
+                    | "publisher_locality"
+                    | "locality"
+                    | "adapter_id"
+                    | "source_id"
+                    | "path_template"
+                    | "max_next_chunk_bytes"
+            )
+        }) {
+            return Err(CassAdmissionError::new(
+                "document_invalid",
+                "admission intent carries extra claims",
+            ));
+        }
+        if object.contains_key("publisher_locality") && object.contains_key("locality") {
+            return Err(CassAdmissionError::new(
+                "document_invalid",
+                "admission intent must carry exactly one locality field",
+            ));
+        }
+        let schema_version = required_cass_string(object, "schema_version")?;
+        if schema_version != CASS_ADMISSION_INTENT_SCHEMA {
+            return Err(CassAdmissionError::new(
+                "unknown_version",
+                "admission intent schema_version is unknown",
+            ));
+        }
+        let locality = object
+            .get("publisher_locality")
+            .or_else(|| object.get("locality"))
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| {
+                CassAdmissionError::new("document_invalid", "admission intent locality is required")
+            })?;
+        let batch_index = object
+            .get("batch_index")
+            .and_then(serde_json::Value::as_u64);
+        let Some(batch_index) = batch_index else {
+            return Err(CassAdmissionError::new(
+                "malformed_index",
+                "batch_index must be an integer >= 0",
+            ));
+        };
+        let max_next_chunk_bytes = object
+            .get("max_next_chunk_bytes")
+            .and_then(serde_json::Value::as_u64)
+            .ok_or_else(|| {
+                CassAdmissionError::new("document_invalid", "max_next_chunk_bytes is required")
+            })?;
+        if max_next_chunk_bytes == 0 || max_next_chunk_bytes > CASS_MAX_CIPHERTEXT_CHUNK_BYTES {
+            return Err(CassAdmissionError::new(
+                "oversized_chunk",
+                "intent max_next_chunk_bytes exceeds the protocol bound",
+            ));
+        }
+        Ok(Self {
+            schema_version: CASS_ADMISSION_INTENT_SCHEMA.to_string(),
+            provider: parse_cass_provider(required_cass_string(object, "provider")?)?,
+            batch_id: parse_cass_uuid(required_cass_string(object, "batch_id")?, "batch_id")?,
+            batch_index,
+            family_id: required_cass_string(object, "family_id")?,
+            publisher_locality: parse_cass_origin(locality)?,
+            adapter_id: required_cass_string(object, "adapter_id")?,
+            source_id: required_cass_string(object, "source_id")?,
+            path_template: required_cass_string(object, "path_template")?,
+            max_next_chunk_bytes,
+        })
+    }
+
+    pub fn from_json_str(raw: &str) -> Result<Self, CassAdmissionError> {
+        let value = serde_json::from_str(raw).map_err(|error| {
+            CassAdmissionError::new("document_invalid", format!("invalid intent JSON: {error}"))
+        })?;
+        Self::from_value(&value)
+    }
+}
+
+impl<'de> Deserialize<'de> for CassAdmissionIntent {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let value = serde_json::Value::deserialize(deserializer)?;
+        Self::from_value(&value).map_err(serde::de::Error::custom)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CassAdmissionReservationRef {
+    pub reservation_id: String,
+    pub batch_id: String,
+    pub batch_index: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub index: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_id: Option<String>,
+}
+
+impl CassAdmissionReservationRef {
+    pub fn from_value(value: &serde_json::Value) -> Result<Self, CassAdmissionError> {
+        let parsed: Self = serde_json::from_value(value.clone()).map_err(|error| {
+            CassAdmissionError::new(
+                "reservation_mismatch",
+                format!("reservation envelope is invalid: {error}"),
+            )
+        })?;
+        parsed.validate()?;
+        Ok(parsed)
+    }
+
+    pub fn validate(&self) -> Result<(), CassAdmissionError> {
+        if self.reservation_id.trim().is_empty()
+            || self.reservation_id.contains("Bearer ")
+            || cass_key_is_secret(&self.reservation_id)
+        {
+            return Err(CassAdmissionError::new(
+                "reservation_mismatch",
+                "reservation_id must be an opaque target-bound handle, not a bearer",
+            ));
+        }
+        parse_cass_uuid(&self.batch_id, "batch_id")?;
+        if self.index.is_some_and(|index| index != self.batch_index) {
+            return Err(CassAdmissionError::new(
+                "reservation_mismatch",
+                "reservation index does not match its canonical batch_index",
+            ));
+        }
+        if self
+            .target_id
+            .as_deref()
+            .is_some_and(|target| target.trim().is_empty())
+        {
+            return Err(CassAdmissionError::new(
+                "reservation_mismatch",
+                "target_id must not be blank when present",
+            ));
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CassAdmissionReservationEnvelope {
+    pub schema_version: String,
+    pub reservation_id: String,
+    pub batch_id: String,
+    pub batch_index: u64,
+    pub index: u64,
+    pub target_id: String,
+}
+
+impl CassAdmissionReservationEnvelope {
+    pub fn from_value(value: &serde_json::Value) -> Result<Self, CassAdmissionError> {
+        let parsed: Self = serde_json::from_value(value.clone()).map_err(|error| {
+            CassAdmissionError::new(
+                "reservation_mismatch",
+                format!("reservation envelope is invalid: {error}"),
+            )
+        })?;
+        if parsed.schema_version != CASS_ADMISSION_RESERVATION_SCHEMA {
+            return Err(CassAdmissionError::new(
+                "unknown_version",
+                "reservation envelope schema_version is unknown",
+            ));
+        }
+        if parsed.reservation_id.trim().is_empty()
+            || parsed.reservation_id.contains("Bearer ")
+            || cass_key_is_secret(&parsed.reservation_id)
+        {
+            return Err(CassAdmissionError::new(
+                "reservation_mismatch",
+                "reservation_id must be an opaque target-bound handle, not a bearer",
+            ));
+        }
+        parse_cass_uuid(&parsed.batch_id, "batch_id")?;
+        if parsed.index != parsed.batch_index {
+            return Err(CassAdmissionError::new(
+                "reservation_mismatch",
+                "reservation envelope index does not match batch_index",
+            ));
+        }
+        if parsed.target_id.trim().is_empty() {
+            return Err(CassAdmissionError::new(
+                "reservation_mismatch",
+                "reservation envelope target_id is required",
+            ));
+        }
+        Ok(parsed)
+    }
+
+    pub fn as_ref_token(&self) -> CassAdmissionReservationRef {
+        CassAdmissionReservationRef {
+            reservation_id: self.reservation_id.clone(),
+            batch_id: self.batch_id.clone(),
+            batch_index: self.batch_index,
+            index: Some(self.index),
+            target_id: Some(self.target_id.clone()),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CassSourceCursor {
+    pub adapter_id: String,
+    pub path: String,
+    pub file_generation: u64,
+    pub committed_byte_offset: u64,
+    pub last_complete_record_hash: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CassAdmissionSubject {
+    pub schema_version: String,
+    pub adapter_id: String,
+    pub source_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub producer_session_id: Option<String>,
+    pub path: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path_template: Option<String>,
+    pub file_generation: u64,
+    pub stream_id: String,
+    pub cursor: CassSourceCursor,
+    pub completeness: String,
+}
+
+impl CassAdmissionSubject {
+    pub fn from_value(value: &serde_json::Value) -> Result<Self, CassAdmissionError> {
+        let parsed: Self = serde_json::from_value(value.clone()).map_err(|error| {
+            CassAdmissionError::new(
+                "document_invalid",
+                format!("admission subject is invalid: {error}"),
+            )
+        })?;
+        if parsed.schema_version != CASS_ADMISSION_SUBJECT_SCHEMA {
+            return Err(CassAdmissionError::new(
+                "unknown_version",
+                "admission subject schema_version is unknown",
+            ));
+        }
+        for (field, value) in [
+            ("adapter_id", parsed.adapter_id.as_str()),
+            ("source_id", parsed.source_id.as_str()),
+            ("path", parsed.path.as_str()),
+            ("stream_id", parsed.stream_id.as_str()),
+            ("cursor.adapter_id", parsed.cursor.adapter_id.as_str()),
+            ("cursor.path", parsed.cursor.path.as_str()),
+            (
+                "cursor.last_complete_record_hash",
+                parsed.cursor.last_complete_record_hash.as_str(),
+            ),
+            ("completeness", parsed.completeness.as_str()),
+        ] {
+            if value.trim().is_empty() {
+                return Err(CassAdmissionError::new(
+                    "document_invalid",
+                    format!("admission subject {field} is required"),
+                ));
+            }
+        }
+        if let Some(producer_session_id) = parsed.producer_session_id.as_deref() {
+            parse_cass_uuid(producer_session_id, "producer_session_id")?;
+        }
+        Ok(parsed)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CassAdmissionCommandOp {
+    Reserve,
+    Consume,
+    Refine,
+    Release,
+    Reconcile,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CassAdmissionCommandRequest {
+    pub schema_version: String,
+    pub op: CassAdmissionCommandOp,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub intent: Option<CassAdmissionIntent>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reservation_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub batch_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub batch_index: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub identity: Option<CassProviderIdentity>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cause: Option<String>,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub pre_provider_failure: bool,
+}
+
+impl CassAdmissionCommandRequest {
+    pub fn reserve(intent: CassAdmissionIntent) -> Self {
+        Self {
+            schema_version: CASS_ADMISSION_COMMAND_SCHEMA.to_string(),
+            op: CassAdmissionCommandOp::Reserve,
+            intent: Some(intent),
+            reservation_id: None,
+            batch_id: None,
+            batch_index: None,
+            identity: None,
+            cause: None,
+            pre_provider_failure: false,
+        }
+    }
+
+    pub fn consume(reservation: &CassAdmissionReservationRef) -> Self {
+        Self {
+            schema_version: CASS_ADMISSION_COMMAND_SCHEMA.to_string(),
+            op: CassAdmissionCommandOp::Consume,
+            intent: None,
+            reservation_id: Some(reservation.reservation_id.clone()),
+            batch_id: Some(reservation.batch_id.clone()),
+            batch_index: Some(reservation.batch_index),
+            identity: None,
+            cause: None,
+            pre_provider_failure: false,
+        }
+    }
+
+    pub fn refine(reservation_id: impl Into<String>, identity: CassProviderIdentity) -> Self {
+        Self {
+            schema_version: CASS_ADMISSION_COMMAND_SCHEMA.to_string(),
+            op: CassAdmissionCommandOp::Refine,
+            intent: None,
+            reservation_id: Some(reservation_id.into()),
+            batch_id: Some(identity.batch_id.clone()),
+            batch_index: Some(identity.batch_index),
+            identity: Some(identity),
+            cause: None,
+            pre_provider_failure: false,
+        }
+    }
+
+    pub fn release(reservation_id: impl Into<String>) -> Self {
+        Self {
+            schema_version: CASS_ADMISSION_COMMAND_SCHEMA.to_string(),
+            op: CassAdmissionCommandOp::Release,
+            intent: None,
+            reservation_id: Some(reservation_id.into()),
+            batch_id: None,
+            batch_index: None,
+            identity: None,
+            cause: None,
+            pre_provider_failure: true,
+        }
+    }
+
+    pub fn reconcile(reservation_id: impl Into<String>, cause: impl Into<String>) -> Self {
+        Self {
+            schema_version: CASS_ADMISSION_COMMAND_SCHEMA.to_string(),
+            op: CassAdmissionCommandOp::Reconcile,
+            intent: None,
+            reservation_id: Some(reservation_id.into()),
+            batch_id: None,
+            batch_index: None,
+            identity: None,
+            cause: Some(cause.into()),
+            pre_provider_failure: false,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CassAdmissionCommandError {
+    pub code: String,
+    pub message: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CassAdmissionCommandResponse {
+    pub schema_version: String,
+    pub ok: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reservation_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub state: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub batch_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub batch_index: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub subject: Option<CassAdmissionSubject>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<CassAdmissionCommandError>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CassAdmissionPreflightRequest {
+    pub dirs: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub spawn_tool: Option<SpawnTool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub launch_target: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cass_admission_mode: Option<CassAdmissionMode>,
+    pub intents: Vec<CassAdmissionIntent>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CassAdmissionPreflightResponse {
+    pub target_id: String,
+    pub batch_id: String,
+    pub reservations: Vec<CassAdmissionReservationEnvelope>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CassBatchAdmissionAttachment {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cass_batch_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub cass_reservations: Vec<CassAdmissionReservationRef>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cass_admission_mode: Option<CassAdmissionMode>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cass_preflight_target_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CassAwareCreateSessionsBatchRequest {
+    #[serde(flatten)]
+    pub request: CreateSessionsBatchRequest,
+    #[serde(flatten)]
+    pub cass: CassBatchAdmissionAttachment,
+}
+
+pub fn cass_publisher_locality_from_env() -> CassOrigin {
+    match std::env::var("SKILLBOX_CASS_PUBLISHER_LOCALITY")
+        .ok()
+        .as_deref()
+        .map(str::trim)
+    {
+        Some("remote") => CassOrigin::Remote,
+        _ => CassOrigin::Local,
+    }
+}
+
+pub fn resolve_cass_admission_mode(
+    request_mode: Option<CassAdmissionMode>,
+) -> Result<CassAdmissionMode, CassAdmissionError> {
+    let configured = CassAdmissionMode::from_env()?;
+    Ok(strongest_cass_admission_mode(configured, request_mode))
+}
+
+pub(crate) fn strongest_cass_admission_mode(
+    configured: CassAdmissionMode,
+    request_mode: Option<CassAdmissionMode>,
+) -> CassAdmissionMode {
+    let requested = request_mode.unwrap_or(CassAdmissionMode::Disabled);
+    match (configured, requested) {
+        (CassAdmissionMode::Enforce, _) | (_, CassAdmissionMode::Enforce) => {
+            CassAdmissionMode::Enforce
+        }
+        (CassAdmissionMode::Shadow, _) | (_, CassAdmissionMode::Shadow) => {
+            CassAdmissionMode::Shadow
+        }
+        _ => CassAdmissionMode::Disabled,
+    }
+}
+
+fn required_cass_string(
+    object: &serde_json::Map<String, serde_json::Value>,
+    key: &str,
+) -> Result<String, CassAdmissionError> {
+    object
+        .get(key)
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
+        .ok_or_else(|| CassAdmissionError::new("document_invalid", format!("{key} is required")))
+}
+
+fn parse_cass_uuid(value: impl AsRef<str>, field: &str) -> Result<String, CassAdmissionError> {
+    let value = value.as_ref().trim();
+    uuid::Uuid::parse_str(value).map_err(|_| {
+        CassAdmissionError::new("malformed_uuid", format!("{field} must be a UUID"))
+    })?;
+    Ok(value.to_string())
+}
+
+fn parse_cass_provider(value: String) -> Result<String, CassAdmissionError> {
+    if !CASS_KNOWN_PROVIDERS.contains(&value.as_str()) {
+        return Err(CassAdmissionError::new(
+            "unknown_provider",
+            format!("provider {value:?} is not registered"),
+        ));
+    }
+    Ok(value)
+}
+
+fn parse_cass_origin(value: &str) -> Result<CassOrigin, CassAdmissionError> {
+    match value {
+        "local" => Ok(CassOrigin::Local),
+        "remote" => Ok(CassOrigin::Remote),
+        _ => Err(CassAdmissionError::new(
+            "document_invalid",
+            "origin must be local or remote",
+        )),
+    }
+}
+
+fn cass_key_is_secret(key: &str) -> bool {
+    let lowered = key.to_ascii_lowercase();
+    CASS_SECRET_KEY_NEEDLES
+        .iter()
+        .any(|needle| lowered.contains(needle))
+}
+
+fn refuse_cass_secret_keys(
+    object: &serde_json::Map<String, serde_json::Value>,
+    label: &str,
+) -> Result<(), CassAdmissionError> {
+    if object.keys().any(|key| cass_key_is_secret(key)) {
+        return Err(CassAdmissionError::new(
+            "secret_shaped_key",
+            format!("{label} carries forbidden claims"),
+        ));
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests;
 

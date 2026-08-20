@@ -195,11 +195,7 @@ impl GrokCliProvider {
         let actual_argv = receipt
             .resume_argv()
             .ok_or(GrokCliProviderError::InvalidResumeReceipt)?;
-        if actual_argv
-            .iter()
-            .map(String::as_str)
-            .ne(expected_argv.into_iter())
-        {
+        if actual_argv.iter().map(String::as_str).ne(expected_argv) {
             return Err(GrokCliProviderError::InvalidResumeArgv);
         }
 

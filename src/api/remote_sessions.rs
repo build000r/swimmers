@@ -20,14 +20,19 @@ use crate::session::overlay::{
     default_overlay, default_overlay_result, ContractUnavailable, SkillboxOverlay,
 };
 use crate::types::{
-    CreateSessionRequest, CreateSessionResponse, CreateSessionsBatchRequest,
-    CreateSessionsBatchResponse, DependencyHealthStatus, DirListResponse, EnvironmentAuthSummary,
-    EnvironmentCapabilitySummary, EnvironmentSummary, ErrorResponse, LaunchPathMapping,
-    LaunchReceipt, LaunchTargetSummary, SessionAgentContextResponse, SessionEnvironmentSummary,
-    SessionGitDiffResponse, SessionGroupInputRequest, SessionGroupInputResponse,
-    SessionInputRequest, SessionInputResponse, SessionListResponse, SessionPaneTailResponse,
-    SessionSummary, SessionTimelineResponse, SessionTranscriptResponse, TerminalSnapshot,
+    CassAdmissionPreflightRequest, CassAdmissionPreflightResponse,
+    CassAwareCreateSessionsBatchRequest, CassBatchAdmissionAttachment, CreateSessionRequest,
+    CreateSessionResponse, CreateSessionsBatchRequest, CreateSessionsBatchResponse,
+    DependencyHealthStatus, DirListResponse, EnvironmentAuthSummary, EnvironmentCapabilitySummary,
+    EnvironmentSummary, ErrorResponse, LaunchPathMapping, LaunchReceipt, LaunchTargetSummary,
+    SessionAgentContextResponse, SessionEnvironmentSummary, SessionGitDiffResponse,
+    SessionGroupInputRequest, SessionGroupInputResponse, SessionInputRequest, SessionInputResponse,
+    SessionListResponse, SessionPaneTailResponse, SessionSummary, SessionTimelineResponse,
+    SessionTranscriptResponse, TerminalSnapshot,
 };
+
+#[cfg(test)]
+static REMOTE_BATCH_POSTS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
 const REMOTE_LIST_TIMEOUT: Duration = Duration::from_millis(900);
 const REMOTE_CREATE_TIMEOUT: Duration = Duration::from_secs(20);
@@ -1349,14 +1354,228 @@ pub async fn create_remote_session_on_target(
 pub async fn create_remote_sessions_batch(
     body: CreateSessionsBatchRequest,
 ) -> Result<CreateSessionsBatchResponse, RemoteSessionError> {
+    create_remote_sessions_batch_with_cass(body, CassBatchAdmissionAttachment::default()).await
+}
+
+pub async fn create_remote_sessions_batch_with_cass(
+    body: CreateSessionsBatchRequest,
+    mut cass: CassBatchAdmissionAttachment,
+) -> Result<CreateSessionsBatchResponse, RemoteSessionError> {
+    let mode =
+        crate::types::resolve_cass_admission_mode(cass.cass_admission_mode).map_err(|error| {
+            RemoteSessionError::new(
+                StatusCode::BAD_REQUEST,
+                "CASS_ADMISSION_INVALID",
+                crate::api::sessions::cass_public_error_message(&error.code),
+            )
+        })?;
+    cass.cass_admission_mode = Some(mode);
+    if mode.is_enforce() && cass.cass_reservations.is_empty() {
+        return Err(RemoteSessionError::new(
+            StatusCode::BAD_REQUEST,
+            "CASS_RESERVATION_FAILED",
+            "enforce mode requires target-bound Cass reservation IDs",
+        ));
+    }
+    if mode.is_enforce() {
+        validate_remote_cass_batch_identity(&cass)?;
+    }
     if let Some(response) = maybe_handoff_or_unsupported_batch_response(&body)? {
+        if !cass.cass_reservations.is_empty() {
+            return Err(RemoteSessionError::new(
+                StatusCode::CONFLICT,
+                "CASS_ADMISSION_UNRESOLVED",
+                "attached Cass reservations cannot be settled by a non-API launch target",
+            ));
+        }
         return Ok(response);
     }
-    let batch = prepare_remote_sessions_batch(body)?;
-    let mut response =
-        create_remote_sessions_batch_on_target(&batch.target, batch.remote_body).await?;
+    let batch = prepare_remote_sessions_batch_with_cass(body, cass)?;
+    let mut response = create_remote_sessions_batch_on_target_with_cass(
+        &batch.target,
+        batch.remote_body,
+        batch.cass,
+    )
+    .await?;
     restore_original_batch_cwds(&mut response, &batch.original_dirs)?;
     Ok(response)
+}
+
+pub async fn admit_remote_sessions_batch(
+    body: CassAdmissionPreflightRequest,
+) -> Result<CassAdmissionPreflightResponse, RemoteSessionError> {
+    let target_id = required_target_id(body.launch_target.as_deref())?;
+    let original_dirs = require_batch_dirs(body.dirs.clone())?;
+    if original_dirs.len() != body.intents.len() {
+        return Err(RemoteSessionError::new(
+            StatusCode::BAD_REQUEST,
+            "VALIDATION_FAILED",
+            "admission intents must match dirs one-for-one",
+        ));
+    }
+    let batch_id = body
+        .intents
+        .first()
+        .map(|intent| intent.batch_id.as_str())
+        .ok_or_else(|| {
+            RemoteSessionError::new(
+                StatusCode::BAD_REQUEST,
+                "VALIDATION_FAILED",
+                "admission preflight requires intents",
+            )
+        })?;
+    if body
+        .intents
+        .iter()
+        .any(|intent| intent.batch_id != batch_id)
+    {
+        return Err(RemoteSessionError::new(
+            StatusCode::BAD_REQUEST,
+            "CASS_RESERVATION_FAILED",
+            "admission intents must share one canonical batch_id",
+        ));
+    }
+    let targets = original_dirs
+        .iter()
+        .map(|cwd| resolve_launch_target_for_cwd(cwd, target_id))
+        .collect::<Result<Vec<_>, _>>()?;
+    let target = batch_endpoint_target(target_id, &targets)?;
+    let mode =
+        crate::types::resolve_cass_admission_mode(body.cass_admission_mode).map_err(|error| {
+            RemoteSessionError::new(
+                StatusCode::BAD_REQUEST,
+                "CASS_ADMISSION_INVALID",
+                crate::api::sessions::cass_public_error_message(&error.code),
+            )
+        })?;
+    if !mode.is_enforce() {
+        return Ok(CassAdmissionPreflightResponse {
+            target_id: target.id,
+            batch_id: batch_id.to_string(),
+            reservations: Vec::new(),
+        });
+    }
+    let remote_dirs = map_batch_cwds_for_targets(&targets, &original_dirs)?;
+    let remote_body = CassAdmissionPreflightRequest {
+        dirs: remote_dirs,
+        spawn_tool: body.spawn_tool,
+        launch_target: None,
+        cass_admission_mode: Some(mode),
+        intents: body.intents,
+    };
+    admit_remote_sessions_batch_on_target(&target, remote_body).await
+}
+
+pub(crate) async fn admit_remote_sessions_batch_on_target(
+    target: &LaunchTargetSummary,
+    mut body: CassAdmissionPreflightRequest,
+) -> Result<CassAdmissionPreflightResponse, RemoteSessionError> {
+    ensure_swimmers_api_target(target)?;
+    ensure_not_current_server_target(target)?;
+    let mode =
+        crate::types::resolve_cass_admission_mode(body.cass_admission_mode).map_err(|error| {
+            RemoteSessionError::new(
+                StatusCode::BAD_REQUEST,
+                "CASS_ADMISSION_INVALID",
+                crate::api::sessions::cass_public_error_message(&error.code),
+            )
+        })?;
+    body.cass_admission_mode = Some(mode);
+    let client = http_client(REMOTE_CREATE_TIMEOUT)?;
+    let url = remote_url(target, "/v1/sessions/batch/admission")?;
+    let expected_batch_id = body
+        .intents
+        .first()
+        .map(|intent| intent.batch_id.clone())
+        .ok_or_else(|| {
+            RemoteSessionError::new(
+                StatusCode::BAD_REQUEST,
+                "VALIDATION_FAILED",
+                "admission preflight requires intents",
+            )
+        })?;
+    let expected_len = body.intents.len();
+    let response = with_remote_auth(client.post(url), target)?
+        .json(&body)
+        .send()
+        .await
+        .map_err(|err| {
+            RemoteSessionError::new(
+                StatusCode::BAD_GATEWAY,
+                "REMOTE_LAUNCH_FAILED",
+                format!("failed to admit sessions on '{}': {err}", target.id),
+            )
+        })?;
+    if !response.status().is_success() {
+        let error = remote_response_error(
+            target,
+            response,
+            "CASS_RESERVATION_FAILED",
+            format!(
+                "remote target '{}' rejected Cass admission preflight",
+                target.id
+            ),
+        )
+        .await;
+        return Err(sanitize_remote_cass_error(
+            error,
+            "Remote Cass admission failed; target reservations may require reconciliation",
+        ));
+    }
+    let mut admitted = response
+        .json::<CassAdmissionPreflightResponse>()
+        .await
+        .map_err(|err| {
+            RemoteSessionError::new(
+                StatusCode::BAD_GATEWAY,
+                "REMOTE_LAUNCH_FAILED",
+                format!(
+                    "failed to parse admission preflight from '{}': {err}",
+                    target.id
+                ),
+            )
+        })?;
+    if admitted.target_id != "local"
+        || admitted.batch_id != expected_batch_id
+        || admitted.reservations.len() != expected_len
+    {
+        return Err(RemoteSessionError::new(
+            StatusCode::BAD_GATEWAY,
+            "CASS_RESERVATION_FAILED",
+            "remote admission returned an unbound reservation batch",
+        ));
+    }
+    for (index, reservation) in admitted.reservations.iter().enumerate() {
+        let validated = crate::types::CassAdmissionReservationEnvelope::from_value(
+            &serde_json::to_value(reservation).map_err(|_| {
+                RemoteSessionError::new(
+                    StatusCode::BAD_GATEWAY,
+                    "CASS_RESERVATION_FAILED",
+                    "remote admission returned an invalid reservation envelope",
+                )
+            })?,
+        )
+        .map_err(|_| {
+            RemoteSessionError::new(
+                StatusCode::BAD_GATEWAY,
+                "CASS_RESERVATION_FAILED",
+                "remote admission returned an invalid reservation envelope",
+            )
+        })?;
+        if validated.batch_id != expected_batch_id
+            || validated.batch_index != index as u64
+            || validated.index != index as u64
+            || validated.target_id != "local"
+        {
+            return Err(RemoteSessionError::new(
+                StatusCode::BAD_GATEWAY,
+                "CASS_RESERVATION_FAILED",
+                "remote admission returned a mismatched reservation envelope",
+            ));
+        }
+    }
+    admitted.target_id = target.id.clone();
+    Ok(admitted)
 }
 
 #[derive(Debug)]
@@ -1364,12 +1583,86 @@ struct PreparedRemoteSessionsBatch {
     target: LaunchTargetSummary,
     original_dirs: Vec<String>,
     remote_body: CreateSessionsBatchRequest,
+    cass: CassBatchAdmissionAttachment,
 }
 
+#[allow(dead_code)]
 fn prepare_remote_sessions_batch(
     body: CreateSessionsBatchRequest,
 ) -> Result<PreparedRemoteSessionsBatch, RemoteSessionError> {
-    prepare_remote_sessions_batch_with_resolver(body, resolve_launch_target_for_cwd)
+    prepare_remote_sessions_batch_with_cass(body, CassBatchAdmissionAttachment::default())
+}
+
+fn prepare_remote_sessions_batch_with_cass(
+    body: CreateSessionsBatchRequest,
+    cass: CassBatchAdmissionAttachment,
+) -> Result<PreparedRemoteSessionsBatch, RemoteSessionError> {
+    let mut prepared =
+        prepare_remote_sessions_batch_with_resolver(body, resolve_launch_target_for_cwd)?;
+    if !cass.cass_reservations.is_empty() {
+        let preflight_target = cass.cass_preflight_target_id.as_deref().ok_or_else(|| {
+            RemoteSessionError::new(
+                StatusCode::BAD_REQUEST,
+                "CASS_RESERVATION_FAILED",
+                "Cass reservations require the target id returned by admission preflight",
+            )
+        })?;
+        if preflight_target != prepared.target.id {
+            return Err(RemoteSessionError::new(
+                StatusCode::BAD_REQUEST,
+                "CASS_RESERVATION_FAILED",
+                "routing target changed between Cass preflight and batch create",
+            ));
+        }
+    }
+    prepared.cass = CassBatchAdmissionAttachment {
+        cass_batch_id: cass.cass_batch_id,
+        cass_reservations: cass.cass_reservations,
+        cass_admission_mode: cass.cass_admission_mode,
+        cass_preflight_target_id: Some("local".to_string()),
+    };
+    Ok(prepared)
+}
+
+fn validate_remote_cass_batch_identity(
+    cass: &CassBatchAdmissionAttachment,
+) -> Result<(), RemoteSessionError> {
+    let batch_id = cass.cass_batch_id.as_deref().ok_or_else(|| {
+        RemoteSessionError::new(
+            StatusCode::BAD_REQUEST,
+            "CASS_RESERVATION_FAILED",
+            "enforce mode requires the canonical Cass batch_id from preflight",
+        )
+    })?;
+    let mut reservation_ids = std::collections::BTreeSet::new();
+    for (index, reservation) in cass.cass_reservations.iter().enumerate() {
+        reservation.validate().map_err(|error| {
+            RemoteSessionError::new(
+                StatusCode::BAD_REQUEST,
+                "CASS_RESERVATION_FAILED",
+                crate::api::sessions::cass_public_error_message(&error.code),
+            )
+        })?;
+        let reservation_index = reservation.index.unwrap_or(reservation.batch_index) as usize;
+        if reservation.batch_id != batch_id
+            || reservation_index != index
+            || !reservation_ids.insert(reservation.reservation_id.as_str())
+        {
+            return Err(RemoteSessionError::new(
+                StatusCode::BAD_REQUEST,
+                "CASS_RESERVATION_FAILED",
+                "wrong, replayed, foreign, or mixed-batch Cass reservation",
+            ));
+        }
+        if reservation.target_id.as_deref() != Some("local") {
+            return Err(RemoteSessionError::new(
+                StatusCode::BAD_REQUEST,
+                "CASS_RESERVATION_FAILED",
+                "Cass reservation is not bound to the target-local admission authority",
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn prepare_remote_sessions_batch_with_resolver<F>(
@@ -1398,6 +1691,7 @@ where
             launch_target: None,
             initial_request: body.initial_request,
         },
+        cass: CassBatchAdmissionAttachment::default(),
     })
 }
 
@@ -1604,17 +1898,85 @@ fn malformed_remote_batch_response(message: impl Into<String>) -> RemoteSessionE
     )
 }
 
+fn record_remote_batch_post() {
+    #[cfg(test)]
+    REMOTE_BATCH_POSTS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+}
+
+#[cfg(test)]
+pub(crate) fn take_remote_batch_posts() -> usize {
+    REMOTE_BATCH_POSTS.swap(0, std::sync::atomic::Ordering::SeqCst)
+}
+
 pub async fn create_remote_sessions_batch_on_target(
     target: &LaunchTargetSummary,
+    body: CreateSessionsBatchRequest,
+) -> Result<CreateSessionsBatchResponse, RemoteSessionError> {
+    create_remote_sessions_batch_on_target_with_cass(
+        target,
+        body,
+        CassBatchAdmissionAttachment::default(),
+    )
+    .await
+}
+
+pub(crate) async fn create_remote_sessions_batch_on_target_with_cass(
+    target: &LaunchTargetSummary,
     mut body: CreateSessionsBatchRequest,
+    mut cass: CassBatchAdmissionAttachment,
 ) -> Result<CreateSessionsBatchResponse, RemoteSessionError> {
     ensure_swimmers_api_target(target)?;
     ensure_not_current_server_target(target)?;
     body.launch_target = None;
+    let mode =
+        crate::types::resolve_cass_admission_mode(cass.cass_admission_mode).map_err(|error| {
+            RemoteSessionError::new(
+                StatusCode::BAD_REQUEST,
+                "CASS_ADMISSION_INVALID",
+                crate::api::sessions::cass_public_error_message(&error.code),
+            )
+        })?;
+    cass.cass_admission_mode = Some(mode);
+    if mode.is_enforce() && cass.cass_reservations.is_empty() {
+        return Err(RemoteSessionError::new(
+            StatusCode::BAD_REQUEST,
+            "CASS_RESERVATION_FAILED",
+            "enforce mode requires target-bound Cass reservation IDs",
+        ));
+    }
+    if !cass.cass_reservations.is_empty() {
+        if !matches!(
+            cass.cass_preflight_target_id.as_deref(),
+            Some(preflight) if preflight == target.id || preflight == "local"
+        ) {
+            return Err(RemoteSessionError::new(
+                StatusCode::BAD_REQUEST,
+                "CASS_RESERVATION_FAILED",
+                "Cass reservations are missing their target-local preflight binding",
+            ));
+        }
+        if cass
+            .cass_reservations
+            .iter()
+            .any(|reservation| reservation.target_id.as_deref() != Some("local"))
+        {
+            return Err(RemoteSessionError::new(
+                StatusCode::BAD_REQUEST,
+                "CASS_RESERVATION_FAILED",
+                "Cass reservation is not bound to the target-local admission authority",
+            ));
+        }
+        cass.cass_preflight_target_id = Some("local".to_string());
+    }
+    record_remote_batch_post();
     let client = http_client(REMOTE_CREATE_TIMEOUT)?;
     let url = remote_url(target, "/v1/sessions/batch")?;
+    let payload = CassAwareCreateSessionsBatchRequest {
+        request: body,
+        cass,
+    };
     let response = with_remote_auth(client.post(url), target)?
-        .json(&body)
+        .json(&payload)
         .send()
         .await
         .map_err(|err| {
@@ -1626,7 +1988,7 @@ pub async fn create_remote_sessions_batch_on_target(
         })?;
 
     if !response.status().is_success() {
-        return Err(remote_response_error(
+        let error = remote_response_error(
             target,
             response,
             "REMOTE_LAUNCH_FAILED",
@@ -1635,7 +1997,14 @@ pub async fn create_remote_sessions_batch_on_target(
                 target.id
             ),
         )
-        .await);
+        .await;
+        if mode.is_enforce() {
+            return Err(sanitize_remote_cass_error(
+                error,
+                "Remote Cass launch outcome is unresolved; verify the target before retrying",
+            ));
+        }
+        return Err(error);
     }
 
     let mut body = response
@@ -1651,6 +2020,16 @@ pub async fn create_remote_sessions_batch_on_target(
                 ),
             )
         })?;
+    if mode.is_enforce() {
+        for result in &mut body.results {
+            if let Some(error) = result.error.as_mut() {
+                error.message = Some(
+                    "Cass admission failed on the remote target; verify target state before retrying"
+                        .to_string(),
+                );
+            }
+        }
+    }
     for result in &mut body.results {
         if let Some(session) = result.session.take() {
             let session = namespace_session_summary(target, session);
@@ -2676,6 +3055,13 @@ async fn remote_response_error(
         code,
         format!("{message} (remote status {status})"),
     )
+}
+
+fn sanitize_remote_cass_error(
+    error: RemoteSessionError,
+    public_message: &'static str,
+) -> RemoteSessionError {
+    RemoteSessionError::new(error.status, error.code, public_message)
 }
 
 fn is_safe_remote_client_error(status: StatusCode) -> bool {

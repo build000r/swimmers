@@ -37,12 +37,12 @@ use crate::thought::runtime_config::ThoughtConfig;
 use crate::thought_ui::thought_config_ui_metadata;
 use crate::tmux_target::TmuxTarget;
 use crate::types::{
-    CreateSessionResponse, CreateSessionsBatchResponse, CreateSessionsBatchResult, DirEntry,
-    DirGroupMemberships, DirListResponse, DirRepoActionResponse, DirRestartResponse, ErrorResponse,
-    LaunchReceipt, LaunchTargetSummary, NativeDesktopApp, NativeDesktopOpenResponse,
-    NativeDesktopStatusResponse, PlanFileResponse, RepoActionKind, RepoActionState,
-    RepoActionStatus, RepoTheme, SessionBatchMembership, SessionState, SessionSummary, SpawnTool,
-    ThoughtConfigResponse,
+    CassAdmissionError, CreateSessionResponse, CreateSessionsBatchResponse,
+    CreateSessionsBatchResult, DirEntry, DirGroupMemberships, DirListResponse,
+    DirRepoActionResponse, DirRestartResponse, ErrorResponse, LaunchReceipt, LaunchTargetSummary,
+    NativeDesktopApp, NativeDesktopOpenResponse, NativeDesktopStatusResponse, PlanFileResponse,
+    RepoActionKind, RepoActionState, RepoActionStatus, RepoTheme, SessionBatchMembership,
+    SessionState, SessionSummary, SpawnTool, ThoughtConfigResponse,
 };
 
 static THOUGHT_CONFIG_VERSION: AtomicU64 = AtomicU64::new(0);
@@ -665,6 +665,7 @@ pub fn create_sessions_batch_result(
             error: None,
         },
         Err(err) => {
+            let cass_error = err.downcast_ref::<CassAdmissionError>();
             let msg = err.to_string();
             CreateSessionsBatchResult {
                 index,
@@ -673,7 +674,13 @@ pub fn create_sessions_batch_result(
                 launch_receipt: None,
                 session: None,
                 repo_theme: None,
-                error: Some(create_session_error(&msg)),
+                error: Some(match cass_error {
+                    Some(error) => ErrorResponse::with_message(
+                        crate::api::sessions::cass_error_code(&error.code),
+                        crate::api::sessions::cass_public_error_message(&error.code),
+                    ),
+                    None => create_session_error(&msg),
+                }),
             }
         }
     }

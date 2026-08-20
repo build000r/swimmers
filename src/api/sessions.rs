@@ -42,15 +42,20 @@ mod session_mermaid;
 mod structured_context;
 mod timeline;
 
+pub(crate) use self::core_routes::{cass_error_code, cass_public_error_message};
+
 #[cfg(test)]
 use self::context_routes::{
     agent_context_read_response, fetch_transcript_response, remote_agent_context_response,
     remote_transcript_response, transcript_read_response,
 };
 use self::context_routes::{get_agent_context, get_transcript, TranscriptQuery};
+#[cfg(test)]
+use self::core_routes::create_sessions_batch;
 use self::core_routes::{
-    adopt_session, create_session, create_sessions_batch, delete_session, dismiss_attention,
-    error_response, get_snapshot, list_environments, list_sessions, send_input,
+    admit_sessions_batch, adopt_session, create_session, create_sessions_batch_http,
+    delete_session, dismiss_attention, error_response, get_snapshot, list_environments,
+    list_sessions, send_input,
 };
 #[cfg(test)]
 use self::core_routes::{
@@ -93,7 +98,8 @@ pub fn routes() -> Router<Arc<AppState>> {
         .route("/v1/sessions", get(list_sessions).post(create_session))
         .route("/v1/sessions/adopt", post(adopt_session))
         .route("/v1/sessions/reattach", post(adopt_session))
-        .route("/v1/sessions/batch", post(create_sessions_batch))
+        .route("/v1/sessions/batch", post(create_sessions_batch_http))
+        .route("/v1/sessions/batch/admission", post(admit_sessions_batch))
         .route("/v1/sessions/group-input", post(send_group_input))
         .route("/v1/sessions/{session_id}", delete(delete_session))
         .route(

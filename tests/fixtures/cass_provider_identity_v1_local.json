@@ -1,0 +1,9 @@
+{
+  "schema_version": "cass_provider_identity/v1",
+  "provider": "codex",
+  "provider_session_id": "018f0e11-7c3a-7000-8000-000000000001",
+  "swimmers_session_id": "018f0e11-7c3a-7000-8000-000000000002",
+  "batch_id": "018f0e11-7c3a-7000-8000-0000000000aa",
+  "batch_index": 0,
+  "origin": "local"
+}

@@ -93,6 +93,16 @@ fn shared_remote_cache_test_guard() -> std::sync::MutexGuard<'static, ()> {
         .unwrap_or_else(|poison| poison.into_inner())
 }
 
+fn run_shared_remote_cache_test<F>(future: F) -> F::Output
+where
+    F: std::future::Future,
+{
+    let _guard = shared_remote_cache_test_guard();
+    tokio::runtime::Runtime::new()
+        .expect("create remote cache test runtime")
+        .block_on(future)
+}
+
 async fn capture_create_session(
     axum::extract::State(state): axum::extract::State<CaptureState>,
     headers: HeaderMap,
@@ -2726,6 +2736,241 @@ async fn remote_api_smoke_matrix_covers_launch_reads_scopes_and_redaction() {
     handle.abort();
     std::env::remove_var(REMOTE_OPERATOR_TOKEN_ENV);
     std::env::remove_var(REMOTE_OBSERVER_TOKEN_ENV);
+}
+
+#[derive(Clone, Default)]
+struct CassRemoteState {
+    requests: Arc<Mutex<Vec<(String, serde_json::Value)>>>,
+    refuse_reserve: bool,
+}
+
+async fn cass_remote_admission(
+    axum::extract::State(state): axum::extract::State<CassRemoteState>,
+    headers: HeaderMap,
+    AxumJson(body): AxumJson<crate::types::CassAdmissionPreflightRequest>,
+) -> Response {
+    state.requests.lock().await.push((
+        "POST /v1/sessions/batch/admission".to_string(),
+        serde_json::to_value(&body).expect("admission body"),
+    ));
+    if remote_smoke_scope(&headers) != RemoteSmokeScope::Operator {
+        return remote_smoke_auth_error(&headers, "operator");
+    }
+    if state.refuse_reserve {
+        return (
+            StatusCode::BAD_REQUEST,
+            AxumJson(error_body_msg(
+                "CASS_RESERVATION_FAILED",
+                "forced remote reserve failure",
+            )),
+        )
+            .into_response();
+    }
+    let reservations = body
+        .intents
+        .iter()
+        .enumerate()
+        .map(
+            |(index, intent)| crate::types::CassAdmissionReservationEnvelope {
+                schema_version: crate::types::CASS_ADMISSION_RESERVATION_SCHEMA.to_string(),
+                reservation_id: format!("rsv_remote_{index:0>64}")
+                    .chars()
+                    .take(68)
+                    .collect(),
+                batch_id: intent.batch_id.clone(),
+                batch_index: intent.batch_index,
+                index: index as u64,
+                target_id: "local".to_string(),
+            },
+        )
+        .collect();
+    (
+        StatusCode::OK,
+        AxumJson(crate::types::CassAdmissionPreflightResponse {
+            target_id: "local".to_string(),
+            batch_id: body.intents[0].batch_id.clone(),
+            reservations,
+        }),
+    )
+        .into_response()
+}
+
+async fn cass_remote_batch(
+    axum::extract::State(state): axum::extract::State<CassRemoteState>,
+    headers: HeaderMap,
+    AxumJson(body): AxumJson<serde_json::Value>,
+) -> Response {
+    state
+        .requests
+        .lock()
+        .await
+        .push(("POST /v1/sessions/batch".to_string(), body.clone()));
+    if remote_smoke_scope(&headers) != RemoteSmokeScope::Operator {
+        return remote_smoke_auth_error(&headers, "operator");
+    }
+    (
+        StatusCode::CREATED,
+        AxumJson(CreateSessionsBatchResponse {
+            results: vec![batch_result(0, "/monoserver/opensource/swimmers")],
+        }),
+    )
+        .into_response()
+}
+
+async fn spawn_cass_remote_server(
+    refuse_reserve: bool,
+) -> (String, tokio::task::JoinHandle<()>, CassRemoteState) {
+    let state = CassRemoteState {
+        requests: Arc::new(Mutex::new(Vec::new())),
+        refuse_reserve,
+    };
+    let app = Router::new()
+        .route("/v1/sessions/batch/admission", post(cass_remote_admission))
+        .route("/v1/sessions/batch", post(cass_remote_batch))
+        .with_state(state.clone());
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind cass remote");
+    let addr = listener.local_addr().expect("local addr");
+    let handle = tokio::spawn(async move {
+        axum::serve(listener, app).await.expect("serve cass remote");
+    });
+    (format!("http://{addr}"), handle, state)
+}
+
+fn cass_intent_fixture() -> crate::types::CassAdmissionIntent {
+    crate::types::CassAdmissionIntent::from_json_str(include_str!(
+        "../../../tests/fixtures/cass_admission_intent_v1.json"
+    ))
+    .expect("intent fixture")
+}
+
+#[test]
+fn cass_admission_remote_failed_reserve_does_not_post_batch() {
+    run_shared_remote_cache_test(async {
+        std::env::set_var(REMOTE_OPERATOR_TOKEN_ENV, REMOTE_OPERATOR_TOKEN);
+        crate::api::remote_sessions::take_remote_batch_posts();
+        let (base_url, handle, state) = spawn_cass_remote_server(true).await;
+        let target = remote_smoke_target(&base_url, REMOTE_OPERATOR_TOKEN_ENV);
+
+        let err = admit_remote_sessions_batch_on_target(
+            &target,
+            crate::types::CassAdmissionPreflightRequest {
+                dirs: vec!["/monoserver/opensource/swimmers".to_string()],
+                spawn_tool: Some(SpawnTool::Codex),
+                launch_target: None,
+                cass_admission_mode: Some(crate::types::CassAdmissionMode::Enforce),
+                intents: vec![cass_intent_fixture()],
+            },
+        )
+        .await
+        .expect_err("remote reserve failure");
+        assert_eq!(err.code(), "CASS_RESERVATION_FAILED");
+        assert_eq!(
+            err.message(),
+            "Remote Cass admission failed; target reservations may require reconciliation"
+        );
+        assert!(!err.message().contains("forced remote reserve failure"));
+
+        let batch_err = create_remote_sessions_batch_with_cass(
+            CreateSessionsBatchRequest {
+                dirs: vec!["/workspace/repos/opensource/swimmers".to_string()],
+                spawn_tool: Some(SpawnTool::Codex),
+                tmux_target: None,
+                launch_target: Some("jeremy-skillbox".to_string()),
+                initial_request: Some("continue".to_string()),
+            },
+            crate::types::CassBatchAdmissionAttachment {
+                cass_batch_id: None,
+                cass_reservations: Vec::new(),
+                cass_admission_mode: Some(crate::types::CassAdmissionMode::Enforce),
+                cass_preflight_target_id: Some("jeremy-skillbox".to_string()),
+            },
+        )
+        .await
+        .expect_err("missing reservation must not POST");
+        assert_eq!(batch_err.code(), "CASS_RESERVATION_FAILED");
+        assert_eq!(crate::api::remote_sessions::take_remote_batch_posts(), 0);
+        assert!(state
+            .requests
+            .lock()
+            .await
+            .iter()
+            .all(|(path, _)| path != "POST /v1/sessions/batch"));
+        handle.abort();
+        std::env::remove_var(REMOTE_OPERATOR_TOKEN_ENV);
+    });
+}
+
+#[test]
+fn cass_admission_remote_preflight_forwards_and_preserves_reservation() {
+    run_shared_remote_cache_test(async {
+        let _token_guard = TestEnvGuard::set(REMOTE_OPERATOR_TOKEN_ENV, REMOTE_OPERATOR_TOKEN);
+        let _mode_guard = TestEnvGuard::set("SKILLBOX_CASS_ADMISSION_MODE", "enforce");
+        crate::api::remote_sessions::take_remote_batch_posts();
+        let (base_url, handle, state) = spawn_cass_remote_server(false).await;
+        let target = remote_smoke_target(&base_url, REMOTE_OPERATOR_TOKEN_ENV);
+        let intent = cass_intent_fixture();
+
+        let admitted = admit_remote_sessions_batch_on_target(
+            &target,
+            crate::types::CassAdmissionPreflightRequest {
+                dirs: vec!["/monoserver/opensource/swimmers".to_string()],
+                spawn_tool: Some(SpawnTool::Codex),
+                launch_target: None,
+                cass_admission_mode: None,
+                intents: vec![intent.clone()],
+            },
+        )
+        .await
+        .expect("remote preflight");
+        assert_eq!(admitted.target_id, "jeremy-skillbox");
+        assert_eq!(admitted.reservations.len(), 1);
+        assert_eq!(admitted.reservations[0].target_id, "local");
+        assert!(admitted.reservations[0].reservation_id.starts_with("rsv_"));
+
+        let requests = state.requests.lock().await;
+        let admission = requests
+            .iter()
+            .find(|(path, _)| path == "POST /v1/sessions/batch/admission")
+            .expect("admission POST");
+        assert_eq!(admission.1["cass_admission_mode"], "enforce");
+        drop(requests);
+
+        let reservation = admitted.reservations[0].as_ref_token();
+        let _ = create_remote_sessions_batch_on_target_with_cass(
+            &target,
+            CreateSessionsBatchRequest {
+                dirs: vec!["/monoserver/opensource/swimmers".to_string()],
+                spawn_tool: Some(SpawnTool::Codex),
+                tmux_target: None,
+                launch_target: None,
+                initial_request: Some("continue".to_string()),
+            },
+            crate::types::CassBatchAdmissionAttachment {
+                cass_batch_id: Some(admitted.batch_id.clone()),
+                cass_reservations: vec![reservation.clone()],
+                cass_admission_mode: Some(crate::types::CassAdmissionMode::Enforce),
+                cass_preflight_target_id: Some("jeremy-skillbox".to_string()),
+            },
+        )
+        .await
+        .expect("remote batch with reservation");
+
+        let requests = state.requests.lock().await;
+        let batch = requests
+            .iter()
+            .find(|(path, _)| path == "POST /v1/sessions/batch")
+            .expect("batch POST");
+        assert_eq!(
+            batch.1["cass_reservations"][0]["reservation_id"],
+            reservation.reservation_id
+        );
+        assert_eq!(batch.1["cass_reservations"][0]["target_id"], "local");
+        assert_eq!(batch.1["cass_preflight_target_id"], "local");
+        assert_eq!(batch.1["cass_admission_mode"], "enforce");
+        handle.abort();
+    });
 }
 
 #[test]

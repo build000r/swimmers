@@ -1,0 +1,13 @@
+{
+  "schema_version": "cass_admission_intent/v1",
+  "provider": "codex",
+  "batch_id": "018f0e11-7c3a-7000-8000-0000000000aa",
+  "batch_index": 0,
+  "family_id": "htma",
+  "locality": "local",
+  "adapter_id": "codex-jsonl-v1",
+  "source_id": "codex",
+  "path_template": "sessions/{provider_session_id}.jsonl",
+  "max_next_chunk_bytes": 65536,
+  "provider_session_id": "018f0e11-7c3a-7000-8000-000000000001"
+}

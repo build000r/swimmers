@@ -14,8 +14,11 @@ use uuid::Uuid;
 
 use crate::launcher::{create_private_file, prepare_private_dir};
 use crate::types::{
-    AuthorizedProviderResumeLaunchReceipt, AuthorizedProviderResumeReceipt, LaunchReceipt,
-    ProviderResumeCaptureSource, ProviderResumeProvider, SpawnTool,
+    AuthorizedProviderResumeLaunchReceipt, AuthorizedProviderResumeReceipt, CassAdmissionCommandOp,
+    CassAdmissionCommandRequest, CassAdmissionCommandResponse, CassAdmissionError,
+    CassAdmissionReservationRef, CassAdmissionSubject, CassOrigin, CassProviderIdentity,
+    LaunchReceipt, ProviderResumeCaptureSource, ProviderResumeProvider, SpawnTool,
+    CASS_ADMISSION_COMMAND_SCHEMA,
 };
 
 use self::codex_app_server::{launch_codex_app_server, CodexAppServerLaunchRequest};
@@ -25,6 +28,18 @@ const RECEIPT_DIR: &str = "provider_resume_receipts";
 const GROK_PROMPT_DIR: &str = "provider_launch_prompts";
 const GROK_START_CONFIRM_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
 const GROK_START_CONFIRM_POLL: std::time::Duration = std::time::Duration::from_millis(20);
+const CASS_ADMISSION_CMD_ENV: &str = "SKILLBOX_CASS_ADMISSION_CMD_JSON";
+const CASS_ADMISSION_TIMEOUT_ENV: &str = "SKILLBOX_CASS_ADMISSION_TIMEOUT_MS";
+const DEFAULT_CASS_ADMISSION_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
+#[cfg(test)]
+static CODEX_APP_SERVER_LAUNCH_CALLS: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+#[cfg(test)]
+static LAST_CASS_PROVIDER_IDENTITY: std::sync::Mutex<Option<CassProviderIdentity>> =
+    std::sync::Mutex::new(None);
+#[cfg(test)]
+static LAST_CASS_COMMAND_OPS: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
 
 pub(super) struct PreparedProviderLaunch {
     command: String,
@@ -45,6 +60,19 @@ enum PreparedProviderReceipt {
 impl PreparedProviderLaunch {
     pub(super) fn command(&self) -> &str {
         &self.command
+    }
+
+    #[allow(dead_code)]
+    pub(super) fn provider_conversation_id(&self) -> Option<&str> {
+        self.captured_resume()
+            .and_then(AuthorizedProviderResumeReceipt::conversation_id)
+    }
+
+    pub(super) fn captured_resume(&self) -> Option<&AuthorizedProviderResumeReceipt> {
+        match &self.receipt {
+            PreparedProviderReceipt::Captured(receipt) => Some(receipt),
+            PreparedProviderReceipt::Grok { .. } => None,
+        }
     }
 
     pub(super) fn take_cleanup_paths(&mut self) -> Vec<PathBuf> {
@@ -113,6 +141,10 @@ pub(super) async fn prepare_provider_launch(
             let Some(initial_request) = initial_request else {
                 return Ok(None);
             };
+            record_codex_app_server_launch();
+            if let Some(launch) = cass_test_provider_launch(&cwd, initial_request)? {
+                return Ok(Some(launch));
+            }
             let request =
                 CodexAppServerLaunchRequest::new(&cwd, Map::new(), initial_request.to_string());
             let launch = launch_codex_app_server(request)
@@ -155,10 +187,20 @@ fn prepare_grok_launch(
     trailing_args.push(OsString::from("--always-approve"));
     trailing_args.push(OsString::from("--no-alt-screen"));
 
-    let launch = provider
-        .prepare_launch(cwd, trailing_args)
-        .context("failed to prepare Grok provider launch")?;
-    let confirmation = GrokLaunchConfirmation::new()?;
+    let launch = match provider.prepare_launch(cwd, trailing_args) {
+        Ok(launch) => launch,
+        Err(error) => {
+            remove_prelaunch_files(&cleanup_paths);
+            return Err(error).context("failed to prepare Grok provider launch");
+        }
+    };
+    let confirmation = match GrokLaunchConfirmation::new() {
+        Ok(confirmation) => confirmation,
+        Err(error) => {
+            remove_prelaunch_files(&cleanup_paths);
+            return Err(error);
+        }
+    };
     cleanup_paths.push(confirmation.path.clone());
     let command = confirmation.wrap_command(&launch.display_command());
     Ok(PreparedProviderLaunch {
@@ -240,11 +282,25 @@ fn write_provider_prompt(initial_request: &str) -> anyhow::Result<PathBuf> {
     let path = dir.join(format!("{}.txt", Uuid::new_v4()));
     let mut file =
         create_private_file(&path).context("failed to create private provider prompt")?;
-    file.write_all(initial_request.as_bytes())
-        .context("failed to write private provider prompt")?;
-    file.sync_all()
-        .context("failed to sync private provider prompt")?;
+    let write_result = (|| -> anyhow::Result<()> {
+        file.write_all(initial_request.as_bytes())
+            .context("failed to write private provider prompt")?;
+        file.sync_all()
+            .context("failed to sync private provider prompt")?;
+        Ok(())
+    })();
+    drop(file);
+    if let Err(error) = write_result {
+        let _ = fs::remove_file(&path);
+        return Err(error);
+    }
     Ok(path)
+}
+
+fn remove_prelaunch_files(paths: &[PathBuf]) {
+    for path in paths {
+        let _ = fs::remove_file(path);
+    }
 }
 
 pub(super) fn unknown_launch_receipt(
@@ -390,6 +446,339 @@ fn hex_name(value: &str) -> String {
         .iter()
         .map(|byte| format!("{byte:02x}"))
         .collect()
+}
+
+pub(crate) fn cass_provider_identity_from_resume(
+    resume: &AuthorizedProviderResumeReceipt,
+    swimmers_session_id: &str,
+    batch_id: &str,
+    batch_index: u64,
+    origin: CassOrigin,
+) -> Result<CassProviderIdentity, CassAdmissionError> {
+    let provider_session_id = resume.conversation_id().ok_or_else(|| {
+        CassAdmissionError::new(
+            "malformed_uuid",
+            "provider session UUID is missing after allocation",
+        )
+    })?;
+    let provider = match resume.provider() {
+        ProviderResumeProvider::Codex => "codex",
+        ProviderResumeProvider::Grok => "grok",
+        ProviderResumeProvider::Claude => "claude",
+        ProviderResumeProvider::Unknown => "swimmers",
+    };
+    let identity = CassProviderIdentity {
+        schema_version: crate::types::CASS_PROVIDER_IDENTITY_SCHEMA.to_string(),
+        provider: provider.to_string(),
+        provider_session_id: provider_session_id.to_string(),
+        swimmers_session_id: swimmers_session_id.to_string(),
+        batch_id: batch_id.to_string(),
+        batch_index,
+        origin,
+    };
+    let value = serde_json::to_value(&identity).map_err(|error| {
+        CassAdmissionError::new(
+            "document_invalid",
+            format!("failed to emit cass_provider_identity/v1: {error}"),
+        )
+    })?;
+    let parsed = CassProviderIdentity::from_value(&value)?;
+    remember_cass_provider_identity(&parsed);
+    Ok(parsed)
+}
+
+pub(crate) async fn refine_cass_provider_identity(
+    reservation: &CassAdmissionReservationRef,
+    identity: CassProviderIdentity,
+) -> Result<CassAdmissionSubject, CassAdmissionError> {
+    let expected_reservation_id = reservation.reservation_id.clone();
+    let expected_provider_session_id = identity.provider_session_id.clone();
+    let response = run_cass_admission_command(CassAdmissionCommandRequest::refine(
+        expected_reservation_id.clone(),
+        identity,
+    ))
+    .await?;
+    if !response.ok {
+        let error = response
+            .error
+            .unwrap_or(crate::types::CassAdmissionCommandError {
+                code: "refinement_failure".to_string(),
+                message: "refine-provider-identity refused".to_string(),
+            });
+        return Err(CassAdmissionError::new(error.code, error.message));
+    }
+    if response.reservation_id.as_deref() != Some(expected_reservation_id.as_str())
+        || response.state.as_deref() != Some("refined")
+    {
+        return Err(CassAdmissionError::new(
+            "partial_result",
+            "refine-provider-identity returned an unbound result",
+        ));
+    }
+    let subject = response.subject.ok_or_else(|| {
+        CassAdmissionError::new(
+            "partial_result",
+            "refine-provider-identity returned no subject",
+        )
+    })?;
+    let subject =
+        CassAdmissionSubject::from_value(&serde_json::to_value(subject).map_err(|_| {
+            CassAdmissionError::new(
+                "document_invalid",
+                "refine-provider-identity returned an invalid subject",
+            )
+        })?)?;
+    if subject.producer_session_id.as_deref() != Some(expected_provider_session_id.as_str()) {
+        return Err(CassAdmissionError::new(
+            "reservation_mismatch",
+            "refined subject is not bound to the allocated provider session",
+        ));
+    }
+    Ok(subject)
+}
+
+pub(super) async fn run_cass_admission_command(
+    request: CassAdmissionCommandRequest,
+) -> Result<CassAdmissionCommandResponse, CassAdmissionError> {
+    remember_cass_command_op(request.op);
+    let argv = cass_admission_command_argv()?;
+    let stdin = serde_json::to_vec(&request).map_err(|error| {
+        CassAdmissionError::new(
+            "document_invalid",
+            format!("failed to encode admission command request: {error}"),
+        )
+    })?;
+    let output = tokio::time::timeout(cass_admission_timeout(), async {
+        let mut child = tokio::process::Command::new(&argv[0])
+            .args(&argv[1..])
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .kill_on_drop(true)
+            .spawn()
+            .map_err(|error| {
+                CassAdmissionError::new(
+                    "admission_command_unavailable",
+                    redact_cass_command_text(&error.to_string()),
+                )
+            })?;
+        if let Some(mut stdin_handle) = child.stdin.take() {
+            use tokio::io::AsyncWriteExt;
+            stdin_handle.write_all(&stdin).await.map_err(|error| {
+                CassAdmissionError::new(
+                    "transport_loss",
+                    redact_cass_command_text(&error.to_string()),
+                )
+            })?;
+        }
+        child.wait_with_output().await.map_err(|error| {
+            CassAdmissionError::new(
+                "transport_loss",
+                redact_cass_command_text(&error.to_string()),
+            )
+        })
+    })
+    .await
+    .map_err(|_| CassAdmissionError::new("transport_loss", "admission command timed out"))??;
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = redact_cass_command_text(&String::from_utf8_lossy(&output.stderr));
+    if stdout.trim().is_empty() {
+        return Err(CassAdmissionError::new(
+            "partial_result",
+            if stderr.is_empty() {
+                "admission command returned no JSON".to_string()
+            } else {
+                format!("admission command returned no JSON: {stderr}")
+            },
+        ));
+    }
+    let response: CassAdmissionCommandResponse =
+        serde_json::from_str(stdout.trim()).map_err(|error| {
+            CassAdmissionError::new(
+                "partial_result",
+                format!(
+                    "admission command returned unreadable JSON: {}",
+                    redact_cass_command_text(&error.to_string())
+                ),
+            )
+        })?;
+    if response.schema_version != CASS_ADMISSION_COMMAND_SCHEMA {
+        return Err(CassAdmissionError::new(
+            "unknown_version",
+            "admission command schema_version is unknown",
+        ));
+    }
+    if response.ok == response.error.is_some() {
+        return Err(CassAdmissionError::new(
+            "partial_result",
+            "admission command returned an inconsistent success/error result",
+        ));
+    }
+    if let Some(error) = response.error.as_ref() {
+        if error.code.trim().is_empty() || error.message.trim().is_empty() {
+            return Err(CassAdmissionError::new(
+                "partial_result",
+                "admission command returned an incomplete structured error",
+            ));
+        }
+    }
+    if !output.status.success() && response.ok {
+        return Err(CassAdmissionError::new(
+            "partial_result",
+            format!("admission command exited {} with ok=true", output.status),
+        ));
+    }
+    Ok(response)
+}
+
+pub(super) fn cass_admission_command_configured() -> bool {
+    std::env::var(CASS_ADMISSION_CMD_ENV)
+        .ok()
+        .map(|value| !value.trim().is_empty())
+        .unwrap_or(false)
+}
+
+fn cass_admission_command_argv() -> Result<Vec<String>, CassAdmissionError> {
+    let raw = std::env::var(CASS_ADMISSION_CMD_ENV).map_err(|_| {
+        CassAdmissionError::new(
+            "admission_command_unavailable",
+            "SKILLBOX_CASS_ADMISSION_CMD_JSON is unset",
+        )
+    })?;
+    let argv: Vec<String> = serde_json::from_str(&raw).map_err(|_| {
+        CassAdmissionError::new(
+            "admission_command_unavailable",
+            "SKILLBOX_CASS_ADMISSION_CMD_JSON must be a JSON argv array",
+        )
+    })?;
+    if argv.is_empty() || argv[0].trim().is_empty() {
+        return Err(CassAdmissionError::new(
+            "admission_command_unavailable",
+            "SKILLBOX_CASS_ADMISSION_CMD_JSON argv is empty",
+        ));
+    }
+    Ok(argv)
+}
+
+fn cass_admission_timeout() -> std::time::Duration {
+    std::env::var(CASS_ADMISSION_TIMEOUT_ENV)
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .map(std::time::Duration::from_millis)
+        .unwrap_or(DEFAULT_CASS_ADMISSION_TIMEOUT)
+}
+
+fn redact_cass_command_text(text: &str) -> String {
+    let mut redacted = text.to_string();
+    for key in [
+        "AUTH_TOKEN",
+        "OBSERVER_TOKEN",
+        "SKILLBOX_CASS_ADMISSION_CMD_JSON",
+    ] {
+        if let Ok(secret) = std::env::var(key) {
+            if !secret.is_empty() {
+                redacted = redacted.replace(&secret, "[redacted]");
+            }
+        }
+    }
+    for needle in ["api_token", "transcript", "publisher_root", "cursor"] {
+        if redacted.contains(needle) {
+            redacted = redacted.replace(needle, "[redacted]");
+        }
+    }
+    redacted
+}
+
+fn record_codex_app_server_launch() {
+    #[cfg(test)]
+    CODEX_APP_SERVER_LAUNCH_CALLS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+}
+
+fn cass_test_provider_launch(
+    cwd: &Path,
+    initial_request: &str,
+) -> anyhow::Result<Option<PreparedProviderLaunch>> {
+    #[cfg(test)]
+    {
+        let Ok(thread_id) = std::env::var("SWIMMERS_CASS_TEST_PROVIDER_UUID") else {
+            return Ok(None);
+        };
+        if thread_id.trim().is_empty() {
+            return Ok(None);
+        }
+        let _ = (cwd, initial_request);
+        let provider_resume = AuthorizedProviderResumeReceipt::resumable(
+            ProviderResumeProvider::Codex,
+            thread_id.clone(),
+            vec!["codex".to_string(), "resume".to_string(), thread_id.clone()],
+            format!("codex resume {thread_id}"),
+            ProviderResumeCaptureSource::ProviderResponse,
+        )
+        .context("Cass test provider UUID is not a valid resume identity")?;
+        Ok(Some(PreparedProviderLaunch {
+            command: format!("codex resume {thread_id}"),
+            cleanup_paths: Vec::new(),
+            receipt: PreparedProviderReceipt::Captured(provider_resume),
+        }))
+    }
+    #[cfg(not(test))]
+    {
+        let _ = (cwd, initial_request);
+        Ok(None)
+    }
+}
+
+fn remember_cass_provider_identity(identity: &CassProviderIdentity) {
+    #[cfg(test)]
+    {
+        if let Ok(mut slot) = LAST_CASS_PROVIDER_IDENTITY.lock() {
+            *slot = Some(identity.clone());
+        }
+    }
+    let _ = identity;
+}
+
+fn remember_cass_command_op(op: CassAdmissionCommandOp) {
+    #[cfg(test)]
+    {
+        if let Ok(mut ops) = LAST_CASS_COMMAND_OPS.lock() {
+            ops.push(format!("{op:?}").to_ascii_lowercase());
+        }
+    }
+    let _ = op;
+}
+
+#[cfg(test)]
+pub(crate) fn take_codex_app_server_launch_calls() -> usize {
+    CODEX_APP_SERVER_LAUNCH_CALLS.swap(0, std::sync::atomic::Ordering::SeqCst)
+}
+
+#[cfg(test)]
+pub(crate) fn reset_cass_admission_test_hooks() {
+    take_codex_app_server_launch_calls();
+    if let Ok(mut slot) = LAST_CASS_PROVIDER_IDENTITY.lock() {
+        *slot = None;
+    }
+    if let Ok(mut ops) = LAST_CASS_COMMAND_OPS.lock() {
+        ops.clear();
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn take_last_cass_provider_identity() -> Option<CassProviderIdentity> {
+    LAST_CASS_PROVIDER_IDENTITY
+        .lock()
+        .ok()
+        .and_then(|mut slot| slot.take())
+}
+
+#[cfg(test)]
+pub(crate) fn take_cass_command_ops() -> Vec<String> {
+    LAST_CASS_COMMAND_OPS
+        .lock()
+        .map(|mut ops| std::mem::take(&mut *ops))
+        .unwrap_or_default()
 }
 
 #[cfg(test)]

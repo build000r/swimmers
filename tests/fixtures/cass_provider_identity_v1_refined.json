@@ -1,0 +1,18 @@
+{
+  "schema_version": "cass_admission_subject/v1",
+  "adapter_id": "codex-jsonl-v1",
+  "source_id": "codex",
+  "producer_session_id": "018f0e11-7c3a-7000-8000-000000000001",
+  "path": "sessions/018f0e11-7c3a-7000-8000-000000000001.jsonl",
+  "path_template": "sessions/{provider_session_id}.jsonl",
+  "file_generation": 1,
+  "stream_id": "strm_de621cd4b4a5343ee1fe1bb2d726fdfe",
+  "cursor": {
+    "adapter_id": "codex-jsonl-v1",
+    "path": "sessions/018f0e11-7c3a-7000-8000-000000000001.jsonl",
+    "file_generation": 1,
+    "committed_byte_offset": 0,
+    "last_complete_record_hash": "0000000000000000000000000000000000000000000000000000000000000000"
+  },
+  "completeness": "full"
+}

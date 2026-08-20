@@ -2,6 +2,7 @@ use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::{Extension, Json};
+use futures::stream::{self, StreamExt};
 use serde::Deserialize;
 use std::sync::Arc;
 use tokio::sync::oneshot;
@@ -9,21 +10,24 @@ use tokio::sync::oneshot;
 use crate::api::envelope::error_body;
 use crate::api::service::{
     cleanup_exact_local_session, create_local_session, create_local_sessions_batch,
-    list_sessions_for_client,
+    list_sessions_for_client, validate_sessions_batch_dirs,
 };
 use crate::api::{fetch_live_summary, remote_sessions, AppState};
 use crate::auth::{AuthInfo, AuthScope};
 use crate::config::SessionDeleteMode;
 use crate::fleet_lens::{build_fleet_lens_presets, build_fleet_lens_summary};
 use crate::session::actor::{ActorHandle, InputDeliveryResult, SessionCommand};
-use crate::session::supervisor::TmuxAdoptError;
+use crate::session::supervisor::{CassSessionAdmission, TmuxAdoptError};
 use crate::types::{
     AdoptSessionRequest, AdoptSessionResponse, AuthorizedProviderResumeLaunchReceipt,
-    AuthorizedProviderResumeReceipt, CreateSessionRequest, CreateSessionResponse,
+    AuthorizedProviderResumeReceipt, CassAdmissionError, CassAdmissionIntent,
+    CassAdmissionPreflightRequest, CassAdmissionPreflightResponse,
+    CassAdmissionReservationEnvelope, CassAwareCreateSessionsBatchRequest,
+    CassBatchAdmissionAttachment, CreateSessionRequest, CreateSessionResponse,
     CreateSessionsBatchRequest, CreateSessionsBatchResponse, EnvironmentListResponse,
     LaunchTargetSummary, ProviderResumeCaptureSource, ProviderResumeProvider, SessionInputRequest,
     SessionInputResponse, SessionListResponse, SessionState, TerminalSnapshot,
-    MAX_SESSION_INPUT_BYTES,
+    CASS_ADMISSION_RESERVATION_SCHEMA, MAX_SESSION_INPUT_BYTES,
 };
 
 const SNAPSHOT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
@@ -79,15 +83,36 @@ pub(super) async fn create_session(
     Extension(auth): Extension<AuthInfo>,
     State(state): State<Arc<AppState>>,
     Json(body): Json<CreateSessionRequest>,
-) -> impl IntoResponse {
+) -> Response {
     if let Err(resp) = auth.require_scope(AuthScope::SessionsWrite) {
         return resp;
+    }
+    let cass_mode = match crate::types::resolve_cass_admission_mode(None) {
+        Ok(mode) => mode,
+        Err(error) => return cass_admission_error_response(CassAdmissionRouteError::from(error)),
+    };
+    create_session_with_cass_mode(&auth, &state, body, cass_mode).await
+}
+
+pub(super) async fn create_session_with_cass_mode(
+    auth: &AuthInfo,
+    state: &Arc<AppState>,
+    body: CreateSessionRequest,
+    cass_mode: crate::types::CassAdmissionMode,
+) -> Response {
+    if cass_mode.is_enforce() {
+        return cass_admission_error_response(CassAdmissionRouteError::Admission(
+            CassAdmissionError::new(
+                "reservation_mismatch",
+                "enforce mode requires batch admission preflight",
+            ),
+        ));
     }
     if remote_sessions::is_remote_launch_target(body.launch_target.as_deref()) {
         return create_remote_session_response(body).await;
     }
 
-    create_local_session_response(&auth, &state, body).await
+    create_local_session_response(auth, state, body).await
 }
 
 async fn create_remote_session_response(body: CreateSessionRequest) -> axum::response::Response {
@@ -281,6 +306,359 @@ fn adopt_session_error_response(error: TmuxAdoptError) -> axum::response::Respon
 }
 
 // ---------------------------------------------------------------------------
+// POST /v1/sessions/batch/admission
+// ---------------------------------------------------------------------------
+
+#[derive(Default)]
+struct CassReservationCancellationGuard {
+    reservation_ids: Vec<String>,
+}
+
+impl CassReservationCancellationGuard {
+    fn track(&mut self, reservation_id: String) {
+        self.reservation_ids.push(reservation_id);
+    }
+
+    fn disarm(&mut self) {
+        self.reservation_ids.clear();
+    }
+}
+
+impl Drop for CassReservationCancellationGuard {
+    fn drop(&mut self) {
+        if self.reservation_ids.is_empty() {
+            return;
+        }
+        let reservation_ids = std::mem::take(&mut self.reservation_ids);
+        let Ok(runtime) = tokio::runtime::Handle::try_current() else {
+            tracing::warn!(
+                reservation_count = reservation_ids.len(),
+                "Cass reservations dropped unresolved outside a Tokio runtime"
+            );
+            return;
+        };
+        runtime.spawn(async move {
+            for reservation_id in reservation_ids {
+                let result = crate::session::supervisor::run_configured_cass_admission_command(
+                    crate::types::CassAdmissionCommandRequest::reconcile(
+                        &reservation_id,
+                        "transport_loss",
+                    ),
+                )
+                .await;
+                match result {
+                    Ok(response)
+                        if response.ok
+                            && response.reservation_id.as_deref()
+                                == Some(reservation_id.as_str())
+                            && response.state.as_deref() == Some("unresolved") => {}
+                    Ok(response) => tracing::warn!(
+                        cass_error_code = response
+                            .error
+                            .as_ref()
+                            .map(|error| error.code.as_str())
+                            .unwrap_or("partial_result"),
+                        "Cass cancellation reconciliation returned an unbound result"
+                    ),
+                    Err(error) => tracing::warn!(
+                        cass_error_code = %error.code,
+                        "failed to reconcile cancellation-dropped Cass reservation"
+                    ),
+                }
+            }
+        });
+    }
+}
+
+pub(super) async fn admit_sessions_batch(
+    Extension(auth): Extension<AuthInfo>,
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<CassAdmissionPreflightRequest>,
+) -> Response {
+    if let Err(resp) = auth.require_scope(AuthScope::SessionsWrite) {
+        return resp;
+    }
+    let _ = state;
+    match admit_sessions_batch_inner(body).await {
+        Ok(response) => (StatusCode::OK, Json(response)).into_response(),
+        Err(error) => cass_admission_error_response(error),
+    }
+}
+
+async fn admit_sessions_batch_inner(
+    body: CassAdmissionPreflightRequest,
+) -> Result<CassAdmissionPreflightResponse, CassAdmissionRouteError> {
+    validate_sessions_batch_dirs(&body.dirs)
+        .map_err(|error| CassAdmissionRouteError::validation(error.message()))?;
+    if body.intents.is_empty() {
+        return Err(CassAdmissionRouteError::validation(
+            "admission preflight requires dirs and intents",
+        ));
+    }
+    if body.dirs.len() != body.intents.len() {
+        return Err(CassAdmissionRouteError::validation(
+            "admission intents must match dirs one-for-one",
+        ));
+    }
+    let batch_id = body
+        .intents
+        .first()
+        .map(|intent| intent.batch_id.clone())
+        .expect("non-empty admission intents checked above");
+    if body
+        .intents
+        .iter()
+        .any(|intent| intent.batch_id != batch_id)
+    {
+        return Err(CassAdmissionRouteError::validation(
+            "admission intents must share one canonical batch_id",
+        ));
+    }
+    let mode = crate::types::resolve_cass_admission_mode(body.cass_admission_mode)
+        .map_err(CassAdmissionRouteError::from)?;
+    let mut body = body;
+    body.cass_admission_mode = Some(mode);
+    if remote_sessions::is_remote_launch_target(body.launch_target.as_deref()) {
+        return remote_sessions::admit_remote_sessions_batch(body)
+            .await
+            .map_err(CassAdmissionRouteError::Remote);
+    }
+    if !mode.is_enforce() {
+        return Ok(CassAdmissionPreflightResponse {
+            target_id: "local".to_string(),
+            batch_id,
+            reservations: Vec::new(),
+        });
+    }
+    if mode.is_enforce() && !crate::session::supervisor::cass_admission_command_is_configured() {
+        return Err(CassAdmissionRouteError::Admission(CassAdmissionError::new(
+            "admission_command_unavailable",
+            "target admission command unavailable in enforce mode",
+        )));
+    }
+    let mut reservations = Vec::new();
+    let mut cancellation_guard = CassReservationCancellationGuard::default();
+    for (index, intent) in body.intents.into_iter().enumerate() {
+        if intent.batch_index != index as u64 {
+            let settlement =
+                release_preflight_reservations(&cancellation_guard.reservation_ids).await;
+            if settlement.is_ok() {
+                cancellation_guard.disarm();
+            }
+            settlement?;
+            return Err(CassAdmissionRouteError::validation(format!(
+                "intent batch_index {0} must match dirs index {index}",
+                intent.batch_index
+            )));
+        }
+        match reserve_local_cass_intent(intent, index as u64).await {
+            Ok(envelope) => {
+                cancellation_guard.track(envelope.reservation_id.clone());
+                reservations.push(envelope);
+            }
+            Err(error) => {
+                let settlement = if is_explicit_pre_provider_failure(&error) {
+                    release_preflight_reservations(&cancellation_guard.reservation_ids).await
+                } else {
+                    reconcile_preflight_reservations(
+                        &cancellation_guard.reservation_ids,
+                        "partial_result",
+                    )
+                    .await
+                };
+                if settlement.is_ok() {
+                    cancellation_guard.disarm();
+                }
+                settlement?;
+                return Err(error);
+            }
+        }
+    }
+    cancellation_guard.disarm();
+    Ok(CassAdmissionPreflightResponse {
+        target_id: "local".to_string(),
+        batch_id,
+        reservations,
+    })
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
+async fn reserve_local_cass_intent(
+    intent: CassAdmissionIntent,
+    index: u64,
+) -> Result<CassAdmissionReservationEnvelope, CassAdmissionRouteError> {
+    let response = crate::session::supervisor::run_configured_cass_admission_command(
+        crate::types::CassAdmissionCommandRequest::reserve(intent.clone()),
+    )
+    .await
+    .map_err(CassAdmissionRouteError::Admission)?;
+    if !response.ok {
+        let mut cancellation_guard = CassReservationCancellationGuard::default();
+        if let Some(reservation_id) = response.reservation_id.clone() {
+            cancellation_guard.track(reservation_id);
+            let settlement = reconcile_preflight_reservations(
+                &cancellation_guard.reservation_ids,
+                "partial_result",
+            )
+            .await;
+            if settlement.is_ok() {
+                cancellation_guard.disarm();
+            }
+            settlement?;
+        }
+        let error = response
+            .error
+            .unwrap_or(crate::types::CassAdmissionCommandError {
+                code: "reservation_failed".to_string(),
+                message: "admission reserve refused".to_string(),
+            });
+        return Err(CassAdmissionRouteError::Admission(CassAdmissionError::new(
+            error.code,
+            error.message,
+        )));
+    }
+    let reservation_id = response.reservation_id.ok_or_else(|| {
+        CassAdmissionRouteError::Admission(CassAdmissionError::new(
+            "partial_result",
+            "admission reserve returned no reservation_id",
+        ))
+    })?;
+    let mut cancellation_guard = CassReservationCancellationGuard::default();
+    cancellation_guard.track(reservation_id.clone());
+    if response.state.as_deref() != Some("reserved")
+        || response.batch_id.as_deref() != Some(intent.batch_id.as_str())
+        || response.batch_index != Some(intent.batch_index)
+    {
+        let settlement =
+            reconcile_preflight_reservations(&cancellation_guard.reservation_ids, "partial_result")
+                .await;
+        if settlement.is_ok() {
+            cancellation_guard.disarm();
+        }
+        settlement?;
+        return Err(CassAdmissionRouteError::Admission(CassAdmissionError::new(
+            "partial_result",
+            "admission reserve returned an unbound result",
+        )));
+    }
+    let envelope = CassAdmissionReservationEnvelope {
+        schema_version: CASS_ADMISSION_RESERVATION_SCHEMA.to_string(),
+        reservation_id,
+        batch_id: intent.batch_id,
+        batch_index: intent.batch_index,
+        index,
+        target_id: "local".to_string(),
+    };
+    if let Err(error) = CassAdmissionReservationEnvelope::from_value(
+        &serde_json::to_value(&envelope).map_err(|_| {
+            CassAdmissionRouteError::Admission(CassAdmissionError::new(
+                "partial_result",
+                "admission reserve returned an unreadable reservation envelope",
+            ))
+        })?,
+    ) {
+        let settlement =
+            reconcile_preflight_reservations(&cancellation_guard.reservation_ids, "partial_result")
+                .await;
+        if settlement.is_ok() {
+            cancellation_guard.disarm();
+        }
+        settlement?;
+        return Err(CassAdmissionRouteError::Admission(error));
+    }
+    cancellation_guard.disarm();
+    Ok(envelope)
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
+async fn release_preflight_reservations(
+    reservation_ids: &[String],
+) -> Result<(), CassAdmissionRouteError> {
+    let mut first_error = None;
+    for reservation_id in reservation_ids {
+        let settled = async {
+            let response = crate::session::supervisor::run_configured_cass_admission_command(
+                crate::types::CassAdmissionCommandRequest::release(reservation_id),
+            )
+            .await
+            .map_err(CassAdmissionRouteError::Admission)?;
+            validate_preflight_settlement_response(&response, reservation_id, "released")
+        }
+        .await;
+        if first_error.is_none() {
+            first_error = settled.err();
+        }
+    }
+    first_error.map_or(Ok(()), Err)
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
+async fn reconcile_preflight_reservations(
+    reservation_ids: &[String],
+    cause: &str,
+) -> Result<(), CassAdmissionRouteError> {
+    let mut first_error = None;
+    for reservation_id in reservation_ids {
+        let settled = async {
+            let response = crate::session::supervisor::run_configured_cass_admission_command(
+                crate::types::CassAdmissionCommandRequest::reconcile(reservation_id, cause),
+            )
+            .await
+            .map_err(CassAdmissionRouteError::Admission)?;
+            validate_preflight_settlement_response(&response, reservation_id, "unresolved")
+        }
+        .await;
+        if first_error.is_none() {
+            first_error = settled.err();
+        }
+    }
+    first_error.map_or(Ok(()), Err)
+}
+
+fn validate_preflight_settlement_response(
+    response: &crate::types::CassAdmissionCommandResponse,
+    reservation_id: &str,
+    expected_state: &str,
+) -> Result<(), CassAdmissionRouteError> {
+    if !response.ok {
+        let error = response
+            .error
+            .clone()
+            .unwrap_or(crate::types::CassAdmissionCommandError {
+                code: "partial_result".to_string(),
+                message: "Cass settlement command was refused".to_string(),
+            });
+        return Err(CassAdmissionRouteError::Admission(CassAdmissionError::new(
+            error.code,
+            error.message,
+        )));
+    }
+    if response.reservation_id.as_deref() != Some(reservation_id)
+        || response.state.as_deref() != Some(expected_state)
+    {
+        return Err(CassAdmissionRouteError::Admission(CassAdmissionError::new(
+            "partial_result",
+            "Cass settlement command returned an unbound result",
+        )));
+    }
+    Ok(())
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
+fn is_explicit_pre_provider_failure(error: &CassAdmissionRouteError) -> bool {
+    match error {
+        CassAdmissionRouteError::Admission(error) => {
+            matches!(
+                error.code.as_str(),
+                "reservation_failed" | "reservation_mismatch" | "unknown_provider"
+            )
+        }
+        CassAdmissionRouteError::Validation(_) => true,
+        CassAdmissionRouteError::Remote(_) => false,
+    }
+}
+
+// ---------------------------------------------------------------------------
 // POST /v1/sessions/batch
 // ---------------------------------------------------------------------------
 
@@ -300,6 +678,256 @@ pub(super) async fn create_sessions_batch(
     create_local_sessions_batch_response(state, body).await
 }
 
+pub(super) async fn create_sessions_batch_http(
+    Extension(auth): Extension<AuthInfo>,
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<CassAwareCreateSessionsBatchRequest>,
+) -> Response {
+    let CassAwareCreateSessionsBatchRequest { request, mut cass } = body;
+    let cass_fields_present = cass_batch_fields_present(&cass);
+    let mode = match crate::types::resolve_cass_admission_mode(cass.cass_admission_mode) {
+        Ok(mode) => mode,
+        Err(error) => return cass_admission_error_response(CassAdmissionRouteError::from(error)),
+    };
+    // Snapshot the strongest mode at the HTTP boundary. A process-wide config
+    // change later in this request must never downgrade an enforce launch.
+    cass.cass_admission_mode = Some(mode);
+    if cass_fields_present || mode.is_enforce() {
+        return create_sessions_batch_with_cass(auth, state, request, cass).await;
+    }
+    create_sessions_batch(Extension(auth), State(state), Json(request)).await
+}
+
+fn cass_batch_fields_present(cass: &CassBatchAdmissionAttachment) -> bool {
+    cass.cass_batch_id.is_some()
+        || cass.cass_admission_mode.is_some()
+        || !cass.cass_reservations.is_empty()
+        || cass.cass_preflight_target_id.is_some()
+}
+
+pub(super) async fn create_sessions_batch_with_cass(
+    auth: AuthInfo,
+    state: Arc<AppState>,
+    body: CreateSessionsBatchRequest,
+    mut cass: CassBatchAdmissionAttachment,
+) -> Response {
+    if let Err(resp) = auth.require_scope(AuthScope::SessionsWrite) {
+        return resp;
+    }
+
+    let mode = match crate::types::resolve_cass_admission_mode(cass.cass_admission_mode) {
+        Ok(mode) => mode,
+        Err(error) => return cass_admission_error_response(CassAdmissionRouteError::from(error)),
+    };
+    cass.cass_admission_mode = Some(mode);
+
+    if let Err(error) = validate_cass_batch_reservations(&body, &cass) {
+        return cass_admission_error_response(error);
+    }
+
+    if remote_sessions::is_remote_launch_target(body.launch_target.as_deref()) {
+        return remote_sessions_batch_result_response(
+            remote_sessions::create_remote_sessions_batch_with_cass(body, cass).await,
+        );
+    }
+
+    create_local_sessions_batch_with_cass(state, body, cass).await
+}
+
+fn validate_cass_batch_reservations(
+    body: &CreateSessionsBatchRequest,
+    cass: &CassBatchAdmissionAttachment,
+) -> Result<(), CassAdmissionRouteError> {
+    let mode = crate::types::resolve_cass_admission_mode(cass.cass_admission_mode)
+        .map_err(CassAdmissionRouteError::from)?;
+    if cass.cass_reservations.is_empty() {
+        if !mode.is_enforce() {
+            return Ok(());
+        }
+        return Err(CassAdmissionRouteError::Admission(CassAdmissionError::new(
+            "reservation_mismatch",
+            "enforce mode requires target-bound Cass reservation IDs",
+        )));
+    }
+    let batch_id = cass.cass_batch_id.as_deref().ok_or_else(|| {
+        CassAdmissionRouteError::Admission(CassAdmissionError::new(
+            "reservation_mismatch",
+            "enforce mode requires the canonical Cass batch_id from preflight",
+        ))
+    })?;
+    if cass.cass_reservations.len() != body.dirs.len() {
+        return Err(CassAdmissionRouteError::Admission(CassAdmissionError::new(
+            "reservation_mismatch",
+            "Cass reservations must match batch dirs one-for-one",
+        )));
+    }
+    let expected_target = resolved_admission_target(body.launch_target.as_deref());
+    let preflight_target = cass.cass_preflight_target_id.as_deref().ok_or_else(|| {
+        CassAdmissionRouteError::Admission(CassAdmissionError::new(
+            "reservation_mismatch",
+            "Cass reservations require the target id returned by admission preflight",
+        ))
+    })?;
+    if preflight_target != expected_target {
+        return Err(CassAdmissionRouteError::Admission(CassAdmissionError::new(
+            "reservation_mismatch",
+            "routing target changed between Cass preflight and batch create",
+        )));
+    }
+    let mut seen = std::collections::BTreeSet::new();
+    for (index, reservation) in cass.cass_reservations.iter().enumerate() {
+        reservation
+            .validate()
+            .map_err(CassAdmissionRouteError::Admission)?;
+        let reservation_index = reservation.index.unwrap_or(reservation.batch_index) as usize;
+        if reservation.batch_id != batch_id
+            || reservation_index != index
+            || !seen.insert(reservation.reservation_id.clone())
+        {
+            return Err(CassAdmissionRouteError::Admission(CassAdmissionError::new(
+                "reservation_mismatch",
+                "wrong, replayed, or foreign Cass reservation",
+            )));
+        }
+        if reservation.target_id.as_deref() != Some("local") {
+            return Err(CassAdmissionRouteError::Admission(CassAdmissionError::new(
+                "reservation_mismatch",
+                "Cass reservation is not bound to the target-local admission authority",
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn resolved_admission_target(launch_target: Option<&str>) -> String {
+    launch_target
+        .map(str::trim)
+        .filter(|target| !target.is_empty() && !remote_sessions::is_local_launch_target(target))
+        .unwrap_or("local")
+        .to_string()
+}
+
+async fn create_local_sessions_batch_with_cass(
+    state: Arc<AppState>,
+    body: CreateSessionsBatchRequest,
+    cass: CassBatchAdmissionAttachment,
+) -> Response {
+    let mode = match crate::types::resolve_cass_admission_mode(cass.cass_admission_mode) {
+        Ok(mode) => mode,
+        Err(error) => return cass_admission_error_response(CassAdmissionRouteError::from(error)),
+    };
+    if !mode.is_enforce() {
+        if let Err(error) = release_non_enforce_reservations(&cass).await {
+            return cass_admission_error_response(error);
+        }
+        return create_local_sessions_batch_response(state, body).await;
+    }
+    match create_request_scoped_cass_batch(state, body, cass).await {
+        Ok(response) => create_sessions_batch_response(response),
+        Err(error) => error_response(
+            error.status(),
+            error.code(),
+            Some(error.message().to_string()),
+        ),
+    }
+}
+
+async fn release_non_enforce_reservations(
+    cass: &CassBatchAdmissionAttachment,
+) -> Result<(), CassAdmissionRouteError> {
+    if cass.cass_reservations.is_empty() {
+        return Ok(());
+    }
+    if !crate::session::supervisor::cass_admission_command_is_configured() {
+        return Err(CassAdmissionRouteError::Admission(CassAdmissionError::new(
+            "admission_command_unavailable",
+            "cannot settle attached Cass reservations before legacy launch",
+        )));
+    }
+    let reservation_ids = cass
+        .cass_reservations
+        .iter()
+        .map(|reservation| reservation.reservation_id.clone())
+        .collect::<Vec<_>>();
+    let mut cancellation_guard = CassReservationCancellationGuard { reservation_ids };
+    let settlement = release_preflight_reservations(&cancellation_guard.reservation_ids).await;
+    if settlement.is_ok() {
+        cancellation_guard.disarm();
+    }
+    settlement
+}
+
+async fn create_request_scoped_cass_batch(
+    state: Arc<AppState>,
+    body: CreateSessionsBatchRequest,
+    cass: CassBatchAdmissionAttachment,
+) -> Result<CreateSessionsBatchResponse, crate::api::service::ApiServiceError> {
+    validate_sessions_batch_dirs(&body.dirs)?;
+    let total = body.dirs.len();
+    let batch_id = cass
+        .cass_batch_id
+        .expect("validated enforce attachment has canonical batch_id");
+    let (_, batch_label, batch_created_at, prompt_excerpt) =
+        super::new_batch_context(total, body.initial_request.as_deref());
+    let reservations = cass.cass_reservations;
+    let tasks =
+        body.dirs
+            .into_iter()
+            .zip(reservations)
+            .enumerate()
+            .map(|(index, (cwd, reservation))| {
+                let supervisor = state.supervisor.clone();
+                let initial_request = body.initial_request.clone();
+                let tmux_target = body.tmux_target.clone();
+                // Futures beyond the concurrency frontier may never be
+                // polled if the request is canceled. Capture an armed guard
+                // in every queued future until the supervisor takes over.
+                let mut cancellation_guard = CassReservationCancellationGuard::default();
+                cancellation_guard.track(reservation.reservation_id.clone());
+                let batch = super::session_batch_membership(
+                    batch_id.clone(),
+                    batch_label.clone(),
+                    index,
+                    total,
+                    batch_created_at,
+                    prompt_excerpt.clone(),
+                );
+                let result_cwd = cwd.clone();
+                async move {
+                    // Once polled, finish settlement/rollback independently of
+                    // the HTTP response future. Dropping the JoinHandle on a
+                    // client disconnect does not cancel the launch task.
+                    let launch = tokio::spawn(async move {
+                        cancellation_guard.disarm();
+                        supervisor
+                            .create_session_with_target_batch_and_cass(
+                                None,
+                                Some(cwd),
+                                body.spawn_tool,
+                                initial_request,
+                                tmux_target,
+                                CassSessionAdmission::new(batch, reservation),
+                            )
+                            .await
+                    });
+                    let created = launch.await.unwrap_or_else(|_| {
+                        Err(anyhow::Error::new(CassAdmissionError::new(
+                            "provider_ambiguity",
+                            "Cass launch task ended before a durable result",
+                        )))
+                    });
+                    super::create_sessions_batch_result(index, result_cwd, created)
+                }
+            });
+    let mut results: Vec<_> = stream::iter(tasks)
+        .buffer_unordered(super::BATCH_CREATE_CONCURRENCY)
+        .collect()
+        .await;
+    results.sort_by_key(|result| result.index);
+    Ok(CreateSessionsBatchResponse { results })
+}
+
+#[allow(dead_code)]
 async fn create_remote_sessions_batch_response(body: CreateSessionsBatchRequest) -> Response {
     remote_sessions_batch_result_response(remote_sessions::create_remote_sessions_batch(body).await)
 }
@@ -370,6 +998,82 @@ fn create_sessions_batch_status(response: &CreateSessionsBatchResponse) -> Statu
         StatusCode::CREATED
     } else {
         StatusCode::MULTI_STATUS
+    }
+}
+
+#[allow(dead_code)]
+enum CassAdmissionRouteError {
+    Validation(String),
+    Admission(CassAdmissionError),
+    Remote(remote_sessions::RemoteSessionError),
+}
+
+impl CassAdmissionRouteError {
+    fn validation(message: impl Into<String>) -> Self {
+        Self::Validation(message.into())
+    }
+}
+
+impl From<CassAdmissionError> for CassAdmissionRouteError {
+    fn from(error: CassAdmissionError) -> Self {
+        Self::Admission(error)
+    }
+}
+
+fn cass_admission_error_response(error: CassAdmissionRouteError) -> Response {
+    match error {
+        CassAdmissionRouteError::Validation(message) => validation_error(message),
+        CassAdmissionRouteError::Admission(error) => {
+            let status = match error.code.as_str() {
+                "admission_command_unavailable" | "provider_unavailable" => {
+                    StatusCode::SERVICE_UNAVAILABLE
+                }
+                "transport_loss" | "partial_result" | "provider_ambiguity"
+                | "refinement_failure" => StatusCode::CONFLICT,
+                _ => StatusCode::BAD_REQUEST,
+            };
+            tracing::warn!(cass_error_code = %error.code, "Cass admission request failed");
+            error_response(
+                status,
+                cass_error_code(&error.code),
+                Some(cass_public_error_message(&error.code).to_string()),
+            )
+        }
+        CassAdmissionRouteError::Remote(error) => error.into_response(),
+    }
+}
+
+pub(crate) fn cass_error_code(code: &str) -> &'static str {
+    match code {
+        "reservation_mismatch" | "reservation_failed" => "CASS_RESERVATION_FAILED",
+        "admission_command_unavailable" | "provider_unavailable" => "CASS_ADMISSION_UNAVAILABLE",
+        "unknown_mode" | "unknown_version" | "unknown_provider" | "document_invalid"
+        | "malformed_uuid" | "malformed_index" | "oversized_chunk" | "secret_shaped_key" => {
+            "CASS_ADMISSION_INVALID"
+        }
+        "transport_loss" | "partial_result" | "provider_ambiguity" | "refinement_failure" => {
+            "CASS_ADMISSION_UNRESOLVED"
+        }
+        _ => "CASS_ADMISSION_FAILED",
+    }
+}
+
+pub(crate) fn cass_public_error_message(code: &str) -> &'static str {
+    match code {
+        "reservation_mismatch" | "reservation_failed" => {
+            "Cass reservation was rejected; run admission preflight again"
+        }
+        "admission_command_unavailable" | "provider_unavailable" => {
+            "Cass admission is unavailable on the selected target"
+        }
+        "unknown_mode" | "unknown_version" | "unknown_provider" | "document_invalid"
+        | "malformed_uuid" | "malformed_index" | "oversized_chunk" | "secret_shaped_key" => {
+            "Cass admission input is invalid"
+        }
+        "transport_loss" | "partial_result" | "provider_ambiguity" | "refinement_failure" => {
+            "Cass admission outcome is unresolved; no session was launched"
+        }
+        _ => "Cass admission failed; no session was launched",
     }
 }
 

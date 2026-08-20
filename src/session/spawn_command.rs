@@ -125,7 +125,7 @@ pub(super) fn schedule_prelaunch_file_cleanup_after(paths: Vec<PathBuf>, delay: 
     }
 }
 
-fn cleanup_prelaunch_files_now(paths: &[PathBuf]) {
+pub(super) fn cleanup_prelaunch_files_now(paths: &[PathBuf]) {
     for path in paths {
         match fs::remove_file(path) {
             Ok(()) => {}

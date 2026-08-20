@@ -710,3 +710,132 @@ fn codex_app_server_provider_rejects_non_absolute_cwd_before_spawn() {
     let error = validate_request(&request).expect_err("relative cwd");
     assert!(matches!(error, CodexAppServerError::RelativeCwd(_)));
 }
+
+fn cass_identity_fixture(name: &str) -> String {
+    std::fs::read_to_string(
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures")
+            .join(name),
+    )
+    .unwrap_or_else(|error| panic!("read {name}: {error}"))
+}
+
+#[test]
+fn cass_provider_identity_from_resume_is_strict_and_redacted() {
+    let resume = AuthorizedProviderResumeReceipt::resumable(
+        crate::types::ProviderResumeProvider::Codex,
+        "018f0e11-7c3a-7000-8000-000000000001",
+        vec![
+            "codex".to_string(),
+            "resume".to_string(),
+            "018f0e11-7c3a-7000-8000-000000000001".to_string(),
+        ],
+        "codex resume 018f0e11-7c3a-7000-8000-000000000001",
+        ProviderResumeCaptureSource::ProviderResponse,
+    )
+    .expect("resume");
+    let identity = crate::session::supervisor::emit_cass_provider_identity_from_resume(
+        &resume,
+        "018f0e11-7c3a-7000-8000-000000000002",
+        "018f0e11-7c3a-7000-8000-0000000000aa",
+        0,
+        crate::types::CassOrigin::Local,
+    )
+    .expect("identity");
+    let encoded = serde_json::to_value(&identity).expect("encode");
+    assert_eq!(encoded["schema_version"], "cass_provider_identity/v1");
+    assert_eq!(encoded["provider"], "codex");
+    assert!(encoded.get("adapter_id").is_none());
+    assert!(encoded.get("path").is_none());
+    assert!(encoded.get("transcript").is_none());
+    assert!(encoded.get("token").is_none());
+    assert!(encoded.get("cursor").is_none());
+    assert!(encoded.get("root").is_none());
+    crate::types::CassProviderIdentity::from_json_str(&cass_identity_fixture(
+        "cass_provider_identity_v1_local.json",
+    ))
+    .expect("local fixture");
+    assert!(
+        crate::types::CassProviderIdentity::from_json_str(&cass_identity_fixture(
+            "cass_provider_identity_v1_reject_secret.json",
+        ))
+        .is_err()
+    );
+    assert!(
+        crate::types::CassProviderIdentity::from_json_str(&cass_identity_fixture(
+            "cass_provider_identity_v1_reject_extra.json",
+        ))
+        .is_err()
+    );
+}
+
+#[allow(clippy::await_holding_lock)] // Serializes process-wide provider fixture env.
+#[tokio::test]
+async fn cass_provider_identity_refine_runs_after_uuid() {
+    let _guard = crate::test_support::ENV_LOCK
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
+    let dir = tempfile::tempdir().expect("dir");
+    let script = dir.path().join("admit");
+    std::fs::write(
+        &script,
+        r#"#!/usr/bin/env python3
+import json, sys
+req = json.load(sys.stdin)
+assert req["op"] == "refine"
+identity = req["identity"]
+assert identity["schema_version"] == "cass_provider_identity/v1"
+assert "adapter_id" not in identity
+assert "path" not in identity
+assert "token" not in identity
+subject = {
+  "schema_version": "cass_admission_subject/v1",
+  "adapter_id": "codex-jsonl-v1",
+  "source_id": "codex",
+  "producer_session_id": identity["provider_session_id"],
+  "path": "sessions/" + identity["provider_session_id"] + ".jsonl",
+  "path_template": "sessions/{provider_session_id}.jsonl",
+  "file_generation": 1,
+  "stream_id": "strm_de621cd4b4a5343ee1fe1bb2d726fdfe",
+  "cursor": {
+    "adapter_id": "codex-jsonl-v1",
+    "path": "sessions/" + identity["provider_session_id"] + ".jsonl",
+    "file_generation": 1,
+    "committed_byte_offset": 0,
+    "last_complete_record_hash": "0000000000000000000000000000000000000000000000000000000000000000"
+  },
+  "completeness": "full"
+}
+json.dump({"schema_version":"cass_admission_command/v1","ok":True,"reservation_id":req["reservation_id"],"state":"refined","subject":subject}, sys.stdout)
+"#,
+    )
+    .expect("write");
+    let mut permissions = std::fs::metadata(&script).expect("meta").permissions();
+    permissions.set_mode(0o755);
+    std::fs::set_permissions(&script, permissions).expect("chmod");
+    std::env::set_var(
+        "SKILLBOX_CASS_ADMISSION_CMD_JSON",
+        serde_json::json!([script.to_string_lossy()]).to_string(),
+    );
+    let identity = crate::types::CassProviderIdentity::from_json_str(&cass_identity_fixture(
+        "cass_provider_identity_v1_local.json",
+    ))
+    .expect("identity");
+    let reservation = crate::types::CassAdmissionReservationRef {
+        reservation_id: "rsv_de621cd4b4a5343ee1fe1bb2d726fdfe5f0c217edd9d7d969cfec3b110b49a5f"
+            .to_string(),
+        batch_id: identity.batch_id.clone(),
+        batch_index: 0,
+        index: Some(0),
+        target_id: Some("local".to_string()),
+    };
+    let subject = crate::session::supervisor::refine_cass_admission_subject(&reservation, identity)
+        .await
+        .expect("refine");
+    assert_eq!(subject.schema_version, "cass_admission_subject/v1");
+    assert_eq!(
+        subject.producer_session_id.as_deref(),
+        Some("018f0e11-7c3a-7000-8000-000000000001")
+    );
+    std::env::remove_var("SKILLBOX_CASS_ADMISSION_CMD_JSON");
+}

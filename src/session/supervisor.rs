@@ -30,10 +30,10 @@ use crate::session::spawn_command::{
     schedule_prelaunch_file_cleanup_after, shell_single_quote,
 };
 use crate::session::spawn_command::{
-    current_working_dir, enqueue_initial_request_input, initial_request_delay, initial_tool_name,
-    normalize_initial_request, normalize_requested_tmux_name, prepare_spawn_tool_command,
-    schedule_prelaunch_file_cleanup, spawn_tool_consumes_initial_request,
-    wrap_spawn_tool_command_for_tmux,
+    cleanup_prelaunch_files_now, current_working_dir, enqueue_initial_request_input,
+    initial_request_delay, initial_tool_name, normalize_initial_request,
+    normalize_requested_tmux_name, prepare_spawn_tool_command, schedule_prelaunch_file_cleanup,
+    spawn_tool_consumes_initial_request, wrap_spawn_tool_command_for_tmux,
 };
 use crate::thought::loop_runner::SessionInfo;
 #[cfg(test)]
@@ -44,7 +44,8 @@ use crate::tmux_target::{exact_session_target, TmuxTarget};
 #[cfg(test)]
 use crate::types::SUMMARY_CAUSE_TMUX_RECONCILE_MISSING;
 use crate::types::{
-    fallback_rest_state, ControlEvent, DependencyHealthSnapshot, RepoTheme, SessionBatchMembership,
+    fallback_rest_state, CassAdmissionError, CassAdmissionReservationRef, CassAdmissionSubject,
+    CassOrigin, ControlEvent, DependencyHealthSnapshot, RepoTheme, SessionBatchMembership,
     SessionState, SessionSummary, SummaryFallbackReason, TerminalSnapshot, TransportHealth,
     SUMMARY_CAUSE_PERSISTENCE_STALE,
 };
@@ -72,7 +73,36 @@ pub use self::thought_persistence::SupervisorProvider;
 use self::thought_persistence::THOUGHT_PERSIST_QUEUE_CAP;
 #[path = "providers/mod.rs"]
 mod providers;
-use self::providers::{prepare_provider_launch, unknown_launch_receipt, ProviderReceiptStore};
+use self::providers::{
+    cass_admission_command_configured, cass_provider_identity_from_resume, prepare_provider_launch,
+    refine_cass_provider_identity, run_cass_admission_command, unknown_launch_receipt,
+    ProviderReceiptStore,
+};
+
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) fn cass_admission_command_is_configured() -> bool {
+    cass_admission_command_configured()
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) async fn run_configured_cass_admission_command(
+    request: crate::types::CassAdmissionCommandRequest,
+) -> Result<crate::types::CassAdmissionCommandResponse, crate::types::CassAdmissionError> {
+    run_cass_admission_command(request).await
+}
+
+#[cfg(test)]
+pub(crate) use self::providers::{
+    cass_provider_identity_from_resume as emit_cass_provider_identity_from_resume,
+    refine_cass_provider_identity as refine_cass_admission_subject,
+    reset_cass_admission_test_hooks, take_cass_command_ops, take_codex_app_server_launch_calls,
+    take_last_cass_provider_identity,
+};
+
+#[cfg(test)]
+static TMUX_SPAWN_CALLS: AtomicUsize = AtomicUsize::new(0);
+#[cfg(test)]
+static CASS_POST_REFINEMENT_FAILURE: StdMutex<Option<&'static str>> = StdMutex::new(None);
 
 const PROCESS_EXIT_SUMMARY_TIMEOUT: Duration = Duration::from_millis(250);
 const TMUX_REDISCOVERY_INTERVAL: Duration = Duration::from_secs(10);
@@ -394,6 +424,153 @@ pub struct SessionSupervisor {
     provider_receipt_store: ProviderReceiptStore,
 }
 
+#[derive(Debug)]
+struct CassAdmissionLaunch {
+    reservation: CassAdmissionReservationRef,
+    cass_swimmers_session_id: String,
+    phase: CassAdmissionPhase,
+}
+
+pub(crate) struct CassSessionAdmission {
+    membership: SessionBatchMembership,
+    reservation: CassAdmissionReservationRef,
+}
+
+impl CassSessionAdmission {
+    pub(crate) fn new(
+        membership: SessionBatchMembership,
+        reservation: CassAdmissionReservationRef,
+    ) -> Self {
+        Self {
+            membership,
+            reservation,
+        }
+    }
+}
+
+struct SessionBatchLaunch {
+    membership: Option<SessionBatchMembership>,
+    cass_reservation: Option<CassAdmissionReservationRef>,
+}
+
+#[derive(Default)]
+struct PrelaunchFileCleanupGuard {
+    paths: Vec<PathBuf>,
+}
+
+impl PrelaunchFileCleanupGuard {
+    fn replace(&mut self, paths: Vec<PathBuf>) {
+        cleanup_prelaunch_files_now(&self.paths);
+        self.paths = paths;
+    }
+
+    fn launch_started(&mut self) {
+        schedule_prelaunch_file_cleanup(std::mem::take(&mut self.paths));
+    }
+}
+
+impl Drop for PrelaunchFileCleanupGuard {
+    fn drop(&mut self) {
+        cleanup_prelaunch_files_now(&self.paths);
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CassAdmissionPhase {
+    Reserved,
+    Consuming,
+    Consumed,
+    Refining,
+    Refined,
+    Releasing,
+    Released,
+    Reconciling,
+    Reconciled,
+    DurableSessionSuccess,
+}
+
+impl CassAdmissionLaunch {
+    fn new(
+        reservation: CassAdmissionReservationRef,
+        batch: Option<&SessionBatchMembership>,
+        swimmers_session_id: String,
+    ) -> Result<Self, CassAdmissionError> {
+        reservation.validate()?;
+        let batch = batch.ok_or_else(|| {
+            CassAdmissionError::new(
+                "reservation_mismatch",
+                "enforce mode requires canonical batch membership",
+            )
+        })?;
+        let reservation_index = reservation.index.unwrap_or(reservation.batch_index) as usize;
+        if batch.id != reservation.batch_id || batch.index != reservation_index {
+            return Err(CassAdmissionError::new(
+                "reservation_mismatch",
+                "Cass reservation does not match canonical batch membership",
+            ));
+        }
+        if reservation.target_id.as_deref() != Some("local") {
+            return Err(CassAdmissionError::new(
+                "reservation_mismatch",
+                "Cass reservation is not bound to the target-local admission authority",
+            ));
+        }
+        Ok(Self {
+            reservation,
+            cass_swimmers_session_id: swimmers_session_id,
+            phase: CassAdmissionPhase::Reserved,
+        })
+    }
+}
+
+impl Drop for CassAdmissionLaunch {
+    fn drop(&mut self) {
+        if matches!(
+            self.phase,
+            CassAdmissionPhase::Released
+                | CassAdmissionPhase::Reconciled
+                | CassAdmissionPhase::DurableSessionSuccess
+        ) {
+            return;
+        }
+        let reservation_id = self.reservation.reservation_id.clone();
+        let Ok(runtime) = tokio::runtime::Handle::try_current() else {
+            warn!(
+                reservation_id,
+                "Cass launch dropped unresolved outside a Tokio runtime"
+            );
+            return;
+        };
+        runtime.spawn(async move {
+            let result =
+                run_cass_admission_command(crate::types::CassAdmissionCommandRequest::reconcile(
+                    &reservation_id,
+                    "provider_ambiguity",
+                ))
+                .await;
+            match result {
+                Ok(response)
+                    if response.ok
+                        && response.reservation_id.as_deref() == Some(reservation_id.as_str())
+                        && response.state.as_deref() == Some("unresolved") => {}
+                Ok(response) => warn!(
+                    cass_error_code = response
+                        .error
+                        .as_ref()
+                        .map(|error| error.code.as_str())
+                        .unwrap_or("partial_result"),
+                    reservation_id, "Cass cancellation reconciliation returned an unbound result"
+                ),
+                Err(error) => warn!(
+                    cass_error_code = %error.code,
+                    reservation_id,
+                    "failed to reconcile a cancellation-dropped Cass launch"
+                ),
+            }
+        });
+    }
+}
+
 #[derive(Default)]
 struct ActivePaneCache {
     by_target: HashMap<TmuxTarget, ActivePaneCacheEntry>,
@@ -412,11 +589,11 @@ impl SessionSupervisor {
         {
             let data_dir =
                 std::env::temp_dir().join(format!("swimmers-supervisor-test-{}", Uuid::new_v4()));
-            return Self::new_with_stores(
+            Self::new_with_stores(
                 config,
                 ProviderReceiptStore::new(data_dir.clone()),
                 data_dir.join(EXACT_CLEANUP_RECEIPT_DIR),
-            );
+            )
         }
         #[cfg(not(test))]
         {
@@ -831,15 +1008,81 @@ impl SessionSupervisor {
         tmux_target: Option<TmuxTarget>,
         batch: Option<SessionBatchMembership>,
     ) -> anyhow::Result<(SessionSummary, Option<RepoTheme>)> {
+        self.create_session_with_target_batch_and_optional_cass(
+            name,
+            cwd,
+            spawn_tool,
+            initial_request,
+            tmux_target,
+            SessionBatchLaunch {
+                membership: batch,
+                cass_reservation: None,
+            },
+        )
+        .await
+    }
+
+    pub(crate) async fn create_session_with_target_batch_and_cass(
+        self: &Arc<Self>,
+        name: Option<String>,
+        cwd: Option<String>,
+        spawn_tool: Option<crate::types::SpawnTool>,
+        initial_request: Option<String>,
+        tmux_target: Option<TmuxTarget>,
+        admission: CassSessionAdmission,
+    ) -> anyhow::Result<(SessionSummary, Option<RepoTheme>)> {
+        self.create_session_with_target_batch_and_optional_cass(
+            name,
+            cwd,
+            spawn_tool,
+            initial_request,
+            tmux_target,
+            SessionBatchLaunch {
+                membership: Some(admission.membership),
+                cass_reservation: Some(admission.reservation),
+            },
+        )
+        .await
+    }
+
+    async fn create_session_with_target_batch_and_optional_cass(
+        self: &Arc<Self>,
+        name: Option<String>,
+        cwd: Option<String>,
+        spawn_tool: Option<crate::types::SpawnTool>,
+        initial_request: Option<String>,
+        tmux_target: Option<TmuxTarget>,
+        batch_launch: SessionBatchLaunch,
+    ) -> anyhow::Result<(SessionSummary, Option<RepoTheme>)> {
+        let SessionBatchLaunch {
+            membership: batch,
+            cass_reservation,
+        } = batch_launch;
         let start_cwd = cwd.or_else(current_working_dir);
         let mut initial_request = normalize_initial_request(initial_request);
         let tmux_target = tmux_target.unwrap_or_else(|| self.config.tmux_target.clone());
-        tmux_target.validate()?;
         let tmux_name = self.allocate_tmux_name(name);
-        let session_id = self.allocate_unique_session_id().await;
+        let (session_id, mut cass_launch) = match cass_reservation {
+            Some(reservation) => {
+                // Arm cancellation reconciliation before the first await. A
+                // canceled request must not drop an admitted reservation while
+                // UUID uniqueness checks are waiting on supervisor locks.
+                let candidate = Uuid::new_v4().to_string();
+                let mut launch = CassAdmissionLaunch::new(reservation, batch.as_ref(), candidate)?;
+                let session_id = self.allocate_unique_cass_session_id(&mut launch).await;
+                (session_id, Some(launch))
+            }
+            None => (self.allocate_unique_session_id().await, None),
+        };
+
+        if let Err(error) = tmux_target.validate() {
+            self.release_cass_launch(&mut cass_launch).await?;
+            return Err(error);
+        }
 
         if let Some(dir) = start_cwd.as_deref() {
             if !Path::new(dir).is_dir() {
+                self.release_cass_launch(&mut cass_launch).await?;
                 return Err(anyhow::anyhow!(
                     "session cwd does not exist or is not a directory: {dir}"
                 ));
@@ -854,12 +1097,30 @@ impl SessionSupervisor {
         );
 
         let initial_tool = initial_tool_name(spawn_tool.as_ref());
-        let mut prelaunch_cleanup_paths = Vec::new();
-        let mut provider_launch =
-            prepare_provider_launch(spawn_tool, start_cwd.as_deref(), initial_request.as_deref())
+        let mut prelaunch_cleanup = PrelaunchFileCleanupGuard::default();
+        if let Some(launch) = cass_launch.as_mut() {
+            self.consume_cass_reservation_before_provider(launch)
                 .await?;
+        }
+        let provider_launch_result =
+            prepare_provider_launch(spawn_tool, start_cwd.as_deref(), initial_request.as_deref())
+                .await;
+        let mut provider_launch = match provider_launch_result {
+            Ok(launch) => launch,
+            Err(error) => {
+                self.reconcile_cass_launch(&mut cass_launch, "provider_ambiguity")
+                    .await?;
+                return Err(error);
+            }
+        };
+        if let Some(provider_launch) = provider_launch.as_mut() {
+            prelaunch_cleanup.replace(provider_launch.take_cleanup_paths());
+        }
+        if let Some(launch) = cass_launch.as_mut() {
+            self.refine_cass_after_provider_uuid(launch, provider_launch.as_ref())
+                .await?;
+        }
         let initial_command = if let Some(provider_launch) = provider_launch.as_mut() {
-            prelaunch_cleanup_paths = provider_launch.take_cleanup_paths();
             initial_request = None;
             Some(wrap_spawn_tool_command_for_tmux(provider_launch.command()))
         } else {
@@ -869,7 +1130,7 @@ impl SessionSupervisor {
                     start_cwd.as_deref(),
                     initial_request.as_deref(),
                 );
-                prelaunch_cleanup_paths = command.cleanup_paths;
+                prelaunch_cleanup.replace(command.cleanup_paths);
                 if spawn_tool_consumes_initial_request(tool) {
                     initial_request = None;
                 }
@@ -885,27 +1146,38 @@ impl SessionSupervisor {
         // `discovery_lock -> sessions.write` matches them, so no deadlock; the
         // only cost is serializing creates against discovery.
         let discovery_guard = self.discovery_lock.lock().await;
-        let handle = match crate::session::actor::SessionActor::spawn(
-            session_id.clone(),
-            tmux_name.clone(),
-            tmux_target.clone(),
-            false, // create new
-            start_cwd.clone(),
-            initial_tool.clone(),
-            initial_command,
-            self.config.clone(),
-            None,
-            batch.clone(),
-        ) {
-            Ok(handle) => handle,
+        let handle = match cass_post_refinement_fault("tmux_spawn_failure").and_then(|()| {
+            crate::session::actor::SessionActor::spawn(
+                session_id.clone(),
+                tmux_name.clone(),
+                tmux_target.clone(),
+                false, // create new
+                start_cwd.clone(),
+                initial_tool.clone(),
+                initial_command,
+                self.config.clone(),
+                None,
+                batch.clone(),
+            )
+        }) {
+            Ok(handle) => {
+                record_tmux_spawn_attempt();
+                prelaunch_cleanup.launch_started();
+                handle
+            }
             Err(err) => {
-                schedule_prelaunch_file_cleanup(prelaunch_cleanup_paths);
+                self.reconcile_cass_launch(&mut cass_launch, "tmux_spawn_failure")
+                    .await?;
                 return Err(err);
             }
         };
         let bootstrap_handle = handle.clone();
 
-        if let Err(error) = self.insert_active_handle(session_id.clone(), handle).await {
+        let insert_result = match cass_post_refinement_fault("cleanup_authority_failure") {
+            Ok(()) => self.insert_active_handle(session_id.clone(), handle).await,
+            Err(error) => Err(error),
+        };
+        if let Err(error) = insert_result {
             if let Err(kill_error) =
                 kill_tmux_session(&bootstrap_handle.tmux_name, &bootstrap_handle.tmux_target).await
             {
@@ -916,7 +1188,8 @@ impl SessionSupervisor {
                 );
             }
             let _ = bootstrap_handle.cmd_tx.send(SessionCommand::Shutdown).await;
-            schedule_prelaunch_file_cleanup(prelaunch_cleanup_paths);
+            self.reconcile_cass_launch(&mut cass_launch, "cleanup_authority_failure")
+                .await?;
             return Err(error.context("exact cleanup authority persistence failed"));
         }
         // Release the discovery lock as soon as the handle is registered; the
@@ -934,33 +1207,51 @@ impl SessionSupervisor {
             .await;
         let repo_theme = self.resolve_repo_theme_for_summary(&mut summary);
         if let Some(provider_launch) = provider_launch.as_mut() {
-            if let Err(error) = provider_launch.confirm_started().await {
+            let confirm_result = match cass_post_refinement_fault("provider_start_failure") {
+                Ok(()) => provider_launch.confirm_started().await,
+                Err(error) => Err(error),
+            };
+            if let Err(error) = confirm_result {
                 self.rollback_provider_launch(&session_id, &bootstrap_handle)
                     .await;
-                schedule_prelaunch_file_cleanup(prelaunch_cleanup_paths);
+                self.reconcile_cass_launch(&mut cass_launch, "provider_start_failure")
+                    .await?;
                 return Err(error);
             }
         }
         let launch_receipt =
             crate::types::LaunchReceipt::local(summary.cwd.clone(), session_id.clone(), false);
-        let provider_receipt = match provider_launch {
-            Some(provider_launch) => provider_launch.finalize(launch_receipt),
-            None => Ok(unknown_launch_receipt(launch_receipt, spawn_tool)),
-        };
+        let provider_receipt =
+            cass_post_refinement_fault("provider_receipt_failure").and_then(|()| {
+                match provider_launch {
+                    Some(provider_launch) => provider_launch.finalize(launch_receipt),
+                    None => Ok(unknown_launch_receipt(launch_receipt, spawn_tool)),
+                }
+            });
         let provider_receipt = match provider_receipt {
             Ok(receipt) => receipt,
             Err(error) => {
                 self.rollback_provider_launch(&session_id, &bootstrap_handle)
                     .await;
-                schedule_prelaunch_file_cleanup(prelaunch_cleanup_paths);
+                self.reconcile_cass_launch(&mut cass_launch, "provider_receipt_failure")
+                    .await?;
                 return Err(error);
             }
         };
         if provider_receipt.provider_resume().is_resumable() {
-            if let Err(error) = self.provider_receipt_store.persist(&provider_receipt).await {
+            let persist_result =
+                match cass_post_refinement_fault("provider_receipt_persistence_failure") {
+                    Ok(()) => self.provider_receipt_store.persist(&provider_receipt).await,
+                    Err(error) => Err(error),
+                };
+            if let Err(error) = persist_result {
                 self.rollback_provider_launch(&session_id, &bootstrap_handle)
                     .await;
-                schedule_prelaunch_file_cleanup(prelaunch_cleanup_paths);
+                self.reconcile_cass_launch(
+                    &mut cass_launch,
+                    "provider_receipt_persistence_failure",
+                )
+                .await?;
                 return Err(error.context("durable provider receipt persistence failed"));
             }
         }
@@ -978,8 +1269,180 @@ impl SessionSupervisor {
         );
         self.emit_created_session(&session_id, &summary, repo_theme.clone());
         self.persist_registry().await;
+        if let Some(launch) = cass_launch.as_mut() {
+            launch.phase = CassAdmissionPhase::DurableSessionSuccess;
+        }
 
         Ok((summary, repo_theme))
+    }
+
+    async fn consume_cass_reservation_before_provider(
+        &self,
+        launch: &mut CassAdmissionLaunch,
+    ) -> anyhow::Result<()> {
+        if !cass_admission_command_configured() {
+            return Err(anyhow::Error::new(CassAdmissionError::new(
+                "admission_command_unavailable",
+                "target admission command unavailable in enforce mode",
+            )));
+        }
+        launch.phase = CassAdmissionPhase::Consuming;
+        let response = match run_cass_admission_command(
+            crate::types::CassAdmissionCommandRequest::consume(&launch.reservation),
+        )
+        .await
+        {
+            Ok(response) => response,
+            Err(error) => {
+                self.reconcile_cass_launch_ref(launch, "transport_loss")
+                    .await?;
+                return Err(anyhow::Error::new(error));
+            }
+        };
+        if !response.ok {
+            let error = response
+                .error
+                .unwrap_or(crate::types::CassAdmissionCommandError {
+                    code: "reservation_mismatch".to_string(),
+                    message: "reservation consume refused".to_string(),
+                });
+            self.reconcile_cass_launch_ref(launch, "partial_result")
+                .await?;
+            return Err(anyhow::Error::new(CassAdmissionError::new(
+                error.code,
+                error.message,
+            )));
+        }
+        if response.reservation_id.as_deref() != Some(launch.reservation.reservation_id.as_str())
+            || response.batch_id.as_deref() != Some(launch.reservation.batch_id.as_str())
+            || response.batch_index != Some(launch.reservation.batch_index)
+            || !matches!(response.state.as_deref(), Some("reserved" | "consumed"))
+        {
+            self.reconcile_cass_launch_ref(launch, "partial_result")
+                .await?;
+            return Err(anyhow::Error::new(CassAdmissionError::new(
+                "partial_result",
+                "reservation consume returned an unbound result",
+            )));
+        }
+        launch.phase = CassAdmissionPhase::Consumed;
+        Ok(())
+    }
+
+    async fn refine_cass_after_provider_uuid(
+        &self,
+        launch: &mut CassAdmissionLaunch,
+        provider_launch: Option<&self::providers::PreparedProviderLaunch>,
+    ) -> anyhow::Result<()> {
+        let Some(provider_launch) = provider_launch else {
+            self.release_cass_launch_ref(launch).await?;
+            return Err(anyhow::Error::new(CassAdmissionError::new(
+                "provider_unavailable",
+                "Cass enforce mode requires a provider launch with a captured session UUID",
+            )));
+        };
+        let Some(resume) = provider_launch.captured_resume() else {
+            self.release_cass_launch_ref(launch).await?;
+            return Err(anyhow::Error::new(CassAdmissionError::new(
+                "provider_unavailable",
+                "Cass enforce mode provider cannot supply a pre-spawn session UUID",
+            )));
+        };
+        let identity = match cass_provider_identity_from_resume(
+            resume,
+            &launch.cass_swimmers_session_id,
+            &launch.reservation.batch_id,
+            launch.reservation.batch_index,
+            cass_origin_for_target(launch.reservation.target_id.as_deref()),
+        ) {
+            Ok(identity) => identity,
+            Err(error) => {
+                self.reconcile_cass_launch_ref(launch, "refinement_failure")
+                    .await?;
+                return Err(anyhow::Error::new(error));
+            }
+        };
+        launch.phase = CassAdmissionPhase::Refining;
+        match refine_cass_provider_identity(&launch.reservation, identity).await {
+            Ok(subject) => {
+                let _subject: CassAdmissionSubject = subject;
+                launch.phase = CassAdmissionPhase::Refined;
+                Ok(())
+            }
+            Err(error) => {
+                self.reconcile_cass_launch_ref(launch, reconcile_cause_for(&error))
+                    .await?;
+                Err(anyhow::Error::new(error))
+            }
+        }
+    }
+
+    async fn reconcile_cass_launch(
+        &self,
+        launch: &mut Option<CassAdmissionLaunch>,
+        cause: &str,
+    ) -> Result<(), CassAdmissionError> {
+        if let Some(launch) = launch.as_mut() {
+            self.reconcile_cass_launch_ref(launch, cause).await?;
+        }
+        Ok(())
+    }
+
+    async fn reconcile_cass_launch_ref(
+        &self,
+        launch: &mut CassAdmissionLaunch,
+        cause: &str,
+    ) -> Result<(), CassAdmissionError> {
+        if matches!(
+            launch.phase,
+            CassAdmissionPhase::Released
+                | CassAdmissionPhase::Reconciled
+                | CassAdmissionPhase::DurableSessionSuccess
+        ) {
+            return Ok(());
+        }
+        launch.phase = CassAdmissionPhase::Reconciling;
+        let response =
+            run_cass_admission_command(crate::types::CassAdmissionCommandRequest::reconcile(
+                &launch.reservation.reservation_id,
+                cause,
+            ))
+            .await?;
+        validate_cass_settlement_response(&response, launch, "unresolved")?;
+        launch.phase = CassAdmissionPhase::Reconciled;
+        Ok(())
+    }
+
+    async fn release_cass_launch(
+        &self,
+        launch: &mut Option<CassAdmissionLaunch>,
+    ) -> Result<(), CassAdmissionError> {
+        if let Some(launch) = launch.as_mut() {
+            self.release_cass_launch_ref(launch).await?;
+        }
+        Ok(())
+    }
+
+    async fn release_cass_launch_ref(
+        &self,
+        launch: &mut CassAdmissionLaunch,
+    ) -> Result<(), CassAdmissionError> {
+        if matches!(
+            launch.phase,
+            CassAdmissionPhase::Released
+                | CassAdmissionPhase::Reconciled
+                | CassAdmissionPhase::DurableSessionSuccess
+        ) {
+            return Ok(());
+        }
+        launch.phase = CassAdmissionPhase::Releasing;
+        let response = run_cass_admission_command(
+            crate::types::CassAdmissionCommandRequest::release(&launch.reservation.reservation_id),
+        )
+        .await?;
+        validate_cass_settlement_response(&response, launch, "released")?;
+        launch.phase = CassAdmissionPhase::Released;
+        Ok(())
     }
 
     async fn rollback_provider_launch(&self, session_id: &str, handle: &ActorHandle) {
@@ -1037,7 +1500,9 @@ impl SessionSupervisor {
         handle: ActorHandle,
     ) -> anyhow::Result<()> {
         let tmux_incarnation =
-            match query_tmux_session_incarnation(&handle.tmux_name, &handle.tmux_target).await? {
+            match query_tmux_session_incarnation_retry(&handle.tmux_name, &handle.tmux_target)
+                .await?
+            {
                 Some(incarnation) => incarnation,
                 None => {
                     anyhow::bail!("new tmux session disappeared before cleanup authority binding")
@@ -1813,6 +2278,37 @@ impl SessionSupervisor {
         }
     }
 
+    async fn allocate_unique_cass_session_id(&self, launch: &mut CassAdmissionLaunch) -> String {
+        loop {
+            let candidate = launch.cass_swimmers_session_id.clone();
+
+            if self.sessions.read().await.contains_key(&candidate) {
+                launch.cass_swimmers_session_id = Uuid::new_v4().to_string();
+                continue;
+            }
+            if self
+                .stale_sessions
+                .read()
+                .await
+                .iter()
+                .any(|session| session.session_id == candidate)
+            {
+                launch.cass_swimmers_session_id = Uuid::new_v4().to_string();
+                continue;
+            }
+            if self
+                .exact_cleanup_states
+                .read()
+                .await
+                .contains_key(&candidate)
+            {
+                launch.cass_swimmers_session_id = Uuid::new_v4().to_string();
+                continue;
+            }
+            return candidate;
+        }
+    }
+
     fn bump_id_counter_from_session_id(&self, session_id: &str) {
         if let Some(next) = next_session_counter(session_id) {
             self.next_id_counter.fetch_max(next, Ordering::SeqCst);
@@ -1943,6 +2439,100 @@ fn exact_cleanup_hex_name(value: &str) -> String {
         .iter()
         .map(|byte| format!("{byte:02x}"))
         .collect()
+}
+
+fn cass_origin_for_target(target_id: Option<&str>) -> CassOrigin {
+    match target_id.map(str::trim) {
+        Some("remote") => CassOrigin::Remote,
+        Some(target) if !target.is_empty() && target != "local" => {
+            crate::types::cass_publisher_locality_from_env()
+        }
+        _ => crate::types::cass_publisher_locality_from_env(),
+    }
+}
+
+fn reconcile_cause_for(error: &CassAdmissionError) -> &'static str {
+    match error.code.as_str() {
+        "transport_loss" => "transport_loss",
+        "partial_result" => "partial_result",
+        "provider_ambiguity" => "provider_ambiguity",
+        _ => "refinement_failure",
+    }
+}
+
+fn validate_cass_settlement_response(
+    response: &crate::types::CassAdmissionCommandResponse,
+    launch: &CassAdmissionLaunch,
+    expected_state: &str,
+) -> Result<(), CassAdmissionError> {
+    if !response.ok {
+        let error = response
+            .error
+            .clone()
+            .unwrap_or(crate::types::CassAdmissionCommandError {
+                code: "partial_result".to_string(),
+                message: "Cass settlement command was refused".to_string(),
+            });
+        return Err(CassAdmissionError::new(error.code, error.message));
+    }
+    if response.reservation_id.as_deref() != Some(launch.reservation.reservation_id.as_str())
+        || response.state.as_deref() != Some(expected_state)
+    {
+        return Err(CassAdmissionError::new(
+            "partial_result",
+            "Cass settlement command returned an unbound result",
+        ));
+    }
+    Ok(())
+}
+
+fn cass_post_refinement_fault(point: &'static str) -> anyhow::Result<()> {
+    #[cfg(test)]
+    {
+        if CASS_POST_REFINEMENT_FAILURE
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .as_ref()
+            .is_some_and(|configured| *configured == point)
+        {
+            anyhow::bail!("injected Cass post-refinement failure at {point}");
+        }
+    }
+    let _ = point;
+    Ok(())
+}
+
+#[cfg(test)]
+pub(crate) fn set_cass_post_refinement_failure(point: Option<&'static str>) {
+    *CASS_POST_REFINEMENT_FAILURE
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner()) = point;
+}
+
+fn record_tmux_spawn_attempt() {
+    #[cfg(test)]
+    TMUX_SPAWN_CALLS.fetch_add(1, Ordering::SeqCst);
+}
+
+#[cfg(test)]
+pub(crate) fn take_tmux_spawn_calls() -> usize {
+    TMUX_SPAWN_CALLS.swap(0, Ordering::SeqCst)
+}
+
+async fn query_tmux_session_incarnation_retry(
+    tmux_name: &str,
+    tmux_target: &TmuxTarget,
+) -> anyhow::Result<Option<TmuxSessionIncarnation>> {
+    const ATTEMPTS: usize = 8;
+    for attempt in 0..ATTEMPTS {
+        if let Some(incarnation) = query_tmux_session_incarnation(tmux_name, tmux_target).await? {
+            return Ok(Some(incarnation));
+        }
+        if attempt + 1 < ATTEMPTS {
+            tokio::time::sleep(std::time::Duration::from_millis(15)).await;
+        }
+    }
+    Ok(None)
 }
 
 async fn query_tmux_session_incarnation(

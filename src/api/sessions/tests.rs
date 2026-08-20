@@ -600,7 +600,15 @@ fn install_fake_tmux(script: &str) -> (TempDir, TestPathGuard) {
 
 const FAKE_TMUX_FOR_CREATE: &str = r##"#!/bin/sh
 set -eu
-cmd="${1-}"
+cmd=""
+for arg in "$@"; do
+  case "$arg" in
+    new-session|attach-session|send-keys|kill-session|display-message|capture-pane|list-sessions)
+      cmd="$arg"
+      break
+      ;;
+  esac
+done
 sessions="${0%/*}/sessions"
 case "$cmd" in
   new-session)
